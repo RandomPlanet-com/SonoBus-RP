@@ -9,7 +9,8 @@ This repository holds both halves:
 
 - **SonoBus RP**, the player (`Source/`, the `SonoBus` targets). Runs on macOS and Linux.
 - **SonoBus RP Hub**, the server (`Source/SonobusHub*`, the `SonoBusHub` target). Runs on macOS (window) and
-  Linux (headless, with a built-in web page for status and settings).
+  Linux (headless, with a built-in web page for status and settings). Setup and hosting guide:
+  [SonoBus-RP-Hub](https://github.com/RandomPlanet-com/SonoBus-RP-Hub).
 
 Downloads and install instructions: <https://randomplanet.com>
 
