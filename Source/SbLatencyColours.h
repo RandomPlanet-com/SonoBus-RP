@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SbLatencyColours.h: one set of latency colour thresholds shared by the client (peer rows + top bar), the hub web
 // page and the hub Mac GUI. Green = a real, playable case; yellow = marginal; red = almost unplayable.
 #pragma once

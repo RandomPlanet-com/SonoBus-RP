@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // Channel names out of a player's /sb/clayinfo blob (a JUCE ValueTree written to a stream by
 // SonobusAudioProcessor::getSendUserFormatLayoutTree: children with "name", "numchan", "chanstart"). One entry per
 // channel so the hub page / Mac GUI can list "1 Vocal, 2 Guitar 1, 3 Guitar 2, …" on hover. Control path only.

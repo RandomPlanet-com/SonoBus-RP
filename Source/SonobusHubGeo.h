@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonobusHubGeo — player city/state lookup shared by the Linux web page and the Mac hub GUI.
 // One worker thread, one plain HTTP GET to ip-api.com per public IP for the life of the process (3 s timeout), results
 // cached; private/LAN addresses never leave the machine. Also the platform string used in both headers.

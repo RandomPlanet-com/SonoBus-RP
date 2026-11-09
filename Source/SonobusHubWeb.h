@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonobusHubWeb
 // A tiny dependency-free HTTP/1.1 status server inside the hub: GET / = the status page, GET /api/status = JSON built
 // from SonobusHubServer::snapshotForUI() (the same numbers the Mac hub GUI shows). Optional Basic auth (--web-password).

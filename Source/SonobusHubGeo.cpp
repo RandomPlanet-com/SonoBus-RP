@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // See SonobusHubGeo.h (moved out of SonobusHubWeb.cpp so the Mac GUI shares it)
 #include "SonobusHubGeo.h"
 #include "JuceHeader.h"

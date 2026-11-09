@@ -208,7 +208,7 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         NEEDS_MIDI_OUTPUT TRUE
         EDITOR_WANTS_KEYBOARD_FOCUS TRUE
         COMPANY_NAME "Random Planet"   # Random Planet publishes the player too
-        COMPANY_COPYRIGHT "© 2026 Random Planet"   # Finder Get Info "Copyright" line (NSHumanReadableCopyright)
+        COMPANY_COPYRIGHT "© 2026 Jason Buecker (Random Planet)"   # Finder Get Info "Copyright" line (NSHumanReadableCopyright)
         BUNDLE_ID "${bundle_id}"
         MICROPHONE_PERMISSION_ENABLED TRUE
         
@@ -776,7 +776,7 @@ if (APPLE)   # the hub is macOS-only (mach timing, bundle stamping); Linux/Windo
 juce_add_gui_app(SonoBusHub
     PRODUCT_NAME "sonobus-hub"
     COMPANY_NAME "Random Planet"   # the hub is Random Planet's own product (the client keeps Sonosaurus)
-    COMPANY_COPYRIGHT "© 2026 Random Planet"   # NSHumanReadableCopyright
+    COMPANY_COPYRIGHT "© 2026 Jason Buecker (Random Planet)"   # NSHumanReadableCopyright
     BUNDLE_ID "com.randomplanet.SonoBusRPHub"   # release identity
     # the hub gets its own app icon — the SonoBus icon re-coloured to the hub
     # GUI's teal palette (images/make_hub_icon.py regenerates it from sonobus_icon_mac_1024.png).

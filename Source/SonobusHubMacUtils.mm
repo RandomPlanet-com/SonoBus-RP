@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonobusHubMacUtils.mm — own code, see SonobusHubMacUtils.h. Hub target only (CMakeLists.txt).
 #include "SonobusHubMacUtils.h"
 

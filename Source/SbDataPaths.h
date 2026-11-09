@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // Where the player keeps its files. Plain C++ so the audio library can use it too.
 #pragma once
 #include <cstdlib>

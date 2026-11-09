@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
 // Copyright (C) 2020 Jesse Chappell
+// Modifications Copyright (C) 2026 Jason Buecker (Random Planet)
 
 
 #pragma once

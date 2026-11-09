@@ -1,7 +1,7 @@
 SonoBus RP Hub — third-party notices
 ====================================
 
-SonoBus RP Hub is (c) 2026 Random Planet (Jason Buecker). It is built with the following third-party
+SonoBus RP Hub is (c) 2026 Jason Buecker (Random Planet). It is built with the following third-party
 software, reproduced here with their licences as required.
 
 -----------------------------------------------------------------------------------------------------

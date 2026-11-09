@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP — Hub Server entry point.
 //
 // Default = GUI (juce_add_gui_app).

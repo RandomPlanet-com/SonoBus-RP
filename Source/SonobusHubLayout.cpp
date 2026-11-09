@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 #include "SonobusHubLayout.h"
 #include <juce_core/juce_core.h>
 #include <juce_data_structures/juce_data_structures.h>

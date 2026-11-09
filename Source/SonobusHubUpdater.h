@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonobusHubUpdater: finds new hub releases and replaces this copy of the hub.
 #pragma once
 #include "JuceHeader.h"

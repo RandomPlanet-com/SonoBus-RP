@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP release identity. Stamped into Info.plist at notarization:
 //   CFBundleShortVersionString = marketing version (1.0.0, from CMake SONOBUS_PLUS_VERSION),
 //   CFBundleVersion = the date build id (YYYY.MM.DD.HHMM[-dev]), SBPlusCommit = source commit,

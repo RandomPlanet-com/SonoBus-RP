@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 #pragma once
 // A foleys::LevelMeter whose tooltip names only the bar the mouse is over. The bar is found with the same
 // look-and-feel geometry the meter paints with (getMeterInnerBounds / getMeterBounds), so the name follows the mouse

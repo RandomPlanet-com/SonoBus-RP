@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // Phase 3: OSC control-channel messages from a SonoBus client to the hub for
 // per-listener overrides of how each *other* peer is mixed into this listener's
 // mix-minus-self output. Both messages are sent over the existing per-peer UDP

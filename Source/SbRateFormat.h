@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
+// Copyright (C) 2026 Jason Buecker (Random Planet)
 // SbRateFormat.h: one bandwidth format for the client, the hub Mac window and (mirrored in JS) the hub web page. Bits
 // everywhere, so users can compare with their upload speed; whole kb/s below 1 Mb/s, one decimal above.
 //   328 kb/s · 2.6 Mb/s · "-" when unknown. Input is bits per second.
