@@ -1,0 +1,48 @@
+# macOS noise
+.DS_Store
+
+# Local runtime/status artifacts
+.autobuild_batch
+.autobuild_last_sig
+.autobuild.pid
+.autobuild.stop
+.last_idle_time
+STATUS.md
+
+# Logs
+logs/
+*.log
+
+# Build directories
+build/
+build-*/
+**/CMakeFiles/
+**/Testing/
+
+# CMake/generated files
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Binary/artifact outputs
+*.a
+*.o
+
+# Latency/sync test audio (script-generated; .venv from agent build)
+test-audio/.venv/
+*.so
+*.dylib
+*.dll
+*.exe
+*.app/
+*.vst3/
+*.component/
+*.lv2/
+
+# Misc local scratch
+.trash/
+
+# Local keychain-setup artifacts (signing reads from the macOS keychain,
+# not from these files — see comment in repo history)
+*.cer
