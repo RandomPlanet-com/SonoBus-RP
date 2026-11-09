@@ -557,7 +557,6 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/dispminimal.svg
         images/dots.svg
         images/dots_icon.png
-        images/dots_menu.png
         images/expand_arrow_active.svg
         images/expand_arrow_inactive.svg
         images/eyedropper.svg
@@ -566,20 +565,13 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/folder_icon.svg
         images/hear-others.svg
         images/hold.svg
-        images/incoming_allowed.svg
-        images/incoming_allowed_active.svg
-        images/incoming_disallowed.svg
         images/keyboard.svg
         images/keyboard_disabled.svg
         images/keypad-num-disabled.svg
         images/keypad-num.svg
         images/lgc_bar.wav
         images/link.svg
-        images/link_all.svg
-        images/link_up.svg
-        images/list_icon1.png
         images/loop_icon.svg
-        images/loop_off_icon.png
         images/met.svg
         images/mic.svg
         images/mic_disabled.svg
@@ -589,15 +581,10 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/mute-others.svg
         images/network.svg
         images/oneshot.svg
-        images/outgoing_allowed.svg
-        images/outgoing_allowed_active.svg
-        images/outgoing_disallowed.svg
         images/paste_icon.svg
         images/pause_icon.svg
         images/people.png
-        images/people.svg
         images/person.png
-        images/person.svg
         images/play_back_to_back.svg
         images/play_icon.svg
         images/play_simultaneous.svg
@@ -606,7 +593,6 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/power.svg
         images/power_sel.svg
         images/record.svg
-        images/record_active.svg
         images/record_active_alt.svg
         images/rectape.svg
         images/reset_buffer_icon.svg
@@ -618,15 +604,12 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/skipback_icon.svg
         images/skipforward_icon.svg
         images/sonobus_logo_96.png
-        images/sonobus_title_small.png
         images/soundboard.svg
-        images/speaker.svg
         images/speaker_disabled.svg
         images/speaker_disabled_grey.svg
         images/stop.svg
         images/toggle.svg
         images/triangle_disclosure.svg
-        images/triangle_disclosure_right.svg
         images/urei_main.wav
         images/videocam-outline.svg
         images/x_icon.svg
