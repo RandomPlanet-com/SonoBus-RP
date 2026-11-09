@@ -43,5 +43,6 @@ The player is built as `SonoBus_artefacts/Release/Standalone/`, the hub as `Sono
 
 ## License
 
+Copyright (C) 2026 Jason Buecker (Random Planet), based on SonoBus by Jesse Chappell.
 GNU General Public License version 3 (see `LICENSE` and `LICENSE_EXCEPTION`). Third-party notices for the hub are in
 `LICENSES-HUB.txt`.
