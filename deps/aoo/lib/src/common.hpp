@@ -37,7 +37,8 @@ public:
     void read(aoo_sample* data, int32_t n);
     // High-quality interpolation: 16-tap Kaiser-windowed sinc, 512 fractional phases (table built once,
     // shared). 2-tap linear is -6 dB at Nyquist at half-phase, sweeping at the drift rate.
-    // Costs 8 frames of look-ahead inside the resampler (0.17 ms @48k). Off = 2-tap linear.
+    // Costs 8 frames of look-ahead inside the resampler (0.17 ms @48k), primed as silence at reset.
+    // Off = 2-tap linear. Set before setup(): the reset reads it.
     void set_hq(bool on) { hq_ = on; }
     static void warm_sinc() { (void) sinc_table(); }   // build the table off the audio thread
     bool hq() const { return hq_; }

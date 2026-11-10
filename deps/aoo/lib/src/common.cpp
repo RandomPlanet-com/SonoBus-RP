@@ -877,6 +877,14 @@ void dynamic_resampler::reset_positions(){
     rdpos_ = 0;
     wrpos_ = 0;
     balance_ = 0;
+    if (hq_ && !buffer_.empty()){
+        // Start with the sinc look-ahead already in the ring, as silence. The first block is then
+        // readable as soon as it is written; without this a whole block stays behind at ratio 1.0,
+        // because blocks arrive whole and the look-ahead makes each one fall short of a full read.
+        std::fill(buffer_.begin(), buffer_.end(), aoo_sample(0));
+        wrpos_ = (kSincTaps / 2) * nchannels_;
+        balance_ = wrpos_;
+    }
 }
 
 void dynamic_resampler::update(double srfrom, double srto){

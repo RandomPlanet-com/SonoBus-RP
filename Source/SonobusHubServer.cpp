@@ -1035,6 +1035,7 @@ void SonobusHubServer::sessionBegin(const std::string& group, const std::string&
     if (group.empty()) return;
     const int64_t now = hub_now_ms();
     std::lock_guard<std::mutex> g(mRecentMutex);
+    mPlayersSinceStart.clear();
     SessionRecord rec;
     for (auto it = mSessions.begin(); it != mSessions.end(); ++it) if (it->group == group) { rec = std::move(*it); mSessions.erase(it); break; }
     if (rec.firstUsedMs == 0) rec.firstUsedMs = now;
@@ -1051,6 +1052,7 @@ void SonobusHubServer::recentNoteJoin(const std::string& user, const std::string
     if (user.empty() || user == mHubUserName) return;
     const int64_t now = hub_now_ms();
     std::lock_guard<std::mutex> g(mRecentMutex);
+    mPlayersSinceStart.insert(user);
     SessionRecord* cur = currentSessionLocked();
     if (!cur) return;
     RecentPlayer e;
@@ -1077,6 +1079,10 @@ std::vector<SonobusHubServer::RecentPlayer> SonobusHubServer::recentPlayers(int 
         break;
     }
     return out;
+}
+int SonobusHubServer::playersSinceStart() const {
+    std::lock_guard<std::mutex> g(mRecentMutex);
+    return (int) mPlayersSinceStart.size();
 }
 std::vector<SonobusHubServer::SessionRecord> SonobusHubServer::sessions() const {
     std::lock_guard<std::mutex> g(mRecentMutex);
@@ -6004,6 +6010,8 @@ void SonobusHubServer::sendThread() {
                         || !peer->persistentEndpoint) continue;
                     const uint64_t last = peer->lastDataTicks.load(std::memory_order_relaxed);
                     if (last != 0 && nowTicks - last < staleTicks) continue;   // streaming fine — leave it alone
+                    // A player that streamed before and then muted its send is not stalled.
+                    if (last != 0 && peer->isSendMuted.load(std::memory_order_relaxed) != 0) continue;
                     peer->sink->invite_source(peer->persistentEndpoint,
                                               kSbClientOurId,
                                               (aoo_replyfn)hub_endpoint_send_impl);

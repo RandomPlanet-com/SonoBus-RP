@@ -202,7 +202,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 <div class="tabs" style="position:relative"><a href="/licenses" target="_blank" class="d" style="position:absolute;right:4px;bottom:6px;font-size:12px" title="Third-party notices for the libraries in this hub">Notices</a><a class="tab" href="#status" data-tab="status" title="Players, group link and recent sessions.">Status</a><a class="tab" href="#settings" data-tab="settings" title="Hub settings.">Settings</a><a class="tab" href="#log" data-tab="log" title="Connection history and the hub log.">Log</a></div>
 <div class="card pane" id="pane-status">
  <div class="tools" style="margin:0 0 12px"><label for="grp">Group</label><input type="text" id="grp" title="Type a new group name, then click Apply."><button id="grpbtn" class="warn" title="Switch the hub to this group. The hub restarts and players must rejoin.">Apply (restarts hub)</button><span style="flex:1 1 auto"></span><input type="text" id="gmsg" maxlength="1000" placeholder="Message to the group" title="Sends a chat message to every player, from Hub."><button id="gmsgbtn" title="Send this message to every player.">Send</button><span id="gmsgnote" class="msg"></span></div>
- <h2>Players</h2>
+ <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
  <div class="wrap"><table id="ptable"><colgroup><col style="width:180px"><col style="width:104px"><col style="width:52px"><col style="width:74px"><col style="width:72px"><col style="width:72px"><col style="width:136px"><col style="width:76px"><col style="width:58px"><col style="width:64px"><col style="width:56px"><col style="width:78px"><col style="width:66px"><col style="width:76px"><col style="width:88px"><col style="width:60px"><col style="width:72px"><col style="width:92px"></colgroup><thead><tr>
  <th>Player</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="num" title="What this player sends into the hub (kb/s or Mb/s, bits)">Up</th><th class="num" title="What the hub sends to this player (kb/s or Mb/s, bits)">Down</th><th>Address</th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="num" title="This player's audio reaching the hub (ms): network one-way + the hub's hold on their stream">To hub</th><th class="num" title="The hub's audio reaching this player (ms): network one-way + the player's own receive buffer">From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="num" title="The hub's hold on this player's incoming stream (ms)">Hub buf</th><th class="num" title="The player's own receive buffer (ms) as it reports it; A = Auto, M = Manual">Player buf</th><th class="num" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected for</th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
  <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
@@ -304,6 +304,8 @@ async function tick(){
  const d=await r.json();const now=Date.now();const dt=prev?(now-prevT)/1000:0;const h=d.hub;
  if(restarting){restarting=false;$('smsg').textContent='hub is back up';$('smsg').className='msg ok';loadSettings();$('sdmsg').textContent='hub is back up';$('sdmsg').className='msg ok';$('sapply').disabled=false;loadSessions(true);}
  setT($('title'),'SonoBus RP Hub — '+h.group);
+ const tabTitle=(h.group?h.group+' · ':'')+'SonoBus RP Hub';if(document.title!==tabTitle)document.title=tabTitle;
+ setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
  setT($('where'),(h.platform||'')+(h.location?'  ·  '+h.location:''));
  setT($('link'),h.joinLink||'');
  const pcc=h.portCheckState==1?'g':h.portCheckState==2?'r':'d';
@@ -445,6 +447,7 @@ pre{flex:1 1 auto;margin:0;overflow:auto;background:var(--card);border:1px solid
 <script>
 const $=(id)=>document.getElementById(id);const api=(p)=>location.origin+p;
 if(location.search.includes('embed=1')){$('h').style.display='none';}
+else fetch(api('/api/status'),{cache:'no-store'}).then(r=>r.json()).then(d=>{if(d&&d.hub&&d.hub.group)document.title=d.hub.group+' · Log';}).catch(()=>{});
 const esc=(s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function cls(l){if(l.includes('-refused')||l.includes('bad-message'))return 'refused';if(l.includes(' join ')||l.includes(' login ')||l.includes(' peer-audio '))return 'ok';if(l.includes('udp-unknown'))return 'odd';if(l.startsWith('[HUB-CONN]'))return 'conn';return 'dim';}
 let last='';
@@ -510,6 +513,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
       << "\"platform\":\"" << jsonEscape(webPlatform()) << "\",\"location\":\"" << jsonEscape(mLocation) << "\","
       << "\"settingsEnabled\":" << ((mArgs && !mPassword.empty() && mSettingsFile != juce::File()) ? "true" : "false") << ",\"pollMs\":1000,"
       << "\"portVerifiedAtMs\":" << s.portCheckVerifiedAtMs << ","
+      << "\"playersSinceStart\":" << mHub.playersSinceStart() << ","
       << "\"joinLink\":\"" << jsonEscape(SonobusHubWeb::joinLink(s)) << "\"},\"peers\":[";
     bool first = true;
     for (const auto& p : s.peers) {
@@ -556,6 +560,11 @@ void SonobusHubWeb::handleClient(int fd) {
     std::string query;   // /api/log?filter=…&n=…
     const size_t q = path.find('?'); if (q != std::string::npos) { query = path.substr(q + 1); path = path.substr(0, q); }
     if (method != "GET" && method != "HEAD" && method != "POST") { sendAll(fd, httpResponse(405, "Method Not Allowed", "text/plain", "GET/POST only\n")); return; }
+    // The logo is not secret, and browsers often ask for the tab icon without the password.
+    if (method != "POST" && (path == "/icon.png" || path == "/favicon.ico")) {   // /favicon.ico = the same PNG
+        sendAll(fd, httpResponse(200, "OK", "image/png", std::string((const char*) kHubWebIconPng, kHubWebIconPngSize), "", "public, max-age=86400"));
+        return;
+    }
     if (!authorised(req)) { sendAll(fd, httpResponse(401, "Unauthorized", "text/plain", "password required\n", "WWW-Authenticate: Basic realm=\"SonoBus RP Hub\"\r\n")); return; }
     if (method == "POST") {
         // Settings + port-check actions. Both need a configured password: an open status
@@ -586,7 +595,6 @@ void SonobusHubWeb::handleClient(int fd) {
     else if (path == "/api/settings") sendAll(fd, httpResponse(200, "OK", "application/json", settingsJson()));
     else if (path == "/" || path == "/index.html") sendAll(fd, httpResponse(200, "OK", "text/html; charset=utf-8", pageWithConstants()));
     else if (path == "/healthz") sendAll(fd, httpResponse(200, "OK", "text/plain", "ok\n"));
-    else if (path == "/icon.png" || path == "/favicon.ico") sendAll(fd, httpResponse(200, "OK", "image/png", std::string((const char*) kHubWebIconPng, kHubWebIconPngSize), "", "public, max-age=86400"));   // /favicon.ico = the same PNG
     else if (path == "/api/recent") sendAll(fd, httpResponse(200, "OK", "application/json", recentJson()));   // Recent players (not password gated)
     else if (path == "/api/sessions") sendAll(fd, httpResponse(200, "OK", "application/json", sessionsJson()));   // Recent sessions (not password gated; passwords never included)
     else sendAll(fd, httpResponse(404, "Not Found", "text/plain", "not found\n"));

@@ -711,7 +711,7 @@ StatusPage::StatusPage() {
     groupEditor.setTooltip("Type a new group name, then click Apply.");
     groupApply.setTooltip("Switch the hub to this group. The hub restarts and players must rejoin.");
     header.setTooltip("This hub's version, addresses, ports and current load.");
-    peerLabel.setTooltip("Everyone connected to this hub right now. Hover a column for details.");
+    peerLabel.setTooltip("Everyone connected to this hub right now. The heading counts the players connected now and the different players who have joined since the hub started. Hover a column for details.");
     sessionPwLabel.setTooltip("The password for the selected session.");
     sessionTable.setTooltip("Groups this hub has hosted. Click a row to select it, or click a column heading to sort.");
     recentTable.setTooltip("Players seen in the selected session. Click a column heading to sort.");
@@ -1497,6 +1497,9 @@ void HubContent::timerCallback() {
         mStatusPage.peerTable.setSnapshot(snap.peers);
         if (mStatusPage.peerTable.numRows() != before) mStatusPage.resized();
     }
+    // Heading: connected now, and distinct players since the hub started
+    mStatusPage.peerLabel.setText(juce::String("  Players     ") + juce::String((int) snap.peers.size()) + " now" + juce::String::fromUTF8("  \xc2\xb7  ")
+                                  + juce::String(mHub->playersSinceStart()) + " since hub start", juce::dontSendNotification);
     // Recent sessions (newest first) + the selected/current session's personnel
     {   // The sessions table is sized to its rows — re-layout when the count changes
         const int before = mStatusPage.sessionTable.numRows();

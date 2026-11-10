@@ -23,6 +23,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -657,6 +658,7 @@ public:
         int joins = 0;
     };
     std::vector<RecentPlayer> recentPlayers(int max = 30) const;   // current session's players, newest first
+    int playersSinceStart() const;   // distinct player names that joined since the hub started serving
     // "Recent sessions" — one record per GROUP name the hub has served: when it was first/last
     // used, the group password, a snapshot of EVERY hub setting in force (key -> text, as hub_settings.json stores
     // them; given by the settings layer via setSessionSettingsSnapshot() before start()) and the personnel seen in that
@@ -865,6 +867,7 @@ private:
     std::deque<SessionRecord> mSessions;          // least recently used first, current/newest last
     std::string mSessionsFile;                    // empty = in memory only
     std::string mSessionGroup;                    // group of the current session ("" before start())
+    std::set<std::string> mPlayersSinceStart;     // under mRecentMutex; names that joined since start()
     std::vector<std::pair<std::string, std::string>> mSessionSettings;   // snapshot handed in before start()
     std::unique_ptr<std::thread> mPortCheckThread;
     void networkRecvThread();

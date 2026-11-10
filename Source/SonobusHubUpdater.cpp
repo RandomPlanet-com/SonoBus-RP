@@ -51,7 +51,7 @@ void HubUpdateCheck::checkOnce() {
    #if JUCE_LINUX
     // The Linux hub is built without an HTTPS library, so requests go through curl.
     int rc = 0;
-    const auto reply = runTool({ "curl", "-fsSL", "--max-time", "15", u.toString(true) }, rc);
+    const auto reply = runTool({ "curl", "-fsSL", "--connect-timeout", "10", "--retry", "1", "--retry-delay", "2", "--max-time", "15", u.toString(true) }, rc);
     if (rc != 0 || threadShouldExit()) { std::cout << "[HUB-UPDATE] could not reach the update server\n"; return; }
    #else
     std::unique_ptr<juce::InputStream> in(u.createInputStream(juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress).withConnectionTimeoutMs(8000)));
@@ -100,7 +100,9 @@ static juce::Result downloadAndCheck(const HubUpdateZip& zip, const juce::File& 
    #if JUCE_LINUX
     {
         int rc = 0;
-        runTool({ "curl", "-fsSL", "--max-time", "600", "-o", dest.getFullPathName(), zip.url }, rc);
+        // A dead server address must not hold the download: short connect timeout, then retry.
+        runTool({ "curl", "-fsSL", "--connect-timeout", "10", "--retry", "2", "--retry-delay", "2", "--max-time", "600",
+                  "-o", dest.getFullPathName(), zip.url }, rc);
         if (rc != 0) return R::fail("Download failed");
     }
    #else
@@ -229,7 +231,14 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     if (!progress("Unpacking...")) return R::fail("Cancelled");
     runTool({ "/bin/tar", "-xzf", package.getFullPathName(), "-C", work.getFullPathName() }, rc);
     if (rc != 0) return R::fail("Unpack failed");
-    const auto staged = work.getChildFile("sonobus-hub/sonobus-hub");
+    auto staged = work.getChildFile("sonobus-hub/sonobus-hub");
+   #if defined(__aarch64__) || defined(__arm64__)
+    // A package for both processors carries the ARM hub under its own name.
+    {
+        const auto arm = work.getChildFile("sonobus-hub/sonobus-hub-arm64");
+        if (arm.existsAsFile()) staged = arm;
+    }
+   #endif
     if (!staged.existsAsFile()) return R::fail("No hub in the download");
 
     // The new binary must run here before the installed copy is touched.
