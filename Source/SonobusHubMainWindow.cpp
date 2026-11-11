@@ -150,28 +150,26 @@ void PeerTable::setSnapshot(std::vector<SonobusHubServer::UiPeerSnapshot> peers)
     repaint();
 }
 
-// Sort keys per column (indexes follow colName[] in paint). Numeric columns sort by the value
-// behind the cell — unknown / "-" = -1 = lowest; text columns (User, Location, Signal, Address) case-insensitively.
-static bool peerSortIsText(int col) { return col == 0 || col == 1 || col == 3 || col == 6; }
+// Sort keys per column (indexes follow colName[] in paint). Numeric columns sort by the value behind the cell
+// (a pair sorts by its first value); unknown / "-" = -1 = lowest. Text columns sort case-insensitively.
+static bool peerSortIsText(int col) { return col == 0 || col == 1 || col == 3 || col == 14; }
 static double peerSortNumber(const SonobusHubServer::UiPeerSnapshot& p, int col, int64_t nowMs) {
     switch (col) {
         case 2: return p.recvChannels;
         case 4: return p.inBytesPerSec;
-        case 5: return p.outBytesPerSec;
-        case 7: return (double) p.lostBlocks;
-        case 8: case 9: {
+        case 5: return (double) p.lostBlocks;
+        case 6: {
             float toHub = 0.0f, fromHub = 0.0f;
             const bool have = SonobusHubServer::computeHubLatency(p.smoothedRttUpMs, p.smoothedRttMs, p.sinkBufMs, toHub, fromHub, p.clientRecvBufMs);
-            return have ? (col == 8 ? toHub : fromHub) : -1.0;
+            return have ? toHub : -1.0;
         }
-        case 10: return p.jitterBufferFillPct;
-        case 11: return p.jitP99Ms;
-        case 12: return p.sinkBufMs;
-        case 13: return p.clientRecvBufMs;
-        case 14: return p.clientRxUnderruns10s >= 0 ? (double) (p.clientRxUnderrunsTotal + p.clientRxPopsTotal) : -1.0;
-        case 15: return p.clientLatFeedAgeS;
-        case 16: return p.clientDevBuf;
-        case 17: return p.joinedAtMs > 0 ? (double) (nowMs - p.joinedAtMs) : -1.0;   // Connected for
+        case 7: return p.jitterBufferFillPct;
+        case 8: return p.jitP99Ms;
+        case 9: return p.sinkBufMs;
+        case 10: return p.clientRxUnderruns10s >= 0 ? (double) (p.clientRxUnderrunsTotal + p.clientRxPopsTotal) : -1.0;
+        case 11: return p.clientLatFeedAgeS;
+        case 12: return p.clientDevBuf;
+        case 13: return p.joinedAtMs > 0 ? (double) (nowMs - p.joinedAtMs) : -1.0;
         default: return 0.0;
     }
 }
@@ -180,7 +178,7 @@ static juce::String peerSortText(const SonobusHubServer::UiPeerSnapshot& p, int 
         case 0: return juce::String::fromUTF8(p.userName.c_str());
         case 1: return juce::String::fromUTF8(p.location.c_str());
         case 3: return p.isSendMuted ? "muted" : p.lastBlocksNonZero > 0 ? "sending" : "silent";
-        case 6: return juce::String(p.ipAddr) + ":" + juce::String(p.port);
+        case 14: return juce::String::fromUTF8(p.clientVersion.c_str());
         default: return {};
     }
 }
@@ -216,21 +214,26 @@ static void hubDrawSortArrow(juce::Graphics& g, float x, float cy, bool desc) {
     g.fillPath(p);
 }
 void PeerTable::paint(juce::Graphics& g) {
-    // Columns: User, Location, Inputs, Signal, Up, Down, Address, Lost (hub), To hub, From hub, JitBuf, Net jitter,
-    // Hub buf, Player buf (A/M), Dropouts (xN = overloads), Lat feed, Device, Connected for. Rates are whole numbers,
-    // nothing truncates: the User column is sized to the longest name every paint.
-    constexpr int kNumCols = 18;
+    // Same columns as the web page, all left-aligned: Player, Location, Inputs, Signal, Up / Down, Lost (hub),
+    // To / From hub, JitBuf, Net jitter, Hub / Player buf (A/M), Dropouts (xN = overloads), Lat feed, Device,
+    // Connected, Version. The address is in the name's tooltip. The Player and Location columns grow to their
+    // longest text, so nothing truncates.
+    constexpr int kNumCols = 15;
     const int paddingX = 10;
     auto rowFont = juce::Font(16.0f);
+    auto unitFont = juce::Font(12.0f);
     auto headFont = juce::Font(14.0f, juce::Font::bold);
-    static const int colWFixed[kNumCols] = { 150, 115, 58, 82, 78, 78, 168, 84, 66, 76, 62, 88, 72, 86, 96, 70, 82, 100 };
-    static const char* colName[kNumCols] = { "Player", "Location", "Inputs", "Signal", "Up", "Down", "Address", "Lost (hub)", "To hub", "From hub",
-                                             "JitBuf", "Net jitter", "Hub buf", "Player buf", "Dropouts", "Lat feed", "Device", "Connected for" };
+    static const int colWFixed[kNumCols] = { 150, 110, 64, 86, 126, 94, 152, 70, 112, 166, 112, 78, 86, 106, 134 };
+    static const char* colName[kNumCols] = { "Player", "Location", "Inputs", "Signal", "Up / Down Mb/s", "Lost (hub)", "To / From hub",
+                                             "JitBuf", "Net jitter", "Hub / Player buf", "Dropouts", "Lat feed", "Device", "Connected", "Version" };
     int colW[kNumCols]; for (int i = 0; i < kNumCols; ++i) colW[i] = colWFixed[i];
-    {   // User column: longest name (+ record dot + ⚠ badge room) wins, never clipped
-        int w = colWFixed[0];
-        for (auto& p : mPeers) w = std::max(w, rowFont.getStringWidth(juce::String::fromUTF8(p.userName.c_str())) + 40);
-        mUserColW = w; colW[0] = w;
+    {
+        int w = colWFixed[0], lw = colWFixed[1];
+        for (auto& p : mPeers) {
+            w = std::max(w, rowFont.getStringWidth(juce::String::fromUTF8(p.userName.c_str())) + 40);   // + record dot
+            lw = std::max(lw, rowFont.getStringWidth(juce::String::fromUTF8(p.location.c_str())) + 18);
+        }
+        mUserColW = w; colW[0] = w; colW[1] = lw;
     }
     mColX.assign(kNumCols + 1, 0);
     { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { mColX[i] = x; x += colW[i]; } mColX[kNumCols] = x; mRequiredWidth = x + paddingX; }
@@ -240,13 +243,26 @@ void PeerTable::paint(juce::Graphics& g) {
     auto header = area.removeFromTop(kHeaderH);
     g.setColour(pal::panelLight);
     g.fillRect(header);
-    g.setColour(pal::textDim);
     g.setFont(headFont);
     for (int i = 0; i < kNumCols; ++i) {
         const juce::String label(colName[i]);
+        g.setColour(pal::textDim);
         g.drawText(label, mColX[i], header.getY(), colW[i], header.getHeight(), juce::Justification::centredLeft);
-        if (i == mSortCol) hubDrawSortArrow(g, (float) mColX[i] + headFont.getStringWidthFloat(label) + 4.0f, header.getCentreY(), mSortDesc);   // Drawn ▼ / ▲
+        if (i == mSortCol) {   // The arrow sits right of the heading, in white
+            g.setColour(juce::Colours::white);
+            hubDrawSortArrow(g, (float) mColX[i] + headFont.getStringWidthFloat(label) + 4.0f, header.getCentreY(), mSortDesc);
+        }
     }
+
+    // A cell made of several pieces, each with its own colour; "unit" pieces use the small font.
+    struct Part { juce::String text; juce::Colour colour; bool unit = false; };
+    const juce::String dash("-");
+    const Part slash { " / ", pal::textDim };
+    auto msParts = [&](std::vector<Part>& out, bool have, float ms, juce::Colour col) {
+        if (! have) { out.push_back({ dash, pal::textDim }); return; }
+        out.push_back({ juce::String(ms, 1), col });
+        out.push_back({ " ms", pal::textDim, true });
+    };
 
     g.setFont(rowFont);
     int y = area.getY();
@@ -256,6 +272,19 @@ void PeerTable::paint(juce::Graphics& g) {
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int c = 0;
         auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); g.drawText(text, mColX[c], y, colW[c] - 6, kRowH, juce::Justification::centredLeft); ++c; };
+        auto cellParts = [&](const std::vector<Part>& parts) {
+            int x = mColX[c]; const int right = mColX[c] + colW[c] - 6;
+            for (auto& pt : parts) {
+                const juce::Font& f = pt.unit ? unitFont : rowFont;
+                const juce::String t = pt.text.trimStart();   // spaces become plain gaps
+                const int w = f.getStringWidth(pt.text), lead = w - f.getStringWidth(t);
+                if (x + w > right) break;
+                g.setFont(f); g.setColour(pt.colour);
+                g.drawText(t.trimEnd(), x + lead, y + (pt.unit ? 2 : 0), w - lead + 2, kRowH, juce::Justification::centredLeft);
+                x += w;
+            }
+            g.setFont(rowFont); ++c;
+        };
 
         {
             juce::String name = (p.isRecording ? juce::String::fromUTF8("\xe2\x97\x8f ") : juce::String()) + juce::String::fromUTF8(p.userName.c_str());
@@ -266,51 +295,65 @@ void PeerTable::paint(juce::Graphics& g) {
         const bool sending = p.lastBlocksNonZero > 0;
         if (p.isSendMuted) cell(juce::String::fromUTF8("\xe2\x97\x8f ") + "muted", pal::textDim);   // Player muted its send
         else cell(juce::String::fromUTF8("\xe2\x97\x8f ") + (sending ? "sending" : "silent"), sending ? pal::green : pal::textDim);
-        cell(hubRateText(p.inBytesPerSec),  p.inBytesPerSec  >= 0.0f ? pal::text : pal::textDim);
-        cell(hubRateText(p.outBytesPerSec), p.outBytesPerSec >= 0.0f ? pal::text : pal::textDim);
-        cell(juce::String(p.ipAddr) + ":" + juce::String(p.port), pal::text);   // Address
+        {   // Up / Down in Mb/s (bits)
+            auto mb = [&](float bytesPerSec) { return bytesPerSec >= 0.0f ? Part { juce::String(bytesPerSec * 8.0f / 1.0e6f, 1), pal::text } : Part { dash, pal::textDim }; };
+            cellParts({ mb(p.inBytesPerSec), slash, mb(p.outBytesPerSec) });
+        }
         cell(juce::String((juce::int64) p.lostBlocks), p.lostBlocks == 0 ? pal::textDim : p.lostBlocks < 100 ? pal::yellow : pal::red);
-        {
+        {   // To / From hub
             float toHub = 0.0f, fromHub = 0.0f;
             const bool have = SonobusHubServer::computeHubLatency(p.smoothedRttUpMs, p.smoothedRttMs, p.sinkBufMs, toHub, fromHub, p.clientRecvBufMs);
             auto latColour = [](float ms){ return ms < sbplus::kLatOneWayGreenMs ? pal::green : ms < sbplus::kLatOneWayYellowMs ? pal::yellow : pal::red; };   // Shared thresholds (SbLatencyColours.h)
-            cell(have ? juce::String(toHub, 1)   : juce::String("-"), have ? latColour(toHub)   : pal::textDim);
-            cell(have ? juce::String(fromHub, 1) : juce::String("-"), have ? latColour(fromHub) : pal::textDim);
+            std::vector<Part> parts;
+            msParts(parts, have, toHub, latColour(toHub));
+            parts.push_back(slash);
+            msParts(parts, have, fromHub, latColour(fromHub));
+            cellParts(parts);
         }
-        // Net jitter: the same thresholds as the web page (≤1.5 green, ≤3 yellow, else red)
         if (p.jitterBufferFillPct >= 0.0f)   // JitBuf
             cell(juce::String((int) p.jitterBufferFillPct) + "%", p.jitterBufferFillPct < 15.0f ? pal::red : p.jitterBufferFillPct < 95.0f ? pal::yellow : pal::green);
-        else cell("-", pal::textDim);
-        if (p.jitP99Ms >= 0.0f) cell(juce::String(p.jitP99Ms, 1) + (p.isLan ? " L" : " W"), p.jitP99Ms <= 1.5f ? pal::green : p.jitP99Ms <= 3.0f ? pal::yellow : pal::red);
-        else cell("-", pal::textDim);
-        // Hub buf: the hold in force
-        if (p.sinkBufMs > 0.0f) cell(juce::String(p.sinkBufMs, 1) + (p.holdAtCeiling ? " !" : ""), p.holdAtCeiling ? pal::red : p.sinkBufMs <= 12.0f ? pal::green : pal::text);
-        else cell("-", pal::textDim);
-        // Player buf: the player's own receive buffer as it reports it, A = Auto / M = Manual
-        if (p.clientRecvBufMs >= 0.0f) {
-            juce::String t(p.clientRecvBufMs, 1);
-            if (p.clientRecvBufMode == 1) t << " A"; else if (p.clientRecvBufMode == 0) t << " M";
-            cell(t, pal::text);
-        } else cell("-", pal::textDim);
+        else cell(dash, pal::textDim);
+        {   // Net jitter: the same thresholds as the web page (up to 1.5 green, up to 3 yellow, else red)
+            std::vector<Part> parts;
+            msParts(parts, p.jitP99Ms >= 0.0f, p.jitP99Ms, p.jitP99Ms <= 1.5f ? pal::green : p.jitP99Ms <= 3.0f ? pal::yellow : pal::red);
+            if (p.jitP99Ms >= 0.0f) parts.push_back({ p.isLan ? " LAN" : " WAN", pal::textDim });
+            cellParts(parts);
+        }
+        {   // Hub buf (the hold in force, "!" at its ceiling) / Player buf (as the player reports it, A = Auto, M = Manual)
+            std::vector<Part> parts;
+            msParts(parts, p.sinkBufMs > 0.0f, p.sinkBufMs, p.holdAtCeiling ? pal::red : p.sinkBufMs <= 12.0f ? pal::green : pal::text);
+            if (p.sinkBufMs > 0.0f && p.holdAtCeiling) parts.push_back({ " !", pal::red });
+            parts.push_back(slash);
+            msParts(parts, p.clientRecvBufMs >= 0.0f, p.clientRecvBufMs, pal::text);
+            if (p.clientRecvBufMs >= 0.0f && (p.clientRecvBufMode == 1 || p.clientRecvBufMode == 0)) parts.push_back({ p.clientRecvBufMode == 1 ? " A" : " M", pal::textDim });
+            cellParts(parts);
+        }
         // Dropouts: underruns + pops since joined; "+n" = the last 10 s; xN = CoreAudio overloads in the last 10 s
         if (p.clientRxUnderruns10s >= 0) {
             const int total = (int) (p.clientRxUnderrunsTotal + p.clientRxPopsTotal);
             const int recent = p.clientRxUnderruns10s + std::max(0, p.clientRxPops10s);
-            juce::String t(total);
-            if (recent > 0) t << " (+" << recent << ")";
-            if (p.clientXruns10s > 0) t << " x" << p.clientXruns10s;
-            cell(t, (recent > 0 || p.clientXruns10s > 0) ? pal::yellow : total == 0 ? pal::textDim : pal::text);
-        } else cell("-", pal::textDim);
+            std::vector<Part> parts { { juce::String(total), total == 0 ? pal::textDim : pal::text } };
+            if (recent > 0) parts.push_back({ " (+" + juce::String(recent) + ")", pal::yellow });
+            if (p.clientXruns10s > 0) parts.push_back({ " x" + juce::String(p.clientXruns10s), pal::red });
+            cellParts(parts);
+        } else cell(dash, pal::textDim);
         // Lat feed: age of the last hub latency report the player received
         if (p.clientLatFeedAgeS >= 0) cell(juce::String(p.clientLatFeedAgeS) + "s", p.clientLatFeedAgeS <= 35 ? pal::green : pal::red);
-        else cell("-", pal::textDim);
+        else cell(dash, pal::textDim);
         // Device: the player's buffer @ sample rate
         if (p.clientDevBuf > 0 && p.clientDevSr > 0) {
             const juce::String sr = (p.clientDevSr % 1000 == 0) ? juce::String(p.clientDevSr / 1000) + "k" : juce::String(p.clientDevSr / 1000.0, 1) + "k";
             const bool off = p.clientDevBuf != 32 || p.clientDevSr != 48000;
             cell(juce::String(p.clientDevBuf) + " @ " + sr, off ? juce::Colours::orange : pal::text);
-        } else cell("-", pal::textDim);
-        cell(p.joinedAtMs > 0 ? hubDurText((nowMs - p.joinedAtMs) / 1000) : juce::String("-"), pal::textDim);
+        } else cell(dash, pal::textDim);
+        cell(p.joinedAtMs > 0 ? hubDurText((nowMs - p.joinedAtMs) / 1000) : dash, pal::textDim);
+        {   // The player's version and system; older players do not report it
+            const juce::String full = juce::String::fromUTF8(p.clientVersion.c_str());
+            juce::String v = full.upToFirstOccurrenceOf(" (", false, false);   // marketing version; the build id stays in the log
+            if (full.contains("-dev")) v << " dev";
+            if (v.isNotEmpty() && ! p.clientOs.empty()) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientOs.c_str());
+            cell(v.isNotEmpty() ? v : dash, pal::textDim);
+        }
 
         y += kRowH;
         if (y > area.getBottom()) break;

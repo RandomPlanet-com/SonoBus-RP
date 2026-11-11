@@ -273,6 +273,8 @@ public:
     std::unique_ptr<foleys::LevelMeter> meter;
     std::unique_ptr<foleys::LevelMeter> premeter;
     std::unique_ptr<foleys::LevelMeter> premeter2;   // second bar of a stereo pair's single row
+    std::unique_ptr<Label> inCaption;    // "IN" / "OUT" over the pre- and post-fader meters of an input row
+    std::unique_ptr<Label> outCaption;
 
     
     FlexBox mainbox;
@@ -359,6 +361,9 @@ public:
     // restores the 8 Hz visible rate.
     void setMetersSuspended(bool flag);
     bool getMetersSuspended() const { return metersSuspended; }
+
+    // Dims the input row meters while nothing is being sent.
+    void setSendMutedAppearance(bool flag);
 
     int getGroupViewsCount() const { return mChannelViews.size(); }
 
@@ -486,6 +491,7 @@ protected:
     bool isNarrow = false;
     bool metersActive = false;
     bool metersSuspended = false; // Window minimised / not showing
+    bool mSendMutedAppearance = false;
 
     bool mPeerMode = false;
     bool mHideRowMeter = false;   

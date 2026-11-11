@@ -320,6 +320,7 @@ private:
     std::unique_ptr<Slider> mOutGainSlider;
     
     std::unique_ptr<SonoDrawableButton> mMainMuteButton;
+    std::unique_ptr<Label> mSendMutedLabel;   // shown over the send controls while the main send mute is on
     std::unique_ptr<SonoDrawableButton> mMainRecvMuteButton;
     std::unique_ptr<SonoDrawableButton> mMainPushToTalkButton;
 

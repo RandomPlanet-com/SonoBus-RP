@@ -189,6 +189,7 @@ protected:
 
         void     paintListBoxItem (int rowNumber, Graphics &g, int width, int height, bool rowIsSelected) override;
         void listBoxItemClicked (int rowNumber, const MouseEvent& e) override;
+        void listBoxItemDoubleClicked (int rowNumber, const MouseEvent& e) override;
         void selectedRowsChanged(int lastRowSelected) override;
 
         void updateState();

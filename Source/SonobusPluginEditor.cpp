@@ -486,6 +486,16 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainMuteButton->setColour(DrawableButton::backgroundColourId, Colours::transparentBlack);
     mMainMuteButton->setTooltip(TRANS("Silences your Input, none of your audio (including file playback) will be sent to users and they will see a muted indicator"));
 
+    // Banner over the send controls so a muted send cannot be mistaken for a live one.
+    mSendMutedLabel = std::make_unique<Label>("sendmuted", TRANS("SEND MUTED"));
+    mSendMutedLabel->setFont(Font(17.0f, Font::bold));
+    mSendMutedLabel->setJustificationType(Justification::centred);
+    mSendMutedLabel->setMinimumHorizontalScale(0.6f);
+    mSendMutedLabel->setColour(Label::textColourId, Colour(0xffff5040));
+    mSendMutedLabel->setColour(Label::backgroundColourId, Colour::fromFloatRGBA(0.0, 0.0, 0.0, 0.85));
+    mSendMutedLabel->setColour(Label::outlineColourId, Colour(0xffff5040));
+    mSendMutedLabel->setInterceptsMouseClicks(false, false);
+
     mMainRecvMuteButton = std::make_unique<SonoDrawableButton>("recvmute", DrawableButton::ButtonStyle::ImageFitted);
     std::unique_ptr<Drawable> recvallowimg(Drawable::createFromImageData(BinaryData::hearothers_svg, BinaryData::hearothers_svgSize));
     std::unique_ptr<Drawable> recvdisallowimg(Drawable::createFromImageData(BinaryData::muteothers_svg, BinaryData::muteothers_svgSize));
@@ -1166,7 +1176,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
             mMainStatusLabel.get(), mTopologyModeLabel.get(), mConnectionTimeLabel.get(),
             mSendChannelsLabel.get(), mReverbLevelLabel.get(), mReverbSizeLabel.get(),
             mReverbDampingLabel.get(), mReverbPreDelayLabel.get(), mReverbTitleLabel.get(),
-            mFileRecordingLabel.get(),
+            mFileRecordingLabel.get(), mSendMutedLabel.get(),
             // buttons
             mPeerLayoutFullButton.get(), mPeerLayoutMinimalButton.get(),
             mInMixerButton.get(), mInMuteButton.get(), mInSoloButton.get(), mMonDelayButton.get(),
@@ -1302,6 +1312,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
 
 
     mTopLevelContainer->addAndMakeVisible (mSendChannelsChoice.get());
+    mTopLevelContainer->addChildComponent(mSendMutedLabel.get());   // above the send choice, below the side panels
     //addAndMakeVisible (mSendChannelsLabel.get());
 
 
@@ -3797,6 +3808,10 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
     if (!mMainPushToTalkButton->isMouseButtonDown() && !mPushToTalkKeyDown) {
         mMainPushToTalkButton->setVisible(sendmute);
     }
+    // Muted send: banner on, send and input row meters dimmed.
+    mSendMutedLabel->setVisible(sendmute);
+    inputMeter->setAlpha(sendmute ? 0.35f : 1.0f);
+    mInputChannelsContainer->setSendMutedAppearance(sendmute);
     
 
     if (processor.getMainReverbModel() == SonobusAudioProcessor::ReverbModelFreeverb) {
@@ -4714,6 +4729,7 @@ void SonobusAudioProcessorEditor::resized()
 
     mainBox.performLayout(mainBounds);
 
+    mSendMutedLabel->setBounds(mSendChannelsChoice->getBounds());
 
     mChatEdgeResizer->setBounds(mChatView->getLocalBounds().withWidth(5));
 

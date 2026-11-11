@@ -5,6 +5,7 @@
 
 
 #include "SonobusPluginProcessor.h"
+#include "SonobusPlusVersion.h"
 #include "SbDataPaths.h"
 #include "SonobusPluginEditor.h"
 #include "SonobusHubMixControl.h"
@@ -1708,6 +1709,7 @@ void SonobusAudioProcessor::initializeAoo(int udpPort)
         mAooClient.reset(aoo::net::iclient::create(mServerEndpoint.get(), client_send, mUdpLocalPort));
         sbApplyPeerFilter();   // SetNetworkTopologyMode returns early when the mode is unchanged, so apply here too
         // The launch auto-connect chain may have run before this client existed — try now.
+        if (!sbLaunchRejoinWanted()) mInitialAutoReconnectDone = true;   // the user left the room before quitting
         if (getAutoReconnectToLast() && !mInitialAutoReconnectDone.load()) {
             Timer::callAfterDelay(500, [this]() {
                 if (mAooClient && !isConnectedToServer() && !mInitialAutoReconnectDone.load() && mServerConnectInFlight.get() == 0 && !mPendingReconnect) {
@@ -1802,7 +1804,7 @@ void SonobusAudioProcessor::initializeAoo(int udpPort)
 
 void SonobusAudioProcessor::cleanupAoo()
 {
-    disconnectFromServer();
+    disconnectFromServer(false);   // a quit keeps the launch-rejoin mark
     
     DBG("waiting on recv thread to die");
     mRecvThread->stopThread(400);
@@ -1983,8 +1985,22 @@ bool SonobusAudioProcessor::isConnectedToServer() const
     return mIsConnectedToServer;    
 }
 
-bool SonobusAudioProcessor::disconnectFromServer()
+void SonobusAudioProcessor::sbMarkLaunchRejoin(bool inRoom)
 {
+    if (mSupportDir == File()) return;
+    mSupportDir.getChildFile("launch-rejoin.txt").replaceWithText(inRoom ? "1" : "0");
+}
+
+bool SonobusAudioProcessor::sbLaunchRejoinWanted() const
+{
+    // No file yet (first run of this version) keeps the earlier behaviour: rejoin.
+    const File f = mSupportDir.getChildFile("launch-rejoin.txt");
+    return !(f.existsAsFile() && f.loadFileAsString().startsWithChar('0'));
+}
+
+bool SonobusAudioProcessor::disconnectFromServer(bool userRequested)
+{
+    if (userRequested) sbMarkLaunchRejoin(false);
     if (!mAooClient) return false;
 
     if (isHostedMixModeEnabled()) {
@@ -11675,6 +11691,26 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
                                                                                            // masks its feeds to us although it never sees our own stream
                 sendPeerMessage(hubPeer, hm.Data(), (int32_t) hm.Size());
             } catch (const osc::Exception&) {}
+            // Our version and system, so the hub can show who runs what. Re-sent with every report; control path only.
+            {
+                static const String ver = [](){ const auto i = SonobusPlusVersion::get();
+                    return i.version.isNotEmpty() ? i.marketing + " (" + i.version + ")" : i.marketing + " (dev)"; }();
+               #if JUCE_MAC
+                static const char* const os = "Mac";
+               #elif JUCE_WINDOWS
+                static const char* const os = "Windows";
+               #elif JUCE_LINUX
+                static const char* const os = "Linux";
+               #else
+                static const char* const os = "other";
+               #endif
+                char vb[160];
+                osc::OutboundPacketStream vm(vb, sizeof(vb));
+                try {
+                    vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << osc::EndMessage;
+                    sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
+                } catch (const osc::Exception&) {}
+            }
         }
     }
     if (isHostedMixModeEnabled() && (++mHxlatTick % 3) == 0) {   // /sb/hxlat feed accounting every 30 s, always on (one line, one small file)
@@ -12940,6 +12976,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 DBG("Joined group - " << e->name);
                 const ScopedLock sl (mClientLock);        
                 mCurrentJoinedGroup = CharPointer_UTF8 (e->name);
+                sbMarkLaunchRejoin(true);
 
                 mSessionConnectionStamp = Time::getMillisecondCounterHiRes();
 
@@ -19654,7 +19691,8 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
         if (mFreshInit) {
             if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] fresh init: autoReconnect=%d connected=%d\n", getAutoReconnectToLast() ? 1 : 0, isConnectedToServer() ? 1 : 0);
             // only do initial auto reconnect on the first state restore
-            if (getAutoReconnectToLast() && !isConnectedToServer()) {
+            if (!sbLaunchRejoinWanted()) mInitialAutoReconnectDone = true;   // the user left the room before quitting
+            if (getAutoReconnectToLast() && !isConnectedToServer() && !mInitialAutoReconnectDone.load()) {
                 // Network stack often isn't ready immediately after app launch (DNS, routing, NAT
                 // table: can be 1-3 s after process start; first attempt commonly fails with "No
                 // route to host"). Schedule staggered attempts; each bails out if already connected

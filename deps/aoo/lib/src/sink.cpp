@@ -197,6 +197,17 @@ static int32_t sink_tap_int(const char* name, int32_t def, bool* set){
     return def;
 }
 
+// Fast recovery after a line storm (WAN profile). Read once per process, first from the network thread.
+static bool adapt_fast_recover(){
+    static const bool on = sink_tap_int("SB_AOO_ADAPT_FAST_RECOVER", 0, nullptr) != 0;
+    return on;
+}
+// SB_AOO_ADAPT_GLIDE_PPM: speed-up used to play out excess depth without a splice (default 10000 = 1 %; 0 = splice).
+static double adapt_glide_max(){
+    static const double g = std::max<int32_t>(0, std::min<int32_t>(30000, sink_tap_int("SB_AOO_ADAPT_GLIDE_PPM", 10000, nullptr))) * 1e-6;
+    return g;
+}
+
 /*//////////////////// aoo_sink /////////////////////*/
 
 aoo_sink * aoo_sink_new(int32_t id) {
@@ -1189,6 +1200,8 @@ void source_desc::do_update(const sink &s){
                 adapt_block_s_ = block_ms * 1e-3;
                 adapt_t0_ = -1; adapt_win_start_ = -1; adapt_ewma_max_ = -1; adapt_ewma_sd_ = 0;
                 adapt_last_retarget_ = -1; adapt_last_shrink_ = -1e9;
+                adapt_glide_active_.store(false, std::memory_order_relaxed); adapt_glide_g_ = 0; adapt_fast_wait_s_ = 0; adapt_fast_last_t_ = -1e9; adapt_fast_depth_ = 0;
+                (void) adapt_fast_recover(); (void) adapt_glide_max();   // read the switches here, never first on the audio thread
                 adapt_underruns_sec_ = 0; adapt_strike_secs_ = 0; adapt_clean_secs_ = 0; adapt_shrink_pending_ = false; adapt_headroom_prev_ = 0; adapt_warm_ = false; adapt_warm_at_ = -1; adapt_committed_ = false; adapt_commit_blocks_ = 0; adapt_last_shadow_ = -1e9;
                 memset(adapt_hist_, 0, sizeof(adapt_hist_)); adapt_hist_slice_ = 0; adapt_hist_filled_ = 0; adapt_hist_slice_t0_ = -1; adapt_last_arrival_ = -1; adapt_hist_blocks_ = 0; adapt_up_secs_ = 0; adapt_last_up_ = -1e9; adapt_emerg_late_ms_ = 0; adapt_emerg_win_grown_ = 0; memset(adapt_stall_ts_, 0, sizeof(adapt_stall_ts_)); adapt_stall_idx_ = 0; adapt_stall_n_ = 0; adapt_stalls_excluded_ = 0; adapt_stall_clean_secs_ = 0;
                 static bool logged = false;
@@ -1631,6 +1644,9 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     DO_LOG("audioqueue: " << audioqueue_.read_available() << " / " << capacity);
 #endif
 
+    // Feed, set the ratio, then feed once more if the new ratio left the read short. The ratio moves after the
+    // feed, so at a drift step a resampler holding exactly one block could not be read in that callback.
+    for (int feed_pass = 0; feed_pass < 2; ++feed_pass){
     while (audioqueue_.read_available() && infoqueue_.read_available()
            && readsamples > resampler_.read_available() && resampler_.write_available() >= nsamples){
 
@@ -1672,8 +1688,24 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     // Drift ASRC — the network thread's ratio scales the SOURCE rate (source faster
     // than us -> consume source samples faster -> ratio_ < 1 in the resampler's terms).
     {
-        const double dr = drift_on_ ? drift_ratio_.load(std::memory_order_relaxed) : 1.0;
+        double dr = drift_on_ ? drift_ratio_.load(std::memory_order_relaxed) : 1.0;
+        // Glide: while a fast recovery is playing out excess depth, consume the source slightly faster. The speed-up
+        // tapers with the remaining excess and moves in small steps, so there is no splice and no pitch jump.
+        const double gmax = adapt_glide_max();
+        if (gmax > 0 && (adapt_glide_g_ > 0 || adapt_glide_active_.load(std::memory_order_relaxed))){
+            double want = 0.0;
+            if (adapt_glide_active_.load(std::memory_order_relaxed)){
+                const int32_t tgt = audioqueue_target_samples_.load(std::memory_order_relaxed) / std::max<int32_t>(1, (int32_t) audioqueue_.blocksize());
+                const int32_t excess = (int32_t) audioqueue_.read_available() - tgt;
+                if (excess > 0) want = std::min(gmax, excess * (gmax / 10.0));
+            }
+            const double dg = gmax * (double) numsampleframes / (0.25 * (double) std::max<int32_t>(1, s.samplerate()));   // about 0.25 s from zero to full
+            adapt_glide_g_ += std::max(-dg, std::min(dg, want - adapt_glide_g_));
+            dr *= (1.0 + adapt_glide_g_);
+        }
         resampler_.update(samplerate_ * dr, s.real_samplerate());
+    }
+    if (resampler_.read_available() >= readsamples) break;
     }
     // read samples from resampler
     
@@ -2263,6 +2295,7 @@ void source_desc::process_blocks(const sink& s){
                 }
             }
             if (adapt_shrink_pending_ && excess <= 0) adapt_shrink_pending_ = false;   // Nothing to drain
+            if (excess <= 0 && adapt_glide_active_.load(std::memory_order_relaxed)){ adapt_glide_active_.store(false, std::memory_order_relaxed); sink_evlog("adapt_glide_done", depth); }
             if (drift_on_) drift_tick(s, s.elapsed_time(), depth, target);   
             if (drain_enabled && excess > 0){
                 const bool v4 = governor_v4_;
@@ -2294,9 +2327,14 @@ void source_desc::process_blocks(const sink& s){
                 }
 
                 bool drain = false;
+                const bool gliding = adapt_glide_active_.load(std::memory_order_relaxed);
                 if (adapt_shrink_pending_){
                     // Adaptive retarget DOWN — one splice, now
                     drain = true;
+                } else if (gliding){
+                    // The excess is being played out; splice only when the audio queue is one block from full.
+                    drain = qblocks >= (int32_t)(audioqueue_.capacity() / std::max<int32_t>(1, (int32_t) audioqueue_.blocksize())) - 1;
+                    if (drain){ adapt_glide_active_.store(false, std::memory_order_relaxed); sink_evlog("adapt_glide_overflow", excess); }
                 } else if (hardfull){
                     // Without v4 the emergency bypasses every limit. With v4, >= 250 ms between
                     // emergency drains (a 2-3 block burst can never chain), except when the depth
@@ -2320,7 +2358,7 @@ void source_desc::process_blocks(const sink& s){
                 // for the 5-s rate limit.
                 if (refill_pending_.exchange(0, std::memory_order_relaxed)){ refill_seen_t_ = now; refill_drained_ = false; }
                 // One drain per refill, after a 100-ms settle so the delayed burst has fully landed.
-                if (!drain && !refill_drained_ && excess > 0 && (now - refill_seen_t_) >= 0.1 && (now - refill_seen_t_) < 2.0){
+                if (!drain && !gliding && !refill_drained_ && excess > 0 && (now - refill_seen_t_) >= 0.1 && (now - refill_seen_t_) < 2.0){
                     drain = true; refill_drained_ = true; sink_evlog("governor_refill_overshoot", excess);
                 }
                 if (!refill_drained_ && (now - refill_seen_t_) >= 2.0) refill_drained_ = true;
@@ -2730,7 +2768,9 @@ void source_desc::adapt_retarget(const sink& s, double now){
             }
             int32_t H = kAdaptHistBuckets - 1;            // gaps > H ms are the ones the buffer cannot cover
             for (int32_t h = 0; h < kAdaptHistBuckets - 1; ++h){ if (above[h + 1] <= allow){ H = h; break; } }
-            const double margin_ms = adapt_block_s_ * 1e3 + (adapt_lan_profile_ ? 0.0 : 2.0);
+            // SB_AOO_ADAPT_WAN_MARGIN_US: WAN safety margin on top of one block (default 2 ms).
+            static const double wan_margin_ms = std::max<int32_t>(0, std::min<int32_t>(10000, sink_tap_int("SB_AOO_ADAPT_WAN_MARGIN_US", 2000, nullptr))) / 1000.0;
+            const double margin_ms = adapt_block_s_ * 1e3 + (adapt_lan_profile_ ? 0.0 : wan_margin_ms);
             int32_t nb = (int32_t) std::ceil((H + margin_ms) / (adapt_block_s_ * 1e3));
             if (lan_zero){ nb = std::max<int32_t>(nb, adapt_zero_floor_); adapt_zero_floor_ = nb; }   // grow-only from the arming point
             if (nb != adapt_hist_blocks_){ adapt_hist_blocks_ = nb; sink_evlog("adapt_need", nb); }   // logged on change only
@@ -2837,6 +2877,62 @@ void source_desc::adapt_retarget(const sink& s, double now){
         // No automatic shrink after the commit: every shrink is an audible splice.
         // The regular shrink's target is logged instead (adapt_shadow_shrink).
         if (T <= cur - 2 && (now - adapt_last_shadow_) >= (double) shrink_hold_s){ adapt_last_shadow_ = now; sink_evlog("adapt_shadow_shrink", T); }   // Own clock, so it cannot starve the decay
+        // FAST RECOVERY after a storm (WAN, SB_AOO_ADAPT_FAST_RECOVER=1). The need is sized from the most recent
+        // adapt_fast_wait_s_ seconds only (the full minute still remembers the storm). When that need sits well
+        // below the depth and nothing grew in that time, the older slices and the headroom are dropped and the
+        // depth goes there in one decision, played out without a splice. A depth that has to grow again within
+        // a minute raises the wait, and with it the look-back, to twice the calm that did not last (at least
+        // double, at most 120 s); five clean minutes reset it, so a line that stays rough keeps what it needs.
+        bool fast_done = false;
+        if (!adapt_lan_profile_ && adapt_fast_recover() && adapt_block_s_ > 0){
+            static const int32_t fast_base_s = std::max<int32_t>(5, sink_tap_int("SB_AOO_ADAPT_FAST_WAIT_S", 10, nullptr));
+            static const int32_t fast_margin = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_FAST_MARGIN_BLOCKS", 2, nullptr));
+            static const double  late_pm     = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_LATE_PER_MIN", 2, nullptr) * 1.0);
+            static const double  wan_margin  = std::max<int32_t>(0, std::min<int32_t>(10000, sink_tap_int("SB_AOO_ADAPT_WAN_MARGIN_US", 2000, nullptr))) / 1000.0;
+            if (adapt_fast_wait_s_ <= 0) adapt_fast_wait_s_ = fast_base_s;
+            const int32_t clean_s = adapt_stall_clean_secs_;
+            if (adapt_fast_last_t_ > 0 && (now - adapt_fast_last_t_) <= 60.0 && cur > adapt_fast_depth_){
+                // Wait at least twice as long as the calm that turned out not to last.
+                adapt_fast_wait_s_ = std::min<int32_t>(120, std::max<int32_t>(adapt_fast_wait_s_ * 2, (int32_t) std::ceil(2.0 * (now - adapt_fast_last_t_))));
+                adapt_fast_last_t_ = -1e9;
+                sink_evlog("adapt_fast_backoff", adapt_fast_wait_s_);
+            } else if (clean_s >= 300 && adapt_fast_wait_s_ != fast_base_s){
+                adapt_fast_wait_s_ = fast_base_s; sink_evlog("adapt_fast_backoff", adapt_fast_wait_s_);
+            }
+            const double age_cur = std::max(0.0, now - adapt_hist_slice_t0_);        // seconds in the current 10-s slice
+            if (cur > adapt_floor_blocks_ + fast_margin && clean_s >= adapt_fast_wait_s_
+                && (now - adapt_last_shrink_) >= (double) shrink_hold_s && adapt_hist_slice_t0_ >= 0){
+                // Whole 10-s slices, newest first, until they cover the wait: between wait and wait + 10 s of history.
+                const int32_t ncalm = std::min<int32_t>(kAdaptHistSlices, 1 + (int32_t) std::ceil(std::max(0.0, (double) adapt_fast_wait_s_ - age_cur) / 10.0));
+                const double calm_s = age_cur + 10.0 * (ncalm - 1);
+                if (calm_s >= 8.0){
+                    const double allow = std::max(1.0, late_pm * calm_s / 60.0);
+                    int32_t above[kAdaptHistBuckets + 1]; above[kAdaptHistBuckets] = 0;
+                    for (int32_t b = kAdaptHistBuckets - 1; b >= 0; --b){
+                        int32_t c = 0;
+                        for (int32_t k = 0; k < ncalm; ++k) c += adapt_hist_[(adapt_hist_slice_ - k + kAdaptHistSlices) % kAdaptHistSlices][b];
+                        above[b] = above[b + 1] + c;
+                    }
+                    int32_t H = kAdaptHistBuckets - 1;
+                    for (int32_t h = 0; h < kAdaptHistBuckets - 1; ++h){ if (above[h + 1] <= allow){ H = h; break; } }
+                    const double margin_ms = adapt_block_s_ * 1e3 + wan_margin;
+                    const int32_t need = std::max<int32_t>(adapt_floor_blocks_, (int32_t) std::ceil((H + margin_ms) / (adapt_block_s_ * 1e3)));
+                    const int32_t D = std::min<int32_t>(adapt_max_blocks_, need + fast_margin);
+                    if (D <= cur - std::max<int32_t>(2, cur / 8)){               // worth a move: at least 2 blocks and an eighth of the depth
+                        for (int32_t k = ncalm; k < kAdaptHistSlices; ++k)       // forget the slices that hold the storm
+                            memset(adapt_hist_[(adapt_hist_slice_ - k + kAdaptHistSlices) % kAdaptHistSlices], 0, sizeof(adapt_hist_[0]));
+                        adapt_headroom_blocks_ = 0; adapt_headroom_prev_ = 0;
+                        adapt_hist_blocks_ = need; adapt_base_blocks_ = need;
+                        adapt_last_shrink_ = now; adapt_fast_last_t_ = now; adapt_fast_depth_ = D;
+                        adapt_glide_request_ = adapt_glide_max() > 0;
+                        adapt_apply_target(D);
+                        sink_evlog("adapt_fast_recover", D);
+                        adapt_note(5, D, (float) (need * adapt_block_s_ * 1e3));
+                        fast_done = true;
+                    }
+                }
+            }
+        }
         // Decay toward the MEASURED need. "Clean" = no STALL-class gap and no grow for
         // SB_AOO_ADAPT_DECAY_CLEAN_S (120 s; 0 turns decay off, pure grow-only); isolated pops do not reset
         // the wait, they only feed the histogram need. Never below need + SB_AOO_ADAPT_DECAY_MARGIN_BLOCKS (2).
@@ -2849,7 +2945,7 @@ void source_desc::adapt_retarget(const sink& s, double now){
         static const int32_t decay_gap_s = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_DECAY_MIN_GAP_S", 120, nullptr));
         const double min_gap = adapt_lan_profile_ ? 60.0 : (double) decay_gap_s;
         const int32_t clean_now = adapt_lan_profile_ ? adapt_clean_secs_ : adapt_stall_clean_secs_;   // WAN = stall-free seconds
-        if (decay_clean_s > 0 && cur > Tfloor && clean_now >= decay_clean_s && (now - adapt_last_shrink_) >= min_gap){
+        if (!fast_done && decay_clean_s > 0 && cur > Tfloor && clean_now >= decay_clean_s && (now - adapt_last_shrink_) >= min_gap){
             const int32_t D = adapt_lan_profile_ ? std::max<int32_t>(Tfloor, cur - std::max<int32_t>(1, (cur - Tfloor) / 2))
                                                  : std::max<int32_t>(Tfloor, std::min<int32_t>(cur - 1, (int32_t) std::ceil(cur / 1.33)));
             adapt_last_shrink_ = now;
@@ -2907,6 +3003,9 @@ void source_desc::adapt_apply_target(int32_t T){
         nextneedsfadein_ = next_; sink_evlog("fade_arm", next_);
         sink_evlog("adapt_refill", n);
         adapt_shrink_pending_ = false;
+    } else if (adapt_glide_request_){
+        adapt_glide_request_ = false; adapt_shrink_pending_ = false;
+        adapt_glide_active_.store(true, std::memory_order_relaxed);
     } else {
         adapt_shrink_pending_ = true;
     }

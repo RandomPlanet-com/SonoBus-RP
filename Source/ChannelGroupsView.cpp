@@ -912,6 +912,16 @@ void ChannelGroupView::resized()
     if (panLabel) {
         panLabel->setBounds(panSlider->getBounds().removeFromTop(16).translated(0, -2));
     }
+
+    // Caption text sits in the gap above the meter, its baseline at the meter's top edge
+    auto placeCaption = [](Label * cap, Rectangle<int> over) {
+        if (cap) cap->setBounds(over.getCentreX() - 15, over.getY() - 10, 30, 12);
+    };
+    if (premeter) {
+        const bool pair = premeter2 && premeter2->isVisible();
+        placeCaption(inCaption.get(), pair ? premeter->getBounds().getUnion(premeter2->getBounds()) : premeter->getBounds());
+    }
+    if (meter) placeCaption(outCaption.get(), meter->getBounds());
     
 
     int triwidth = 10;
@@ -1522,6 +1532,18 @@ ChannelGroupView * ChannelGroupsView::createChannelGroupView(bool first)
         pvf->premeter2->setUseBackgroundImage(true);
         pvf->premeter2->setRefreshRateHz(meterRate);
         pvf->premeter2->addMouseListener(this, false);
+
+        // Captions over the meters; hidden until the input layout shows them
+        pvf->inCaption = std::make_unique<Label>("incap", TRANS("IN"));
+        pvf->outCaption = std::make_unique<Label>("outcap", TRANS("OUT"));
+        for (Label * cap : { pvf->inCaption.get(), pvf->outCaption.get() }) {
+            cap->setFont(9);
+            cap->setColour(Label::textColourId, dimTextColor);
+            cap->setJustificationType(Justification::centredBottom);
+            cap->setBorderSize(BorderSize<int>(0));
+            cap->setInterceptsMouseClicks(false, false);
+            cap->setAccessible(false);
+        }
     }
 
     // Every label, button and slider in the row is buffered to an image, because the adjacent meters dirty their
@@ -1532,7 +1554,7 @@ ChannelGroupView * ChannelGroupsView::createChannelGroupView(bool first)
             pvf->chanLabel.get(), pvf->levelSlider.get(), pvf->monitorSlider.get(),
             pvf->panLabel.get(), pvf->panSlider.get(), pvf->linkButton.get(),
             pvf->monoButton.get(), pvf->destButton.get(), pvf->fxButton.get(),
-            pvf->monfxButton.get() }) {
+            pvf->monfxButton.get(), pvf->inCaption.get(), pvf->outCaption.get() }) {
         if (c) c->setBufferedToImage(true);
     }
 
@@ -1551,6 +1573,17 @@ void ChannelGroupsView::setMetersSuspended(bool flag)
     if (metersSuspended == flag) return;
     metersSuspended = flag;
     setMetersActive(metersActive);
+}
+
+void ChannelGroupsView::setSendMutedAppearance(bool flag)
+{
+    mSendMutedAppearance = flag;
+    const float alpha = flag ? 0.35f : 1.0f;
+    for (auto * pvf : mChannelViews) {
+        if (pvf->meter) pvf->meter->setAlpha(alpha);
+        if (pvf->premeter) pvf->premeter->setAlpha(alpha);
+        if (pvf->premeter2) pvf->premeter2->setAlpha(alpha);
+    }
 }
 
 void ChannelGroupsView::setMetersActive(bool flag)
@@ -1938,6 +1971,7 @@ void ChannelGroupsView::rebuildChannelViews(bool notify)
     while (mChannelViews.size() > numchans) {
         mChannelViews.removeLast();
     }
+    if (mSendMutedAppearance) setSendMutedAppearance(true);   // rows added above start dimmed
 
 
     for (int i= (mPeerMode ? -1 : 0); i < mChannelViews.size(); ++i) {
@@ -1980,6 +2014,9 @@ void ChannelGroupsView::setupChildren(ChannelGroupView * pvf)
     pvf->addAndMakeVisible(pvf->monfxButton.get());
 
     pvf->addAndMakeVisible(pvf->panSlider.get());
+
+    if (pvf->inCaption) pvf->addChildComponent(pvf->inCaption.get());
+    if (pvf->outCaption) pvf->addChildComponent(pvf->outCaption.get());
 
     pvf->panSlider->setPopupDisplayEnabled(true, true, dw);
 
@@ -2561,12 +2598,17 @@ void ChannelGroupsView::updateLayoutForInput(bool notify)
 
             pvf->inbox.items.add(FlexItem(3, 3));
 
+            const bool pairRow = i < mChannelViews.size() && chcnt == 2 && chi == 0;
+            const int postmeterwidth = pairRow ? 2 * mainmeterwidth : mainmeterwidth;   // two bars for a stereo pair
             pvf->inbox.items.add(FlexItem(meterwidth, minitemheight, *pvf->premeter).withMargin(0).withFlex(0));
             if (pvf->premeter2) {
-                const bool pairRow = i < mChannelViews.size() && chcnt == 2 && chi == 0;
                 pvf->premeter2->setVisible(pairRow);
                 if (pairRow) pvf->inbox.items.add(FlexItem(meterwidth, minitemheight, *pvf->premeter2).withMargin(0).withFlex(0));
             }
+            // Captions go in the gap above the meters, so only input rows that have that gap get them
+            const bool captionRow = i < mChannelViews.size() && chi == 0;
+            if (pvf->inCaption) pvf->inCaption->setVisible(captionRow);
+            if (pvf->outCaption) pvf->outCaption->setVisible(captionRow && !mHideRowMeter);
             pvf->inbox.items.add(FlexItem(3, 3));
 
 
@@ -2612,7 +2654,7 @@ void ChannelGroupsView::updateLayoutForInput(bool notify)
 
                 pvf->monbox.items.add(FlexItem(3, 3).withFlex(0));   // No slack before the pan block
 
-                if (!mHideRowMeter) pvf->monbox.items.add(FlexItem(mainmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));   // Collapsed peer row — tall meter drawn by the peer view instead
+                if (!mHideRowMeter) pvf->monbox.items.add(FlexItem(postmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));   // Collapsed peer row — tall meter drawn by the peer view instead
                 pvf->meter->setVisible(!mHideRowMeter);
 
                 pvf->monbox.items.add(FlexItem(4, 3));
@@ -2638,7 +2680,7 @@ void ChannelGroupsView::updateLayoutForInput(bool notify)
 
             }
             else {
-                if (!mHideRowMeter) pvf->monbox.items.add(FlexItem(mainmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));   // (option D)
+                if (!mHideRowMeter) pvf->monbox.items.add(FlexItem(postmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));   // (option D)
                 pvf->meter->setVisible(!mHideRowMeter);
                 pvf->monbox.items.add(FlexItem(4, 3));
 
@@ -3080,7 +3122,7 @@ void ChannelGroupsView::updateInputModeChannelViews(int specific)
 
         pvf->meter->setMeterSource (&processor.getPostInputMeterSource());
         pvf->meter->setSelectedChannel(i);
-        pvf->meter->setFixedNumChannels(1);
+        pvf->meter->setFixedNumChannels(stereoPair ? 2 : 1);   // a pair shows both post-fader channels
 
         pvf->premeter->setMeterSource (&processor.getInputMeterSource());
         pvf->premeter->setSelectedChannel(chstart + chi);

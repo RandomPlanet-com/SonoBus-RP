@@ -14,6 +14,8 @@ This repository holds both halves:
 
 Downloads and install instructions: <https://randomplanet.com>
 
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
 ## Credits
 
 SonoBus RP is built with [JUCE](https://juce.com) and [AOO](https://git.iem.at/cm/aoo) (Audio over OSC), both
@@ -28,12 +30,18 @@ You need CMake 3.22 or newer and a C++17 compiler.
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build build --target SonoBus_Standalone SonoBusHub
 
-**Linux** (Ubuntu or Debian; see `linux/deb_get_prereqs.sh` for the package list, plus `libopus-dev`):
+**Linux** (Ubuntu or Debian): install the packages with `linux/deb_get_prereqs.sh`, then:
 
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build build --target SonoBus_Standalone SonoBusHub
 
 The player is built as `SonoBus_artefacts/Release/Standalone/`, the hub as `SonoBusHub_artefacts/Release/`.
+To build only one of them, name only that target: `--target SonoBusHub` for the hub, `--target SonoBus_Standalone`
+for the player.
+
+Memory: a few source files need more than 1 GB each to compile, and Ninja runs several jobs at once. On a machine
+with less than about 4 GB free, build one job at a time by running `export CMAKE_BUILD_PARALLEL_LEVEL=1` before the
+first command; the full build then needs about 2 GB. The hub alone builds on a 1 GB machine that has swap space.
 
 ## Notes
 

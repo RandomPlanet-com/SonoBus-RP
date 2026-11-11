@@ -2471,6 +2471,16 @@ void ConnectView::RecentsListModel::listBoxItemClicked (int rowNumber, const Mou
     }
 }
 
+void ConnectView::RecentsListModel::listBoxItemDoubleClicked (int rowNumber, const MouseEvent& e)
+{
+    // A double-click joins at once, except on the remove button
+    if (rowNumber < 0 || rowNumber >= recents.size() || e.getPosition().x > removeButtonX) return;
+    if (e.getNumberOfClicks() != 2) return;   // a triple click must not connect twice
+
+    const AooServerConnectionInfo info = recents.getReference(rowNumber);   // copy: the list may refresh while connecting
+    parent->connectWithInfo(info);
+}
+
 void ConnectView::RecentsListModel::selectedRowsChanged(int rowNumber)
 {
 

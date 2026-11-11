@@ -160,9 +160,10 @@ button.warn{border-color:#e3c141;background:#3b3417}
 table{border-collapse:collapse;width:100%;table-layout:fixed;font-variant-numeric:tabular-nums}
 th,td{padding:7px 6px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line);overflow:hidden}
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--card);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;white-space:normal;line-height:1.15;vertical-align:bottom}
-th.num,td.num{text-align:right}
-#ptable th{cursor:pointer;user-select:none}
-td.user{white-space:normal;word-break:break-word}
+th.num,td.num{text-align:left}
+.u{color:var(--dim);font-size:11px;margin-left:2px}.sl{margin:0 4px}.sw{white-space:nowrap}.sa{color:#fff;margin-left:4px;font-size:10px}
+#ptable{width:1553px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}
+td.user{white-space:normal;word-break:break-word;position:relative;overflow:visible}
 tr:last-child td{border-bottom:0}
 .g{color:#5fd26b}.y{color:#e3c141}.r{color:#ff5e5e}.d{color:#777}.rec{color:#ff5e5e;font-weight:700}
 .wrap{overflow:auto}
@@ -203,15 +204,15 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 <div class="card pane" id="pane-status">
  <div class="tools" style="margin:0 0 12px"><label for="grp">Group</label><input type="text" id="grp" title="Type a new group name, then click Apply."><button id="grpbtn" class="warn" title="Switch the hub to this group. The hub restarts and players must rejoin.">Apply (restarts hub)</button><span style="flex:1 1 auto"></span><input type="text" id="gmsg" maxlength="1000" placeholder="Message to the group" title="Sends a chat message to every player, from Hub."><button id="gmsgbtn" title="Send this message to every player.">Send</button><span id="gmsgnote" class="msg"></span></div>
  <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
- <div class="wrap"><table id="ptable"><colgroup><col style="width:180px"><col style="width:104px"><col style="width:52px"><col style="width:74px"><col style="width:72px"><col style="width:72px"><col style="width:136px"><col style="width:76px"><col style="width:58px"><col style="width:64px"><col style="width:56px"><col style="width:78px"><col style="width:66px"><col style="width:76px"><col style="width:88px"><col style="width:60px"><col style="width:72px"><col style="width:92px"></colgroup><thead><tr>
- <th>Player</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="num" title="What this player sends into the hub (kb/s or Mb/s, bits)">Up</th><th class="num" title="What the hub sends to this player (kb/s or Mb/s, bits)">Down</th><th>Address</th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="num" title="This player's audio reaching the hub (ms): network one-way + the hub's hold on their stream">To hub</th><th class="num" title="The hub's audio reaching this player (ms): network one-way + the player's own receive buffer">From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="num" title="The hub's hold on this player's incoming stream (ms)">Hub buf</th><th class="num" title="The player's own receive buffer (ms) as it reports it; A = Auto, M = Manual">Player buf</th><th class="num" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected for</th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
+ <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"></colgroup><thead><tr>
+ <th title="Point at a name to see the player's address">Player</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down Mb/s</th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="15" class="d">no players</td></tr></tbody></table></div>
  <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
 
  <h2 style="margin-top:20px" title="Groups this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent sessions</h2>
  <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Group</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Group link for this session (this hub's address + that group and password)">Group link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
  <div id="sdetail" style="display:none">
   <h2 style="margin-top:18px" id="sdtitle">Session</h2>
-  <div class="wrap"><table id="rtable"><colgroup><col style="width:180px"><col style="width:150px"><col style="width:150px"><col style="width:150px"><col style="width:56px"><col style="width:56px"><col style="width:40px"></colgroup><thead><tr><th>Player</th><th>Location</th><th>Last joined</th><th>Last left</th><th class="num">Joins</th><th>Net</th><th></th></tr></thead><tbody id="recent"><tr><td colspan="6" class="d">–</td></tr></tbody></table></div>
+  <div class="wrap"><table id="rtable"><colgroup><col style="width:200px"><col style="width:170px"><col style="width:176px"><col style="width:176px"><col style="width:52px"><col style="width:52px"><col style="width:36px"></colgroup><thead><tr><th>Player</th><th>Location</th><th>Last joined</th><th>Last left</th><th class="num">Joins</th><th>Net</th><th></th></tr></thead><tbody id="recent"><tr><td colspan="6" class="d">–</td></tr></tbody></table></div>
   <div class="tools">
    <label for="spw">Password</label><input type="password" id="spw" placeholder="(no password)" autocomplete="new-password" title="The password the hub will use for this group — edit it, or clear it for no password">
    <button id="sapply" class="warn" title="Write this session's group, password and hub settings to hub_settings.json and restart the hub — players must rejoin">Apply and restart hub</button>
@@ -246,16 +247,17 @@ const dur=(s)=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.fl
 // survives the 1-s refresh (copy/paste works).
 const setT=(el,t)=>{if(el.textContent!==t)el.textContent=t;};
 const setH=(el,h)=>{if(!el||!el.dataset)return;if(el.dataset.h!==h){el.dataset.h=h;el.innerHTML=h;}};   // guard (Safari threw on a missing cell)
-const rowMap=new Map();const COLS=18;
+const rowMap=new Map();const COLS=15;
 
 // order); numeric columns sort by the value behind the cell ('–'/unknown lowest), text columns case-insensitively.
 // The choice is kept in JS state (re-applied after every 1-s rebuild) and per browser in localStorage.
-const NUMC=new Set([2,4,5,7,8,9,10,11,12,13,14,15,16,17]);
+const NUMC=new Set([2,4,5,6,7,8,9,10,11,12,13]);
 let sort={c:-1,d:1};try{const s=JSON.parse(localStorage.getItem('sbhub.sort')||'null');if(s&&typeof s.c==='number'&&(s.d===1||s.d===-1))sort=s;}catch(e){}
 const rowKeys=new Map();
 const ths=[...document.querySelectorAll('#ptable thead th')];
 ths.forEach((th,i)=>{th.dataset.label=th.textContent;th.onclick=()=>{if(sort.c!==i)sort={c:i,d:1};else if(sort.d===1)sort={c:i,d:-1};else sort={c:-1,d:1};try{localStorage.setItem('sbhub.sort',JSON.stringify(sort));}catch(e){}drawSortMarks();applySort();};});
-function drawSortMarks(){ths.forEach((th,i)=>setT(th,th.dataset.label+(sort.c===i?(sort.d===1?' ▲':' ▼'):'')));}
+const sortHead=(label,mark)=>{if(!mark)return esc(label);const k=label.lastIndexOf(' ');return esc(label.slice(0,k+1))+`<span class="sw">${esc(label.slice(k+1))}<span class="sa">${mark}</span></span>`;};
+function drawSortMarks(){ths.forEach((th,i)=>setH(th,sortHead(th.dataset.label,sort.c===i?(sort.d===1?'▲':'▼'):'')));}
 function applySort(){if(sort.c<0)return;const c=sort.c,d=sort.d;
  const ids=[...rowMap.keys()].sort((a,b)=>{const ka=rowKeys.get(a)[c],kb=rowKeys.get(b)[c];const r=NUMC.has(c)?(ka-kb):String(ka).localeCompare(String(kb),undefined,{sensitivity:'base',numeric:true});return r*d;});
  const tb=$('rows');const cur=[...tb.children].filter(tr=>tr.id!=='norows').map(tr=>Number(tr.dataset.id));
@@ -269,7 +271,7 @@ const ft=(ms)=>ms>0?new Date(ms).toLocaleString([],{month:'numeric',day:'numeric
 async function loadSessions(force){try{const r=await fetch(api('/api/sessions'),{cache:'no-store'});if(!r.ok)return;const txt=await r.text();if(txt===sessLast&&!force)return;sessLast=txt;sessions=JSON.parse(txt).sessions||[];drawSessions();}catch(e){}}
 const sSort={col:-1,desc:false},rSort={col:-1,desc:false},SKEYS=['group','firstUsedMs','lastUsedMs','playerCount'],RKEYS=['user','location','lastJoinMs','lastLeftMs','joins','lan'];
 function sortRows(rows,st,keys){if(st.col<0||st.col>=keys.length)return rows;const k=keys[st.col],m=st.desc?-1:1;return rows.slice().sort((a,b)=>{const x=a[k],y=b[k];return m*((typeof x==='string')?String(x).localeCompare(String(y),undefined,{sensitivity:'base'}):(x>y)-(x<y));});}
-function hookSort(id,st,keys,draw){const ths=document.querySelectorAll('#'+id+' thead th');const base=[...ths].map(t=>t.textContent);ths.forEach((t,i)=>{if(i>=keys.length)return;t.style.cursor='pointer';t.onclick=()=>{if(st.col!==i){st.col=i;st.desc=false;}else if(!st.desc)st.desc=true;else st.col=-1;ths.forEach((h,j)=>{h.textContent=base[j]+(j===st.col?(st.desc?' ▼':' ▲'):'');});draw();};});}
+function hookSort(id,st,keys,draw){const ths=document.querySelectorAll('#'+id+' thead th');const base=[...ths].map(t=>t.textContent);ths.forEach((t,i)=>{if(i>=keys.length)return;t.style.cursor='pointer';t.onclick=()=>{if(st.col!==i){st.col=i;st.desc=false;}else if(!st.desc)st.desc=true;else st.col=-1;ths.forEach((h,j)=>{h.innerHTML=sortHead(base[j],j===st.col?(st.desc?'▼':'▲'):'');});draw();};});}
 function drawSessions(){const tb=$('sessions');
  tb.innerHTML=sessions.length?sortRows(sessions,sSort,SKEYS).map(s=>`<tr data-g="${esc(s.group)}" class="${s.group===selGroup?'sel':''}"><td class="user">${esc(s.group)}${s.password?' <span class="d">pw: '+esc(s.password)+'</span>':''}${s.current?' <span class="g" title="the group the hub is serving now">● current</span>':''}</td><td>${ft(s.firstUsedMs)}</td><td>${ft(s.lastUsedMs)}</td><td class="num">${s.playerCount}</td><td class="pl"><button class="slink" data-link="${esc(s.link||'')}" title="Copy this session's group link">Copy link</button> <span class="d link">${esc(s.link||'')}</span></td><td class="num">${s.current?'':'<button class="srm" title="Remove this session from the list">✕</button>'}</td></tr>`).join(''):'<tr><td colspan="6" class="d">no sessions yet</td></tr>';
  tb.querySelectorAll('tr[data-g]').forEach(tr=>{tr.onclick=()=>{selGroup=(selGroup===tr.dataset.g)?null:tr.dataset.g;$('sdmsg').textContent='';drawSessions();};});
@@ -321,24 +323,30 @@ async function tick(){
    const up=(pp&&dt>0)?(p.bytesIn-pp.bytesIn)/dt:-1, dn=(pp&&dt>0)?(p.bytesOut-pp.bytesOut)/dt:-1;
    const sig=p.muted?'<span class="sig off"></span><span class="d" title="this player muted their send">muted</span>':(p.blocksNonZero>0?'<span class="sig on"></span>sending':'<span class="sig off"></span><span class="d">silent</span>');
    const dc=p.drops==0?'d':p.drops<100?'y':'r';
-   const lat=(v)=> v<0?'<span class="d">–</span>':`<span class="${col(v,LATC.g,LATC.y)}">${v.toFixed(1)}</span>`;
-   const nj=p.jitP99<0?'–':`<span class="${p.jitP99<=1.5?'g':p.jitP99<=3?'y':'r'}">${p.jitP99.toFixed(1)}</span> <span class="d">${p.lan?'LAN':'WAN'}</span>`;
-   const win=Math.max(p.rxUnderruns,0)+Math.max(p.rxPops,0);const gl=(p.rxUnderruns<0)?'<span class="d">–</span>':`<span class="${(p.rxUnderrunsTotal+p.rxPopsTotal)==0?'d':''}">${p.rxUnderrunsTotal+p.rxPopsTotal}</span>${win>0?` <span class="y">(+${win})</span>`:''}${p.xruns>0?` <span class="r">x${p.xruns}</span>`:''}`;
+   const lat=(v)=> v<0?'<span class="d">–</span>':`<span class="${col(v,LATC.g,LATC.y)}">${v.toFixed(1)}</span><span class="u">ms</span>`;
+   const nj=p.jitP99<0?'–':`<span class="${p.jitP99<=1.5?'g':p.jitP99<=3?'y':'r'}">${p.jitP99.toFixed(1)}</span><span class="u">ms</span> <span class="d">${p.lan?'LAN':'WAN'}</span>`;
+   const win=Math.max(p.rxUnderruns,0)+Math.max(p.rxPops,0);const tot=p.rxUnderrunsTotal+p.rxPopsTotal;
+   const gl=`${(p.rxUnderruns<0)?'<span class="d">–</span>':`<span class="${tot==0?'d':''}">${tot}</span>`}${(p.rxUnderruns>=0&&win>0)?` <span class="y">(+${win})</span>`:''}${p.xruns>0?` <span class="r">x${p.xruns}</span>`:''}`;
    const jb=p.jitBufPct<0?'–':`<span class="${p.jitBufPct>=90?'g':p.jitBufPct>=50?'y':'r'}">${p.jitBufPct.toFixed(0)}%</span>`;
    const lf=(p.latFeedAgeS===undefined||p.latFeedAgeS<0)?'<span class="d">–</span>':(p.latFeedAgeS<=35?`<span class="g">${p.latFeedAgeS}s</span>`:`<span class="r">dark ${p.latFeedAgeS}s</span>`);
    const loc=p.location===''?'<span class="d">…</span>':esc(p.location);
    const dev=p.devBuf>0?`${p.devBuf} @ ${Math.round(p.devSr/1000)}k`:'–';
    const name=(p.recording?'<span class="rec">● </span>':'')+esc(p.user);
    const inputs=`${p.inputs}`;
-   const hb=(p.sinkBufMs<0)?'<span class="d">–</span>':`${p.sinkBufMs.toFixed(1)}${p.holdAtCeiling?' ⚠':''}`;
+   const hb=(p.sinkBufMs<0)?'<span class="d">–</span>':`${p.sinkBufMs.toFixed(1)}<span class="u">ms</span>${p.holdAtCeiling?' ⚠':''}`;
    const pbm=(p.recvBufMode===1)?' <span class="d">A</span>':(p.recvBufMode===0)?' <span class="d">M</span>':'';
-   const pb=(p.clientRecvBufMs===undefined||p.clientRecvBufMs<0)?'<span class="d">–</span>':`${p.clientRecvBufMs.toFixed(1)}${pbm}`;
-   const cells=[name,loc,inputs,sig,kb(up),kb(dn),esc(p.addr),`<span class="${dc}">${p.drops}</span>`,lat(p.toHubMs),lat(p.fromHubMs),jb,nj,hb,pb,gl,lf,dev,dur((now-p.joinedAtMs)/1000)];
+   const pb=(p.clientRecvBufMs===undefined||p.clientRecvBufMs<0)?'<span class="d">–</span>':`${p.clientRecvBufMs.toFixed(1)}<span class="u">ms</span>${pbm}`;
+   // Columns are fixed, so a value that gains a digit moves nothing outside its own cell.
+   const pair=(x,y)=>`${x}<span class="d sl">/</span>${y}`;
+   const mb=(v)=> v<0?'–':(v*8/1e6).toFixed(1);
+   const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}`:'<span class="d">–</span>';
+   const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
 
-   rowKeys.set(p.id,[p.user.toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,dn,p.addr,p.drops,p.toHubMs,p.fromHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.clientRecvBufMs===undefined?-1:p.clientRecvBufMs),(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs)]);
+   rowKeys.set(p.id,[p.user.toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
    let tr=rowMap.get(p.id);
-   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([2,4,5,7,8,9,10,11,12,13,14,15].includes(i))td.className='num';if(i===0)td.className='user';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
-   cells.forEach((c,i)=>setH(tr.children[i],c));}
+   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([2,5,7,8,11].includes(i))td.className='num';if([4,6,9,10].includes(i))td.className='ctr';if(i===0)td.className='user';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
+   cells.forEach((c,i)=>setH(tr.children[i],c));
+   if(tr.children[COLS-1].title!==(p.ver||''))tr.children[COLS-1].title=p.ver||'';}
   for(const [id,tr] of rowMap){if(!seen.has(id)){tr.remove();rowMap.delete(id);rowKeys.delete(id);}}
   applySort();
   $('norows').style.display=rowMap.size?'none':'';
@@ -539,6 +547,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
         o << "]"
           << ",\"location\":\"" << jsonEscape(locationFor(p.ipAddr, p.isLan)) << "\""   
           << ",\"recording\":" << (p.isRecording ? "true" : "false") << ",\"muted\":" << (p.isSendMuted ? "true" : "false") << ",\"devBuf\":" << p.clientDevBuf << ",\"devSr\":" << p.clientDevSr
+          << ",\"ver\":\"" << jsonEscape(p.clientVersion) << "\",\"os\":\"" << jsonEscape(p.clientOs) << "\""
           << ",\"joinedAtMs\":" << p.joinedAtMs << "}";
     }
     o << "]}";

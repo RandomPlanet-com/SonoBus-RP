@@ -366,6 +366,13 @@ private:
     aoo_adapt_event adapt_ev_[16] = {};  std::atomic<uint32_t> adapt_ev_seq_{0};
     void adapt_note(int32_t kind, int32_t blocks, float late_ms = 0.0f);
     bool    adapt_shrink_pending_ = false;   // governor drains the excess in ONE splice on the next packet
+    // Fast recovery after a line storm (WAN profile, SB_AOO_ADAPT_FAST_RECOVER=1).
+    std::atomic<bool> adapt_glide_active_{false};   // the excess above the target is being played out slightly fast, not spliced
+    double  adapt_glide_g_ = 0;              // current speed-up (audio thread only)
+    int32_t adapt_fast_wait_s_ = 0;          // stall-free seconds required before the next fast decision (doubles on a relapse)
+    double  adapt_fast_last_t_ = -1e9;       // time of the last fast decision
+    int32_t adapt_fast_depth_ = 0;           // depth that decision chose
+    bool    adapt_glide_request_ = false;    // set by the retarget just before a shrink that should glide
     void adapt_track(const sink& s, const data_packet& d, bool fresh);
     void adapt_retarget(const sink& s, double now);
     void adapt_apply_target(int32_t target);

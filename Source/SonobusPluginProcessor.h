@@ -319,7 +319,12 @@ public:
     
     bool connectToServer(const String & host, int port, const String & username, const String & passwd="");
     bool isConnectedToServer() const;
-    bool disconnectFromServer();
+    // userRequested = the user chose to leave (not a quit, not a lost connection).
+    bool disconnectFromServer(bool userRequested = true);
+    // Whether the next launch should rejoin the last room: yes after a quit, crash or lost connection while in a
+    // room, no after the user disconnected. Kept in a small file so it survives a crash.
+    void sbMarkLaunchRejoin(bool inRoom);
+    bool sbLaunchRejoinWanted() const;
     double getElapsedConnectedTime() const { return mSessionConnectionStamp > 0 ? (Time::getMillisecondCounterHiRes() - mSessionConnectionStamp) * 1e-3 : 0.0; }
 
     void setAutoconnectToGroupPeers(bool flag);

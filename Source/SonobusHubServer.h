@@ -265,17 +265,24 @@ struct HubPeer {
         // the same lock), read + rotated by the stats thread every 10 s. Never the audio thread.
         static constexpr int kGapSlices = 6, kGapBuckets = 66;
         uint32_t gapHist[kGapSlices][kGapBuckets] = {};
+        // The same 60 s in 0.25-ms steps for gaps up to 8 ms (last index = longer). The hold target reads it when
+        // SB_HUB_HOLD_FINE=1, so a link whose gaps sit near a whole millisecond is not rounded up by a full one.
+        static constexpr int kFineBuckets = 34;
+        static constexpr double kFineStepMs = 0.25;
+        uint32_t gapFine[kGapSlices][kFineBuckets] = {};
         int gapSlice = 0;
         void clearGaps() {                 // Drop the join transient before the quick check
             std::lock_guard<std::mutex> g(lock);
             for (int sl = 0; sl < kGapSlices; ++sl) for (int i = 0; i < kGapBuckets; ++i) gapHist[sl][i] = 0;
+            for (int sl = 0; sl < kGapSlices; ++sl) for (int i = 0; i < kFineBuckets; ++i) gapFine[sl][i] = 0;
         }
         void rotateGapSlice() {            // stats thread, every 10 s: advance + clear the new slice
             std::lock_guard<std::mutex> g(lock);
             gapSlice = (gapSlice + 1) % kGapSlices;
             for (int i = 0; i < kGapBuckets; ++i) gapHist[gapSlice][i] = 0;
+            for (int i = 0; i < kFineBuckets; ++i) gapFine[gapSlice][i] = 0;
         }
-        struct GapWindow { uint32_t total = 0; uint32_t above[kGapBuckets] = {}; double maxMs = 0; };
+        struct GapWindow { uint32_t total = 0; uint32_t above[kGapBuckets] = {}; uint32_t aboveFine[kFineBuckets] = {}; double maxMs = 0; };
         GapWindow gapWindow() const {      // counts of gaps > H ms for every integer H, over the whole 60 s
             GapWindow w;
             std::lock_guard<std::mutex> g(lock);
@@ -287,6 +294,12 @@ struct HubPeer {
                 cum += c;
             }
             w.total = cum;
+            uint32_t cumF = 0;
+            for (int b = kFineBuckets - 1; b >= 0; --b) {
+                uint32_t c = 0; for (int sl = 0; sl < kGapSlices; ++sl) c += gapFine[sl][b];
+                w.aboveFine[b] = cumF;     // gaps strictly above b x 0.25 ms
+                cumF += c;
+            }
             return w;
         }
         void record(std::chrono::steady_clock::time_point now) {
@@ -300,6 +313,8 @@ struct HubPeer {
                     if (ringCount < kRing) ringCount++;
                     int b = (int)std::ceil(d); if (b < 0) b = 0; if (b > kGapBuckets - 1) b = kGapBuckets - 1;
                     gapHist[gapSlice][b]++;
+                    int f = (int)std::ceil(d * 4.0f); if (f < 0) f = 0; if (f > kFineBuckets - 1) f = kFineBuckets - 1;
+                    gapFine[gapSlice][f]++;
                 }
             }
             lastArrival = now;
@@ -380,6 +395,11 @@ struct HubPeer {
     int     holdLateWindows = 0;      // (unused since the rolling ring below)
     uint32_t holdLateRing[12] = {};   // PM: late blocks per 10-s window, last 2 min (bursty links never give 12 consecutive bad windows)
     int      holdLateIdx = 0;
+    int     holdFollowWindows = 0;    // consecutive samples with the measured target a block or more above the hold
+    int64_t holdNoDecayUntilMs = 0;   // after a follow the hold stays up for a while, so it cannot flap with the decay
+    int     holdFastWindows = 3;      // calm samples required before a one-step return to the target (doubles on a relapse)
+    int64_t holdFastAtMs = 0;         // time of the last one-step return
+    double  holdFastToMs = 0;         // hold that step chose
     int     holdDecayWindows = 0;     // consecutive windows that would have earned a shrink (SHADOW only)
     uint32_t holdLatePrev = 0;
     uint32_t holdStallPrev = 0;       // Previous sample's 60-s STALL count (GROW-STALL sees NEW stalls)
@@ -438,6 +458,9 @@ struct HubPeer {
     std::atomic<int32_t> clientRecvBufMode { -1 };   // 9th /sb/hxbuf arg: 0 = Manual, 1 = Auto, -1 = not reported; clientLatFeedAgeS: seconds since the player last APPLIED our /sb/hxlat (-1 = unknown)
     std::atomic<int> isRecording { 0 };   // Player reports it is recording (/sb/hxrec, /sb/hxbuf)
     std::atomic<int> isSendMuted { 0 };   // Player muted its own send (/sb/hxsendmute; /sb/hxbuf arg 10 re-asserts)
+    std::atomic<int32_t> lanDepthBlocks { 0 };   // Live depth of this player's adaptive LAN sink in blocks (0 = not known)
+    std::mutex verLock;                   // guards the two strings below (receive thread writes, UI snapshot reads)
+    std::string clientVersion, clientOs;  // Player's version and system (/sb/hxver); empty for players that do not report it
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
     // Last chirp-onset mach ticks seen in this peer's decoded
@@ -783,6 +806,7 @@ public:
         uint32_t clientRxUnderrunsTotal = 0, clientRxPopsTotal = 0;   // Since the player joined
         bool isRecording = false;   
         bool isSendMuted = false;   // Send muted (relayed to everyone)
+        std::string clientVersion, clientOs;   // Player's version and system; empty when the player does not report it
         int clientDevBuf = -1, clientDevSr = -1;   // Player's audio buffer + sample rate
         bool  isLan = false;
         uint64_t lostBlocks = 0;             // Total blocks of this player's stream the hub lost (never arrived, not resent) — the 'Drops' column

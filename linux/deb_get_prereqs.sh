@@ -14,6 +14,7 @@ PREREQS="libjack-jackd2-dev \
     libxinerama-dev \
     libxrandr-dev \
     libxcursor-dev \
+    ninja-build \
     cmake
     "
 FREETYPES=$(apt-cache pkgnames libfreetype)

@@ -253,6 +253,7 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     const auto previous = parent.getChildFile(current.getFileName() + ".previous");
     previous.deleteFile();
     if (!current.copyFileTo(previous)) return R::fail("Could not keep a copy of the current hub");
+    previous.setExecutePermission(true);   // the kept copy must be runnable for a rollback
     if (::rename(staged.getFullPathName().toRawUTF8(), current.getFullPathName().toRawUTF8()) != 0)
         return R::fail("Could not move the new hub into place");
     return R::ok();

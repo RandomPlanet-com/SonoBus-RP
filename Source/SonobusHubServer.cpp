@@ -1809,12 +1809,16 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
             auto q = p->jstats.compute(p->jstats.uiWin);
             up.jitP50Ms = q.p50; up.jitP95Ms = q.p95; up.jitP99Ms = q.p99;
             up.jitMaxMs = q.maxMs; up.pktRate = q.pps; up.gapPct = q.gapPct;
-            up.sinkBufMs = (float)p->abufCurrentMs;
+            {   // Hold in force: the adaptive LAN sink's live depth, or the WAN hold
+                const int32_t lb = p->lanDepthBlocks.load(std::memory_order_relaxed);
+                up.sinkBufMs = (p->isLan && lb > 0) ? (float) (lb * 1000.0 * (double) mBlockSize / (double) std::max(1, mSampleRate)) : (float) p->abufCurrentMs;
+            }
             up.holdAtCeiling = p->holdAtCeiling.load(std::memory_order_relaxed);   
             up.clientRecvBufMs = p->clientRecvBufMs.load(std::memory_order_relaxed);
             up.clientRxUnderruns10s = p->clientRxUnderruns10s.load(std::memory_order_relaxed);   
             up.isRecording = p->isRecording.load(std::memory_order_relaxed) != 0;                   
             up.isSendMuted = p->isSendMuted.load(std::memory_order_relaxed) != 0;                   
+            { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; }
             up.clientDevBuf = p->clientDevBuf.load(std::memory_order_relaxed);
             up.clientDevSr = p->clientDevSr.load(std::memory_order_relaxed);
             up.clientRxPops10s = p->clientRxPops10s.load(std::memory_order_relaxed);
@@ -1897,12 +1901,14 @@ void SonobusHubServer::latencyBroadcastTick() {
                 const float rttUp = q->smoothedRttUpMs.load(std::memory_order_relaxed);
                 const float rttDn = q->smoothedRttMs.load(std::memory_order_relaxed);
                 float toHub = 0.0f, fromHub = 0.0f;
-                const bool have = computeHubLatency(rttUp, rttDn, q->abufCurrentMs, toHub, fromHub, q->clientRecvBufMs.load(std::memory_order_relaxed));
+                const int32_t lanBlocks = q->lanDepthBlocks.load(std::memory_order_relaxed);
+                const double holdMs = (q->isLan && lanBlocks > 0) ? lanBlocks * 1000.0 * (double) mBlockSize / (double) std::max(1, mSampleRate) : q->abufCurrentMs;
+                const bool have = computeHubLatency(rttUp, rttDn, holdMs, toHub, fromHub, q->clientRecvBufMs.load(std::memory_order_relaxed));
                 const int32_t uplinkLost = (int32_t) q->blkLostTotal.load(std::memory_order_relaxed);
                 // 30-s audit line so the per-player legs can be checked from hub.log
                 if (mLatBroadcastCount % 15 == 0)   // every 15th broadcast
                     std::cout << "[HUB-LAT] peer='" << q->userName << "' rttUp=" << rttUp << " rttDown=" << rttDn
-                              << " buf=" << q->abufCurrentMs << " -> toHub=" << toHub << " fromHub=" << fromHub << (have ? "" : " (no data)") << "\n";
+                              << " buf=" << holdMs << " -> toHub=" << toHub << " fromHub=" << fromHub << (have ? "" : " (no data)") << "\n";
                 // The player's OWN receive health as it reported it (see /sb/hxbuf) — every 3rd pass.
                 if (mLatBroadcastCount % 3 == 0 && q->clientRxUnderruns10s.load(std::memory_order_relaxed) >= 0)
                     std::cout << "[HUB-RX] peer='" << q->userName << "' underruns10s=" << q->clientRxUnderruns10s.load(std::memory_order_relaxed)
@@ -1992,6 +1998,45 @@ static int hub_adapt_wan_enabled(){
         std::cout << "[HUB] adaptive WAN sinks: " << (cached ? "ON" : "off") << "\n";
     }
     return cached;
+}
+
+// Test switches for the WAN hold and the receive thread (env or hub taps file). Unset = the defaults.
+static double hub_tap_double(const char* name, double def){ const std::string v = hub_tap_str(name, ""); return v.empty() ? def : std::atof(v.c_str()); }
+// SB_HUB_HOLD_FLOOR_MS: lowest hold a WAN player can get (ms).
+static double hub_hold_floor_ms(double def){
+    static const double v = std::min(40.0, std::max(1.0, hub_tap_double("SB_HUB_HOLD_FLOOR_MS", def)));
+    return v;
+}
+// SB_HUB_HOLD_MARGIN_MS: safety margin added to the measured arrival gap (ms, on top of one block).
+static double hub_hold_margin_ms(){
+    static const double v = std::min(10.0, std::max(0.0, hub_tap_double("SB_HUB_HOLD_MARGIN_MS", 1.0)));
+    return v;
+}
+// The WAN hold is set in whole blocks, so it is rounded up once. SB_HUB_HOLD_BLOCKS=0 sets it in whole milliseconds.
+static bool hub_hold_blocks(){
+    static const bool v = (hub_tap_int("SB_HUB_HOLD_BLOCKS", 1) == 1) && !hub_adapt_wan_enabled();
+    return v;
+}
+// SB_HUB_HOLD_FINE=1: the hold target reads the arrival gaps in 0.25-ms steps instead of whole milliseconds.
+static bool hub_hold_fine(){
+    static const bool v = (hub_tap_int("SB_HUB_HOLD_FINE", 0) == 1);
+    return v;
+}
+// SB_HUB_HOLD_FOLLOW=1: the hold also grows when the measured target stays a block or more above it for 30 s.
+static bool hub_hold_follow(){
+    static const bool v = (hub_tap_int("SB_HUB_HOLD_FOLLOW", 0) == 1);
+    return v;
+}
+// One-step return of the hold after a stall. SB_HUB_HOLD_FAST_DECAY=0 keeps only the slow steps.
+static bool hub_hold_fast_decay(){
+    static const bool v = (hub_tap_int("SB_HUB_HOLD_FAST_DECAY", 1) == 1);
+    return v;
+}
+static int32_t hub_hold_to_blocks(double ms, double blockMs){ return std::max<int32_t>(2, (int32_t) std::ceil(ms / blockMs - 1e-6)); }
+// SB_HUB_RX_RT=1: the receive thread asks for real-time scheduling (macOS).
+static bool hub_rx_rt(){
+    static const bool v = hub_tap_int("SB_HUB_RX_RT", 0) == 1;
+    return v;
 }
 
 // LAN sinks under the adaptive LAN profile (zero tolerance). Default ON; SB_HUB_ADAPT_LAN=0 (env or hub taps file) = fixed hold.
@@ -2390,7 +2435,7 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     recentNoteJoin(userName, peerAddrStr, peer->isLan);   // Recent-players list
     std::cout << "[HUB] Peer '" << userName << "' address: " << peerAddrStr << ":" << peerPort
               << (peer->isLan ? " [LAN" : " [WAN")
-              << ", sinkBuf " << ((peer->isLan || hub_hold_floor_setting()) ? sinkBufferMsFor(peer.get()) : kHoldFloorMs) << "ms, evlog s=" << sinkIdForPeer(peerId) << "]\n";   // Maps hub_sinkev.log entries to this player
+              << ", sinkBuf " << ((peer->isLan || hub_hold_floor_setting()) ? sinkBufferMsFor(peer.get()) : hub_hold_floor_ms(kHoldFloorMs)) << "ms, evlog s=" << sinkIdForPeer(peerId) << "]\n";   // Maps hub_sinkev.log entries to this player
 
     int32_t sinkId = sinkIdForPeer(peerId);
     int32_t sourceId = sourceIdForPeer(peerId);
@@ -2412,7 +2457,7 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     {
         double initialMs = sinkBufferMsFor(peer.get());
         // WAN players START AT THE LOWEST hold and are scaled up only if measured necessary.
-        if (!peer->isLan && !hub_hold_floor_setting()) initialMs = kHoldFloorMs;
+        if (!peer->isLan && !hub_hold_floor_setting()) initialMs = hub_hold_floor_ms(kHoldFloorMs);
         peer->abufCurrentMs = initialMs;
         // WAN players get their own hold committed by the stats thread after kHoldStartMeasureS of
         // measurement. LAN players: fixed.
@@ -2436,6 +2481,12 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
             std::cout << "[HUB-ADAPT] peer='" << userName << "' LAN sink adaptive, zero tolerance (starts at " << initialMs << " ms)\n";
         }
         peer->sink->set_buffersize((int32_t)initialMs);
+        if (!peer->isLan && hub_hold_blocks()){
+            const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
+            int32_t nb = hub_hold_to_blocks(initialMs, blockMs);
+            peer->sink->set_option(aoo_opt_iso_blocks, &nb, sizeof(int32_t));
+            peer->abufCurrentMs = nb * blockMs;
+        }
     }
     // ASRC re-clocks the sender's audio onto the hub's clock at the sink. With every peer running on its
     // own crystal (or worse, the system clock when no hardware interface is attached), per-pair drift
@@ -2994,6 +3045,36 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             osc::ReceivedPacket pkt(msg, n);
             osc::ReceivedMessage rm(pkt);
             sbApplySendMute(who, rm.ArgumentsBegin()->AsInt32());
+        } catch (const osc::Exception&) {}
+        return;
+    }
+    // A player reports its version and system (/sb/hxver s:version s:os, re-sent with its 10-s report). Control path only.
+    if (n >= SB_HXMSG_DOMAIN_LEN + 6 && std::memcmp(tail, "/hxver", 6) == 0) {
+        if (srcAddr->ss_family != AF_INET) return;
+        const auto* sa_in = (const struct sockaddr_in*)srcAddr;
+        std::shared_ptr<HubPeer> who;
+        {
+            std::shared_lock<std::shared_mutex> lock(mPeerMutex);
+            for (auto& p : mPeers) {
+                if (!p || !p->active) continue;
+                const auto* pa = (const struct sockaddr_in*)&p->addr;
+                if (pa->sin_family == AF_INET && pa->sin_addr.s_addr == sa_in->sin_addr.s_addr && pa->sin_port == sa_in->sin_port) { who = p; break; }
+            }
+        }
+        if (!who) return;
+        try {
+            osc::ReceivedPacket pkt(msg, n);
+            osc::ReceivedMessage rm(pkt);
+            auto it = rm.ArgumentsBegin();
+            std::string ver = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
+            std::string os  = (it != rm.ArgumentsEnd()) ? std::string(it->AsString()) : std::string();
+            if (ver.size() > 60) ver.resize(60);
+            if (os.size() > 16) os.resize(16);
+            auto clean = [](std::string& t){ for (auto& c : t) if ((unsigned char) c < 32 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&') c = ' '; };
+            clean(ver); clean(os);
+            bool changed = false;
+            { std::lock_guard<std::mutex> vl(who->verLock); changed = (who->clientVersion != ver || who->clientOs != os); who->clientVersion = ver; who->clientOs = os; }
+            if (changed) std::cout << "[HUB-VER] '" << who->userName << "' runs " << ver << " on " << os << "\n";
         } catch (const osc::Exception&) {}
         return;
     }
@@ -3921,6 +4002,11 @@ void SonobusHubServer::pollPeerSinkEvents() {
                 float cur = peer->jitterBufferPeakFillPct.load(std::memory_order_relaxed);
                 while (pct > cur && !peer->jitterBufferPeakFillPct.compare_exchange_weak(
                                             cur, pct, std::memory_order_relaxed)) {}
+            }
+            if (peer->isLan) {   // The LAN sink sets its own depth: keep the live figure for the latency display
+                int32_t db = 0; int32_t dsz = (int32_t) sizeof(db);
+                if (peer->sink->get_sourceoption(peer->persistentEndpoint, kSbClientOurId, aoo_opt_depth_blocks, &db, dsz) > 0 && db > 0)
+                    peer->lanDepthBlocks.store(db, std::memory_order_relaxed);
             }
             // Peak resampler backlog (ms), the last unmeasured queue in the sink pipeline.
             float rsamp = 0.0f; int32_t rsz = (int32_t)sizeof(rsamp);
@@ -5305,7 +5391,10 @@ void SonobusHubServer::statsWriterThread() {
                     const int64_t nowMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
                     const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
-                    const double marginMs = 2.0 + blockMs;
+                    const double marginMs = hub_hold_margin_ms() + blockMs;
+                    const double floorMs = hub_hold_floor_ms(kHoldFloorMs);
+                    const bool holdBlocks = hub_hold_blocks();
+                    auto holdQuant = [&](double ms) { return holdBlocks ? hub_hold_to_blocks(ms, blockMs) * blockMs : ms; };
                     const int mode = mHoldMode.load(std::memory_order_relaxed);   // 0 Jam, 1 Print
                     if (!p->holdGapsCleared && nowMs - p->joinedAtMs >= 5000) {   // Drop the join transient
                         p->jstats.clearGaps(); p->holdGapsCleared = true; p->holdClearedAtMs = nowMs;
@@ -5315,6 +5404,7 @@ void SonobusHubServer::statsWriterThread() {
                     // Target hold for THIS link from the last 60 s: smallest integer H (ms) such that the
                     // number of gaps longer than H stays within the mode's allowance, scaled to the window.
                     double target = -1.0;
+                    double needMs = -1.0;   // gap the target was sized for (log)
                     // The window length is time, not sample count: record skips gaps < kCoalesceMs, so on a cable link
                     // the histogram counts bursts, not packets, and a count-derived window would round the 2-gaps/min
                     // allowance to zero. 6 x 10-s slices, full once the player has been in 60 s.
@@ -5325,12 +5415,18 @@ void SonobusHubServer::statsWriterThread() {
                         const uint32_t uncoverable = gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int) kHoldCeilMs)];   // Stalls > ceiling never set the target
                         int H = 1;
                         for (H = 1; H < HubPeer::JitterStats::kGapBuckets - 1; ++H) if (gw.above[H] - std::min(gw.above[H], uncoverable) <= allowed) break;
+                        double Hms = (double) H;
+                        if (hub_hold_fine()) {
+                            for (int f = 1; f < HubPeer::JitterStats::kFineBuckets - 1; ++f)
+                                if (gw.aboveFine[f] - std::min(gw.aboveFine[f], uncoverable) <= allowed) { Hms = std::min(Hms, f * HubPeer::JitterStats::kFineStepMs); break; }
+                        }
+                        needMs = Hms;
                         // The operator's "Sink buffer WAN (ms)" is the start value, not the floor, so links with a ~1 ms
                         // tail do not pay for it. SB_HUB_HOLD_FLOOR_SETTING=1 makes it the floor of every WAN player's hold.
                         const bool floorIsSetting = hub_hold_floor_setting();
-                        target = floorIsSetting
-                            ? std::min(kHoldCeilMs, std::max({kHoldFloorMs, mSinkBufferMs, (double)H + marginMs}))
-                            : std::min(kHoldCeilMs, std::max(kHoldFloorMs, (double)H + marginMs));
+                        target = holdQuant(floorIsSetting
+                            ? std::min(kHoldCeilMs, std::max({floorMs, mSinkBufferMs, Hms + marginMs}))
+                            : std::min(kHoldCeilMs, std::max(floorMs, Hms + marginMs)));
                     }
                     // Evidence counter for a target under the setting (12 consecutive samples = 2 min)
                     const uint32_t lostNow = p->blkLostTotal.load(std::memory_order_relaxed);
@@ -5346,7 +5442,12 @@ void SonobusHubServer::statsWriterThread() {
                             const uint32_t uncoverableQ = gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int) kHoldCeilMs)];
                             int Hq = 1;
                             for (Hq = 1; Hq < HubPeer::JitterStats::kGapBuckets - 1; ++Hq) if (gw.above[Hq] - std::min(gw.above[Hq], uncoverableQ) == 0) break;
-                            const double quick = std::min(kHoldCeilMs, std::max(kHoldFloorMs, (double)Hq + marginMs));
+                            double HqMs = (double) Hq;
+                            if (hub_hold_fine()) {
+                                for (int f = 1; f < HubPeer::JitterStats::kFineBuckets - 1; ++f)
+                                    if (gw.aboveFine[f] - std::min(gw.aboveFine[f], uncoverableQ) == 0) { HqMs = std::min(HqMs, f * HubPeer::JitterStats::kFineStepMs); break; }
+                            }
+                            const double quick = holdQuant(std::min(kHoldCeilMs, std::max(floorMs, HqMs + marginMs)));
                             if (std::fabs(quick - p->abufCurrentMs) >= 0.5) abufApply.push_back({p, quick, 6});   // QUICK (not a commit)
                             p->holdQuickDone = true;
                         }
@@ -5413,13 +5514,49 @@ void SonobusHubServer::statsWriterThread() {
                             for (int k = 0; k < 12; ++k) { p->holdLateRing[k] = 0; p->holdStallRing[k] = 0; }
                             decided = true;
                         }
+                        // Follow a rising target. The rules above grow only when gaps are longer than the hold itself; a hold
+                        // that sits on its target has no slack for that, so three samples in a row (30 s) with the target a
+                        // block or more above the hold raise it to the target.
+                        if (hub_hold_follow()) {
+                            if (target > p->abufCurrentMs + blockMs - 0.01) p->holdFollowWindows++; else p->holdFollowWindows = 0;
+                            if (!decided && p->holdFollowWindows >= 3 && p->abufCurrentMs < kHoldCeilMs - 0.5) {
+                                abufApply.push_back({p, target, 8});
+                                p->holdFollowWindows = 0;
+                                p->holdNoDecayUntilMs = nowMs + 600000;   // 10 min: every change resets this player's queue
+                                for (int k = 0; k < 12; ++k) p->holdLateRing[k] = 0;
+                                decided = true;
+                            }
+                        }
                         // Live decay: 5 min with no moderate lateness and a measured target below the hold -> step down one
                         // notch (never below the target), at most every 5 min. Stalls do not block it.
                         // "clean" = no new stall this sample; moderate lateness only moves the target.
-                        if (target > 0.0 && target < p->abufCurrentMs - 0.5 && newStalls == 0) p->holdDecayWindows++; else p->holdDecayWindows = 0;
-                        if (!decided && p->holdDecayWindows >= kHoldDecayWindows && nowMs - p->holdLastChangeMs >= kHoldDecayGapMs) {
-                            std::cout << "[HUB-HOLD] peer='" << p->userName << "' DECAY toward need=" << std::fixed << std::setprecision(1) << target << " ms\n";
-                            abufApply.push_back({p, std::max(target, p->abufCurrentMs / 1.33), 5});      // DECAY one step, never below the measured target
+                        // With the fine grid a hold steps down only when one more grid step of need would still fit under it;
+                        // otherwise a need that sits on a grid edge moves the hold up and down by a block all session.
+                        const double decayTarget = (hub_hold_fine() && needMs > 0.0 && target > 0.0)
+                            ? std::max(target, holdQuant(std::min(kHoldCeilMs, std::max(floorMs, needMs + HubPeer::JitterStats::kFineStepMs + marginMs)))) : target;
+                        if (decayTarget > 0.0 && decayTarget < p->abufCurrentMs - 0.5 && newStalls == 0) p->holdDecayWindows++; else p->holdDecayWindows = 0;
+                        // Fast way back after a stall: a hold 2 ms or more above its target for holdFastWindows samples in a row
+                        // (30 s) with no new stall goes to the target in ONE step, one queue reset instead of one every two
+                        // minutes. A hold that has to grow again within two minutes of that doubles the wait (up to 4 min);
+                        // ten quiet minutes reset it.
+                        if (hub_hold_fast_decay()) {
+                            if (p->holdFastAtMs > 0 && nowMs - p->holdFastAtMs <= 120000 && p->abufCurrentMs > p->holdFastToMs + 0.5) {
+                                p->holdFastWindows = std::min(24, p->holdFastWindows * 2); p->holdFastAtMs = 0;
+                            } else if (p->holdFastAtMs > 0 && nowMs - p->holdFastAtMs > 600000) {
+                                p->holdFastWindows = 3; p->holdFastAtMs = 0;
+                            }
+                            if (!decided && decayTarget > 0.0 && p->abufCurrentMs - decayTarget >= 2.0 && p->holdDecayWindows >= p->holdFastWindows
+                                && nowMs - p->holdLastChangeMs >= 30000 && nowMs >= p->holdNoDecayUntilMs) {
+                                abufApply.push_back({p, decayTarget, 9});
+                                p->holdDecayWindows = 0; p->holdFastAtMs = nowMs; p->holdFastToMs = decayTarget;
+                                decided = true;
+                            }
+                        }
+                        if (!decided && p->holdDecayWindows >= kHoldDecayWindows && nowMs - p->holdLastChangeMs >= kHoldDecayGapMs && nowMs >= p->holdNoDecayUntilMs) {
+                            std::cout << "[HUB-HOLD] peer='" << p->userName << "' DECAY toward need=" << std::fixed << std::setprecision(1) << decayTarget << " ms\n";
+                            double decayTo = std::max(decayTarget, p->abufCurrentMs / 1.33);             // DECAY one step, never below the measured target
+                            if (holdBlocks) decayTo = std::max(decayTarget, std::min(holdQuant(decayTo), p->abufCurrentMs - blockMs));   // at least one block down
+                            abufApply.push_back({p, decayTo, 5});
                             p->holdDecayWindows = 0;
                         }
                     }
@@ -5427,7 +5564,7 @@ void SonobusHubServer::statsWriterThread() {
                     if (target > 0.0 && (mLatBroadcastCount % 3 == 0))
                         std::cout << "[HUB-HOLD] peer='" << p->userName << "' hold=" << std::fixed << std::setprecision(1) << p->abufCurrentMs
                                   << " ms target=" << target << " ms (stalls>ceil/60s=" << gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int) kHoldCeilMs)] << " samples=" << gw.total << " gaps>target/min=" << (double)gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int)std::ceil(target - marginMs))] / std::max(0.01, windowSec / 60.0)
-                                  << " maxgap=" << gw.maxMs << " ms, lost10s=" << lost << ")\n";
+                                  << " maxgap=" << gw.maxMs << " ms, lost10s=" << lost << ", need=" << std::setprecision(2) << needMs << std::setprecision(1) << ")\n";
                 }
             }
         }
@@ -5438,7 +5575,13 @@ void SonobusHubServer::statsWriterThread() {
             auto& pp = std::get<0>(a);
             double ms = std::get<1>(a);
             const int kind = std::get<2>(a);
-            {
+            if (hub_hold_blocks()) {
+                const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
+                int32_t nb = hub_hold_to_blocks(ms, blockMs);
+                ms = nb * blockMs;
+                std::lock_guard<std::mutex> sl(pp->sinkLock);
+                if (pp->sink) pp->sink->set_option(aoo_opt_iso_blocks, &nb, sizeof(int32_t));
+            } else {
                 std::lock_guard<std::mutex> sl(pp->sinkLock);
                 if (pp->sink) pp->sink->set_buffersize((int32_t) std::lround(ms));
             }
@@ -5448,7 +5591,7 @@ void SonobusHubServer::statsWriterThread() {
             pp->holdLastChangeMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
             std::cout << "[HUB-HOLD] peer='" << pp->userName << "' "
-                      << (kind == 0 ? "COMMIT" : kind == 1 ? "GROW" : kind == 2 ? "MODE" :  kind == 4 ? "GROW-EMERGENCY" : kind == 5 ? "DECAY" : kind == 7 ? "GROW-STALL" : "QUICK") << " hold "
+                      << (kind == 0 ? "COMMIT" : kind == 1 ? "GROW" : kind == 2 ? "MODE" :  kind == 4 ? "GROW-EMERGENCY" : kind == 5 ? "DECAY" : kind == 7 ? "GROW-STALL" : kind == 8 ? "FOLLOW" : kind == 9 ? "DECAY-FAST" : "QUICK") << " hold "
                       << std::fixed << std::setprecision(1) << prev << " -> " << ms << " ms\n";
         }
         if (!abufApply.empty() || mHoldResizeAll.load(std::memory_order_relaxed)) mHoldResizeAll.store(false, std::memory_order_relaxed);
@@ -5491,10 +5634,34 @@ void SonobusHubServer::networkRecvThread() {
     // background-class work delay them, which shows up as correlated inter-arrival spikes across all
     // peers. USER_INTERACTIVE is the right tier (the audio thread keeps its stronger Mach time-constraint
     // policy).
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    bool rxRt = false;
+    if (hub_rx_rt()) {
+        // Same claim as the listener threads: one block period, preemptible.
+        hub_tb_t tb;
+        hub_timebase(&tb);
+        const uint64_t blockNs = (uint64_t)(1000.0 * mBlockSize / mSampleRate * 1e6);
+        auto nsToMachTicks = [&tb](uint64_t ns) -> uint32_t {
+            return (uint32_t)((ns * (uint64_t)tb.denom) / (uint64_t)tb.numer);
+        };
+        thread_time_constraint_policy_data_t policy;
+        policy.period      = nsToMachTicks(blockNs);
+        policy.computation = nsToMachTicks(blockNs < 1000000ULL
+            ? blockNs * 35ULL / 100ULL
+            : std::min<uint64_t>(std::max<uint64_t>(400000ULL, blockNs / 4), blockNs));
+        policy.constraint  = nsToMachTicks(blockNs);
+        policy.preemptible = 1;
+        rxRt = thread_policy_set(pthread_mach_thread_np(pthread_self()),
+                                 THREAD_TIME_CONSTRAINT_POLICY,
+                                 (thread_policy_t)&policy,
+                                 THREAD_TIME_CONSTRAINT_POLICY_COUNT) == KERN_SUCCESS;
+    }
+    if (!rxRt) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    std::cout << "[HUB] receive thread scheduling: " << (rxRt ? "real-time" : "user-interactive") << "\n";
 #elif defined(__linux__)
     hub_set_fifo(10, "recv thread");
 #endif
+    std::cout << "[HUB] WAN hold switches: floor " << hub_hold_floor_ms(kHoldFloorMs) << " ms, margin " << hub_hold_margin_ms()
+              << " ms, whole blocks " << (hub_hold_blocks() ? 1 : 0) << ", fine grid " << (hub_hold_fine() ? 1 : 0) << ", follow " << (hub_hold_follow() ? 1 : 0) << "\n";
 
     char buf[AOO_MAXPACKETSIZE];
     struct sockaddr_storage srcAddr;
@@ -6010,8 +6177,9 @@ void SonobusHubServer::sendThread() {
                         || !peer->persistentEndpoint) continue;
                     const uint64_t last = peer->lastDataTicks.load(std::memory_order_relaxed);
                     if (last != 0 && nowTicks - last < staleTicks) continue;   // streaming fine — leave it alone
-                    // A player that streamed before and then muted its send is not stalled.
-                    if (last != 0 && peer->isSendMuted.load(std::memory_order_relaxed) != 0) continue;
+                    // A player with its send muted is not stalled, whether it streamed before or joined muted.
+                    // If its invite was lost, it is re-invited as soon as it un-mutes.
+                    if (peer->isSendMuted.load(std::memory_order_relaxed) != 0) continue;
                     peer->sink->invite_source(peer->persistentEndpoint,
                                               kSbClientOurId,
                                               (aoo_replyfn)hub_endpoint_send_impl);
