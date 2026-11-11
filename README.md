@@ -7,7 +7,7 @@ held at the hub so one lossy link does not degrade everyone else.
 
 This repository holds both halves:
 
-- **SonoBus RP**, the player (`Source/`, the `SonoBus` targets). Runs on macOS and Linux.
+- **SonoBus RP**, the player (`Source/`, the `SonoBus` targets). Runs on macOS and Linux; Windows is in beta.
 - **SonoBus RP Hub**, the server (`Source/SonobusHub*`, the `SonoBusHub` target). Runs on macOS (window) and
   Linux (headless, with a built-in web page for status and settings). Setup and hosting guide:
   [SonoBus-RP-Hub](https://github.com/RandomPlanet-com/SonoBus-RP-Hub).
@@ -34,6 +34,15 @@ You need CMake 3.22 or newer and a C++17 compiler.
 
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build build --target SonoBus_Standalone SonoBusHub
+
+**Windows** (beta, the player only; Visual Studio 2022 with its CMake, 64-bit): put Steinberg's ASIO SDK, version
+2.3.4 or newer (it can be used under the GPL version 3), in a folder named `asiosdk` next to this one, then:
+
+    cmake -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=OFF
+    cmake --build build --config Release --target SonoBus_Standalone
+
+The Windows player needs an audio interface with its own ASIO driver. ASIO is a trademark and software of Steinberg
+Media Technologies GmbH.
 
 The player is built as `SonoBus_artefacts/Release/Standalone/`, the hub as `SonoBusHub_artefacts/Release/`.
 To build only one of them, name only that target: `--target SonoBusHub` for the hub, `--target SonoBus_Standalone`

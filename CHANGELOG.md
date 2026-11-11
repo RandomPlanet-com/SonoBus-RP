@@ -26,6 +26,7 @@ What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the 
 - The meters are labelled IN and OUT.
 - Double-clicking a room in Recents connects to it.
 - The player reports its version to the hub, so the host can see who needs an update.
+- First beta for Windows (64-bit; needs an audio interface with its own ASIO driver).
 
 ## 2026-11-09
 
