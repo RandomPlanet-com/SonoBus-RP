@@ -551,6 +551,7 @@ static String limiterStateKey("LimiterState");
 static String eqStateKey("ParametricEqState");
 
 static String lastUsernameKey("lastUsername");
+static String lastInstrumentKey("lastInstrument");
 
 static String blockedAddressesKey("BlockedAddresses");
 static String addressKey("Address");
@@ -1875,11 +1876,23 @@ void SonobusAudioProcessor::stopAooServer()
     }
 }
 
+void SonobusAudioProcessor::setCurrentInstrument(const String & instrument)
+{
+    const ScopedLock sl (mInstrumentLock);
+    mCurrentInstrument = instrument.trim().substring(0, 24);
+}
+
+String SonobusAudioProcessor::getCurrentInstrument() const
+{
+    const ScopedLock sl (mInstrumentLock);
+    return mCurrentInstrument;
+}
+
 bool SonobusAudioProcessor::setCurrentUsername(const String & name)
 {
     if (mIsConnectedToServer) return false;
 
-    mCurrentUsername = name;
+    mCurrentUsername = name.substring(0, kMaxUserNameLength);
     return true;
 }
 
@@ -1894,8 +1907,9 @@ int SonobusAudioProcessor::getServerPortAsTyped() const
     return mServerEndpoint ? mServerEndpoint->port : 0;
 }
 
-bool SonobusAudioProcessor::connectToServer(const String & host, int port, const String & username, const String & passwd)
+bool SonobusAudioProcessor::connectToServer(const String & host, int port, const String & usernameAsGiven, const String & passwd)
 {
+    const String username = usernameAsGiven.substring(0, kMaxUserNameLength);
     sbApplyPeerFilter();   // Every (re)connect, so a hosted player never handshakes another player directly
     if (!mAooClient) {
         sbLaunchConnectFailed("no aoo client");   
@@ -11704,10 +11718,11 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
                #else
                 static const char* const os = "other";
                #endif
-                char vb[160];
+                const String instrument = getCurrentInstrument();
+                char vb[224];
                 osc::OutboundPacketStream vm(vb, sizeof(vb));
                 try {
-                    vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << osc::EndMessage;
+                    vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.toRawUTF8() << osc::EndMessage;
                     sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
                 } catch (const osc::Exception&) {}
             }
@@ -17105,6 +17120,7 @@ void SonobusAudioProcessor::changeProgramName (int index, const String& newName)
 
 //==============================================================================
 namespace sbtap { static void probeInjectPrepare(double sr); }   // probe injector table (defined near EOF)
+namespace sbtap { static void monTestPrepare(SonobusAudioProcessor& p); }
 
 void SonobusAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -17115,6 +17131,7 @@ void SonobusAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // PROBE INJECTOR — (re)build the one-period probe table
     // at the device rate here, off the audio thread. No-op unless SB_PROBE_INJECT.
     sbtap::probeInjectPrepare(sampleRate);
+    sbtap::monTestPrepare(*this);
 
     int inchannels =  getTotalNumInputChannels(); // getMainBusNumInputChannels();
     int outchannels = getMainBusNumOutputChannels();
@@ -17599,6 +17616,13 @@ static Tap gRecvTap;
 // block = one clock, zero start-offset ambiguity.
 static Tap gRttTap;
 static float gRttStage[8192];        // capture mono staged at block entry
+// Monitor test: SB_MONTEST=<file> [SB_MONTEST_SECS]. The device input is replaced by one click a second and the
+// device output is silenced after it has been written to the file (ch0 = the click as fed in, ch1 = output left).
+// Shows what the monitor path does to an input with nothing audible. Diagnostic only.
+static Tap gMonTap;
+static float gMonStage[8192];
+static int   gMonStageN = 0;
+static long  gMonPos = 0;
 static int   gRttStageN = 0;
 static bool gTapsInit = false;
 // Probe injector.
@@ -17689,6 +17713,38 @@ struct ProbeInject {
 };
 static ProbeInject gProbe;
 static void probeInjectPrepare(double sr) { if (ProbeInject::enabled()) gProbe.build(sr); }
+// Monitor test: turns input monitoring up, then steps the monitor delay off -> 300 ms -> 120 ms -> off, and notes the
+// times beside the recording. Runs once, from the message thread. Inert unless SB_MONTEST is set.
+static void monTestPrepare(SonobusAudioProcessor& p) {
+    static bool started = false;
+    const char* path = tapConf("SB_MONTEST");
+    if (started || path == nullptr || path[0] == 0) return;
+    started = true;
+    const juce::File log(juce::String(path) + ".log");
+    log.replaceWithText("rate " + juce::String(p.getSampleRate()) + "\n");
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    auto step = [&p, log, t0](int afterMs, bool on, float ms, bool first) {
+        juce::Timer::callAfterDelay(afterMs, [&p, log, t0, on, ms, first] {
+            if (first) {
+                if (auto* dry = p.getValueTreeState().getParameter(SonobusAudioProcessor::paramDry)) dry->setValueNotifyingHost(1.0f);
+                for (int g = 0; g < p.getInputGroupCount(); ++g) p.setInputMonitor(g, 1.0f);
+            }
+            for (int g = 0; g < p.getInputGroupCount(); ++g) {
+                SonoAudio::DelayParams d;
+                p.getInputMonitorDelayParams(g, d);
+                d.enabled = on;
+                d.delayTimeMs = ms;
+                p.setInputMonitorDelayParams(g, d);
+            }
+            log.appendText(juce::String((juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0, 2) + " s: groups " + juce::String(p.getInputGroupCount())
+                           + ", monitor delay " + (on ? "ON " : "OFF ") + juce::String(ms, 1) + " ms\n");
+        });
+    };
+    step(3000, false, 0.0f, true);
+    step(9000, true, 300.0f, false);
+    step(15000, true, 120.0f, false);
+    step(21000, false, 120.0f, false);
+}
 }
 
 void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midiMessages)
@@ -17727,6 +17783,16 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         sbtap::gCaptureTap.openIfEnv("SB_DUMP_CAPTURE", "SB_DUMP_CAPTURE_SECS", getSampleRate());
         sbtap::gRecvTap.openIfEnv("SB_DUMP_RECV_PATH", "SB_DUMP_RECV_SECS", getSampleRate());
         sbtap::gRttTap.openIfEnv("SB_DUMP_RTT", "SB_DUMP_RTT_SECS", getSampleRate());
+        sbtap::gMonTap.openIfEnv("SB_MONTEST", "SB_MONTEST_SECS", getSampleRate());
+    }
+    if (sbtap::gMonTap.f) {   // one click a second in place of the device input
+        const int n = jmin(buffer.getNumSamples(), 8192);
+        const long period = jmax(1L, (long) getSampleRate());
+        for (int i = 0; i < n; ++i) sbtap::gMonStage[i] = ((sbtap::gMonPos + i) % period) == 0 ? 0.5f : 0.0f;
+        sbtap::gMonPos += n;
+        sbtap::gMonStageN = n;
+        for (int ch = 0, nin = jmin(getTotalNumInputChannels(), buffer.getNumChannels()); ch < nin; ++ch)
+            memcpy(buffer.getWritePointer(ch), sbtap::gMonStage, (size_t) n * sizeof(float));
     }
     if (sbtap::gCaptureTap.f && getTotalNumInputChannels() > 0) {
         const float* c0 = buffer.getReadPointer(0);
@@ -18928,6 +18994,12 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
     }
 
 
+    if (sbtap::gMonTap.f) {   // monitor test: keep what would have been played, then play silence
+        if (buffer.getNumChannels() > 0)
+            sbtap::gMonTap.write(sbtap::gMonStage, buffer.getReadPointer(0), jmin(sbtap::gMonStageN, buffer.getNumSamples()));
+        buffer.clear();
+    }
+
     lastSamplesPerBlock = numSamples;
 
     notifySendThread();
@@ -19080,6 +19152,7 @@ void SonobusAudioProcessor::getStateInformationWithOptions(MemoryBlock& destData
     if (mSendAllDefaultsMigrated) extraTree.setProperty(sendAllDefaultsV2Key, true, nullptr);   
     extraTree.setProperty(linkMonitoringDelayTimesKey, mLinkMonitoringDelayTimes, nullptr);
     extraTree.setProperty(lastUsernameKey, mCurrentUsername, nullptr);
+    extraTree.setProperty(lastInstrumentKey, getCurrentInstrument(), nullptr);
     extraTree.setProperty(langOverrideCodeKey, mLangOverrideCode, nullptr);
     extraTree.setProperty(useUnivFontKey, mUseUniversalFont, nullptr);
     extraTree.setProperty(lastWindowWidthKey, var((int)mPluginWindowWidth), nullptr);
@@ -19353,6 +19426,7 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
             setLastSoundboardWidth((int)extraTree.getProperty(lastSoundboardWidthKey, (int)mLastSoundboardWidth));
             setLastSoundboardShown(extraTree.getProperty(lastSoundboardShownKey, mLastSoundboardShown));
             mCurrentUsername = extraTree.getProperty(lastUsernameKey, mCurrentUsername);
+            setCurrentInstrument(extraTree.getProperty(lastInstrumentKey, getCurrentInstrument()).toString());
             mLangOverrideCode = extraTree.getProperty(langOverrideCodeKey, mLangOverrideCode);
             mUseUniversalFont = extraTree.getProperty(useUnivFontKey, mUseUniversalFont);
             setChatFontSizeOffset((int) extraTree.getProperty(chatFontSizeOffsetKey, (int)mChatFontSizeOffset));
@@ -20885,6 +20959,20 @@ void SonobusAudioProcessor::setMainReverbModel(ReverbModel flag)
 { 
     mMainReverbModel = flag; 
     mState.getParameter(paramMainReverbModel)->setValueNotifyingHost(mState.getParameter(paramMainReverbModel)->convertTo0to1(flag));
+}
+
+double SonobusAudioProcessor::getMonitoringDelayTimeFromStage() const
+{
+    float sTo = -1.0f, sFrom = -1.0f, sRtt = -1.0f; int64_t lost = -1;
+    if (! getSelfHubLatency(sTo, sFrom, sRtt, lost) || sTo < 0.0f) return -1.0;
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < getNumberRemotePeers(); ++i) {
+        if (isHubPeer(getRemotePeerUserName(i))) continue;
+        float toHub = -1.0f, fromHub = -1.0f;
+        if (getRemotePeerHubLatency(i, toHub, fromHub) && fromHub >= 0.0f) { sum += sTo + fromHub; ++n; }
+    }
+    return n > 0 ? sum / n : (double) sTo;
 }
 
 double SonobusAudioProcessor::getMonitoringDelayTimeFromAvgPeerLatency(float scalar)

@@ -3,6 +3,8 @@
 // Modifications Copyright (C) 2026 Jason Buecker (Random Planet)
 
 #include "ConnectView.h"
+#include "StagesView.h"
+#include "SonobusPlusVersion.h"
 
 #include "RandomSentenceGenerator.h"
 
@@ -92,10 +94,31 @@ publicGroupsListModel(this)
     mRecentsGroup->setColour(GroupComponent::outlineColourId, Colour::fromFloatRGBA(0.8, 0.8, 0.8, 0.1));
     mRecentsGroup->setTextLabelPosition(Justification::centred);
 
+    // The public stage list. A join from it goes the same way as a recent connection.
+    mStagesView = std::make_unique<StagesView>();
+    mStagesView->currentStage = [this] { return processor.isConnectedToServer() ? processor.getCurrentJoinedGroup() : String(); };
+    mStagesView->userName = [this] { return mServerUsernameEditor->getText().trim(); };
+    mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
+    mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
+    mStagesView->setWantTestStages(SonobusPlusVersion::get().version.containsIgnoreCase("dev"));
+    mStagesView->onJoin = [this](const StagesView::JoinRequest& req) {
+        AooServerConnectionInfo info;
+        info.userName = mServerUsernameEditor->getText().trim();
+        info.groupName = req.name;
+        info.groupPassword = req.password;
+        info.groupIsPublic = false;
+        info.serverHost = req.host;
+        info.serverPort = req.port;
+        connectWithInfo(info);
+        updateServerFieldsFromConnectionInfo();
+        listeners.call(&ConnectView::Listener::connectionsChanged, this);
+    };
+
+    mConnectTab->addTab(TRANS("STAGES"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mStagesView.get(), false);
     mConnectTab->addTab(TRANS("RECENTS"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mRecentsContainer.get(), false);
-    mConnectTab->addTab(TRANS("PRIVATE GROUP"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mServerConnectViewport.get(), false);
+    mConnectTab->addTab(TRANS("PRIVATE STAGE"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mServerConnectViewport.get(), false);
     // No PUBLIC GROUPS tab: SonoBus RP runs private hub groups only (container kept, never shown)
-    //mConnectTab->addTab(TRANS("PUBLIC GROUPS"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mPublicServerConnectContainer.get(), false);
+    //mConnectTab->addTab(TRANS("PUBLIC STAGES"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mPublicServerConnectContainer.get(), false);
     //mConnectTab->addTab(TRANS("DIRECT"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mDirectConnectContainer.get(), false);
 
 
@@ -114,7 +137,7 @@ publicGroupsListModel(this)
     mRemoteAddressStaticLabel = std::make_unique<Label>("remaddrst", TRANS("Host: "));
     mRemoteAddressStaticLabel->setJustificationType(Justification::centredRight);
 
-    mDirectConnectDescriptionLabel = std::make_unique<Label>("dirconndesc", TRANS("Connect directly to other instances of SonoBus on your local network with the local address that they advertise. This is experimental, using a private group is recommended instead, and works fine on local networks."));
+    mDirectConnectDescriptionLabel = std::make_unique<Label>("dirconndesc", TRANS("Connect directly to other instances of SonoBus on your local network with the local address that they advertise. This is experimental, using a private stage is recommended instead, and works fine on local networks."));
     mDirectConnectDescriptionLabel->setJustificationType(Justification::topLeft);
 
     mAddRemoteHostEditor = std::make_unique<TextEditor>("remaddredit");
@@ -155,7 +178,7 @@ publicGroupsListModel(this)
 
 
     mServerConnectButton = std::make_unique<TextButton>("serverconnect");
-    mServerConnectButton->setButtonText(TRANS("Connect to Group"));
+    mServerConnectButton->setButtonText(TRANS("Connect to Stage"));
     mServerConnectButton->addListener(this);
     mServerConnectButton->setColour(TextButton::buttonColourId, Colour::fromFloatRGBA(0.1, 0.4, 0.6, 0.6));
     mServerConnectButton->setWantsKeyboardFocus(true);
@@ -170,6 +193,23 @@ publicGroupsListModel(this)
     mServerUsernameEditor->setFont(Font(16 * SonoLookAndFeel::getFontScale()));
     mServerUsernameEditor->setText(processor.getCurrentUsername(), false);
     configEditor(mServerUsernameEditor.get());
+    mServerUsernameEditor->setInputRestrictions(SonobusAudioProcessor::kMaxUserNameLength);
+
+    mServerInstrumentStaticLabel = std::make_unique<Label>("serverinstst", TRANS("Instrument:"));
+    configServerLabel(mServerInstrumentStaticLabel.get());
+    mServerInstrumentStaticLabel->setMinimumHorizontalScale(0.7);
+    mServerInstrumentCombo = std::make_unique<ComboBox>("instrument");
+    mServerInstrumentCombo->setEditableText(true);   // the list is a help; anything can be typed
+    mServerInstrumentCombo->addItemList({ "Drums", "Percussion", "Bass", "Guitar", "Acoustic Guitar", "Keys", "Piano", "Organ", "Synth", "Vocals",
+                                          "Sax", "Trumpet", "Trombone", "Flute", "Clarinet", "Violin", "Viola", "Cello", "Double Bass",
+                                          "Mandolin", "Banjo", "Pedal Steel", "Harmonica", "Accordion", "DJ / Electronics" }, 1);
+    mServerInstrumentCombo->setTextWhenNothingSelected(TRANS("choose or type"));
+    mServerInstrumentCombo->setTooltip(TRANS("Shown to other players, for example in the stage list"));
+    mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+    mServerInstrumentCombo->onChange = [this] {
+        processor.setCurrentInstrument(mServerInstrumentCombo->getText());
+        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+    };
 
     mServerUserPasswordEditor = std::make_unique<TextEditor>("userpass"); // 0x25cf
     mServerUserPasswordEditor->setFont(Font(14 * SonoLookAndFeel::getFontScale()));
@@ -184,7 +224,7 @@ publicGroupsListModel(this)
     mServerUserPassStaticLabel = std::make_unique<Label>("serveruserpassst", TRANS("Password:"));
     configServerLabel(mServerUserPassStaticLabel.get());
 
-    mServerGroupStaticLabel = std::make_unique<Label>("servergroupst", TRANS("Group Name:"));
+    mServerGroupStaticLabel = std::make_unique<Label>("servergroupst", TRANS("Stage Name:"));
     configServerLabel(mServerGroupStaticLabel.get());
     mServerGroupStaticLabel->setMinimumHorizontalScale(0.8);
 
@@ -211,13 +251,13 @@ publicGroupsListModel(this)
     };
 
     mServerGroupEditor = std::make_unique<TextEditor>("groupedit");
-    mServerGroupEditor->setTitle(TRANS("Group Name:"));
+    mServerGroupEditor->setTitle(TRANS("Stage Name:"));
     mServerGroupEditor->setFont(Font(16 * SonoLookAndFeel::getFontScale()));
     mServerGroupEditor->setText(!currConnectionInfo.groupIsPublic ? currConnectionInfo.groupName : "", false);
     configEditor(mServerGroupEditor.get());
 
     mServerGroupPasswordEditor = std::make_unique<TextEditor>("grouppass"); // 0x25cf
-    mServerGroupPasswordEditor->setTitle(TRANS("Optional Group Password"));
+    mServerGroupPasswordEditor->setTitle(TRANS("Optional Stage Password"));
     mServerGroupPasswordEditor->setFont(Font(14 * SonoLookAndFeel::getFontScale()));
     mServerGroupPasswordEditor->setTextToShowWhenEmpty(TRANS("optional"), Colour(0x44ffffff));
     mServerGroupPasswordEditor->setText(currConnectionInfo.groupPassword, false);
@@ -235,10 +275,10 @@ publicGroupsListModel(this)
     
     mServerGroupRandomButton = std::make_unique<SonoDrawableButton>("randgroup", DrawableButton::ButtonStyle::ImageFitted);
     std::unique_ptr<Drawable> randimg(Drawable::createFromImageData(BinaryData::dice_icon_128_png, BinaryData::dice_icon_128_pngSize));
-    mServerGroupRandomButton->setTitle(TRANS("Randomize Group Name"));
+    mServerGroupRandomButton->setTitle(TRANS("Randomize Stage Name"));
     mServerGroupRandomButton->setImages(randimg.get());
     mServerGroupRandomButton->addListener(this);
-    mServerGroupRandomButton->setTooltip(TRANS("Generate a random group name"));
+    mServerGroupRandomButton->setTooltip(TRANS("Generate a random stage name"));
 
     mServerCopyButton = std::make_unique<SonoDrawableButton>("copy", DrawableButton::ButtonStyle::ImageFitted);
     std::unique_ptr<Drawable> copyimg(Drawable::createFromImageData(BinaryData::copy_icon_svg, BinaryData::copy_icon_svgSize));
@@ -352,13 +392,13 @@ publicGroupsListModel(this)
     mPublicGroupComponent->setColour(GroupComponent::outlineColourId, Colour::fromFloatRGBA(0.8, 0.8, 0.8, 0.1));
     mPublicGroupComponent->setTextLabelPosition(Justification::centred);
 
-    mPublicServerInfoStaticLabel = std::make_unique<Label>("pubinfost", TRANS("Select existing group below OR "));
+    mPublicServerInfoStaticLabel = std::make_unique<Label>("pubinfost", TRANS("Select existing stage below OR "));
     configServerLabel(mPublicServerInfoStaticLabel.get());
     mPublicServerInfoStaticLabel->setFont(14);
     mPublicServerInfoStaticLabel->setMinimumHorizontalScale(0.8);
 
     mPublicServerAddGroupButton = std::make_unique<TextButton>("addgroup");
-    mPublicServerAddGroupButton->setButtonText(TRANS("Create Group..."));
+    mPublicServerAddGroupButton->setButtonText(TRANS("Create Stage..."));
     mPublicServerAddGroupButton->addListener(this);
     mPublicServerAddGroupButton->setColour(TextButton::buttonColourId, Colour::fromFloatRGBA(0.1, 0.4, 0.6, 0.6));
     mPublicServerAddGroupButton->setWantsKeyboardFocus(true);
@@ -368,8 +408,8 @@ publicGroupsListModel(this)
     mPublicServerGroupEditor->setFont(Font(16 * SonoLookAndFeel::getFontScale()));
     mPublicServerGroupEditor->setText(currConnectionInfo.groupIsPublic ? currConnectionInfo.groupName : "", false);
     configEditor(mPublicServerGroupEditor.get());
-    mPublicServerGroupEditor->setTextToShowWhenEmpty(TRANS("enter group name"), Colour(0x44ffffff));
-    mPublicServerGroupEditor->setTooltip(TRANS("Choose a descriptive group name that includes geographic information and genre"));
+    mPublicServerGroupEditor->setTextToShowWhenEmpty(TRANS("enter stage name"), Colour(0x44ffffff));
+    mPublicServerGroupEditor->setTooltip(TRANS("Choose a descriptive stage name that includes geographic information and genre"));
 
 
     // parenting
@@ -387,6 +427,8 @@ publicGroupsListModel(this)
     mNetworkModeCombo->setVisible(false);
     mServerConnectContainer->addAndMakeVisible(mServerUsernameEditor.get());
     mServerConnectContainer->addAndMakeVisible(mServerUserStaticLabel.get());
+    mServerConnectContainer->addAndMakeVisible(mServerInstrumentStaticLabel.get());
+    mServerConnectContainer->addAndMakeVisible(mServerInstrumentCombo.get());
     mServerConnectContainer->addAndMakeVisible(mServerGroupEditor.get());
     mServerConnectContainer->addAndMakeVisible(mServerGroupRandomButton.get());
     mServerConnectContainer->addAndMakeVisible(mServerGroupPasswordShowButton.get());
@@ -444,8 +486,18 @@ publicGroupsListModel(this)
     }
 
 
+    mTabsReady = true;
+    showPrivateGroupTab();
+
     updateNetworkModeUI();
     updateLayout();
+
+    // Test aid: SB_UI_SHOTS=<folder> saves pictures of the Connect view at several sizes, shortly after launch.
+    const String shots = SystemStats::getEnvironmentVariable("SB_UI_SHOTS", {});
+    if (shots.isNotEmpty()) {
+        Component::SafePointer<ConnectView> safe(this);
+        Timer::callAfterDelay(15000, [safe, shots] { if (safe != nullptr) safe->runUiShots(File(shots)); });
+    }
 }
 
 ConnectView::~ConnectView() {}
@@ -546,21 +598,30 @@ void ConnectView::updateNetworkModeUI()
     mPublicServerGroupEditor->setEnabled(false);
     mPublicGroupsListBox->setEnabled(false);
 
-    if (recentsIsTab()) {
-        if (auto * tabbut = mConnectTab->getTabbedButtonBar().getTabButton(2)) {
-            tabbut->setEnabled(false);
-        }
-        if (mConnectTab->getCurrentTabIndex() == 2) {
-            mConnectTab->setCurrentTabIndex(1);
-        }
-    }
 }
 
-// The tab count does not encode the layout mode. Narrow windows carry RECENTS as the first tab; wide windows show it
-// as a side panel and the tab strip holds PRIVATE GROUP only.
+// Three tabs in every width: STAGES, RECENTS, PRIVATE STAGE. Tabs are found by their content, never by position.
+int ConnectView::tabIndexOf(const Component * content) const
+{
+    for (int i = 0; i < mConnectTab->getNumTabs(); ++i)
+        if (mConnectTab->getTabContentComponent(i) == content) return i;
+    return -1;
+}
+
 bool ConnectView::recentsIsTab() const
 {
-    return mConnectTab->getTabbedButtonBar().getNumTabs() > 1;
+    return tabIndexOf(mRecentsContainer.get()) >= 0;
+}
+
+bool ConnectView::stagesTabShowing() const
+{
+    return mConnectTab->getCurrentContentComponent() == mStagesView.get();
+}
+
+// The stage list fetches and pings only while it is on screen.
+void ConnectView::updateStagesActive()
+{
+    if (mStagesView != nullptr) mStagesView->setActive(mTabsReady && isShowing() && stagesTabShowing());
 }
 
 void ConnectView::updateState()
@@ -575,14 +636,15 @@ void ConnectView::updateState()
 
     updateRecents();
 
+    if (! mServerInstrumentCombo->hasKeyboardFocus(true))
+        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+
     if (firstTimeConnectShow) {
-        if (recentsIsTab()) {
-            if (recentsListModel.getNumRows() > 0) {
-                // show recents tab first
-                mConnectTab->setCurrentTabIndex(0);
-            } else {
-                mConnectTab->setCurrentTabIndex(1);
-            }
+        if (recentsIsTab() && recentsListModel.getNumRows() > 0) {
+            // show recents tab first
+            mConnectTab->setCurrentTabIndex(tabIndexOf(mRecentsContainer.get()));
+        } else {
+            showPrivateGroupTab();
         }
         firstTimeConnectShow = false;
     }
@@ -655,6 +717,11 @@ void ConnectView::updateLayout()
     servUserBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerUserStaticLabel).withMargin(2).withFlex(0.25));
     servUserBox.items.add(FlexItem(120, minitemheight, *mServerUsernameEditor).withMargin(2).withFlex(1));
 
+    servInstrumentBox.items.clear();
+    servInstrumentBox.flexDirection = FlexBox::Direction::row;
+    servInstrumentBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerInstrumentStaticLabel).withMargin(2).withFlex(0.25));
+    servInstrumentBox.items.add(FlexItem(120, minitemheight, *mServerInstrumentCombo).withMargin(2).withFlex(1));
+
     servUserPassBox.items.clear();
     servUserPassBox.flexDirection = FlexBox::Direction::row;
     servUserPassBox.items.add(FlexItem(servLabelWidth, minpassheight, *mServerUserPassStaticLabel).withMargin(2).withFlex(1));
@@ -703,6 +770,7 @@ void ConnectView::updateLayout()
     serverBox.items.add(FlexItem(180, minpassheight, servGroupPassBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 6).withFlex(0));
     serverBox.items.add(FlexItem(180, minitemheight, servUserBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
+    serverBox.items.add(FlexItem(180, minitemheight, servInstrumentBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 6).withFlex(1).withMaxHeight(14));
     serverBox.items.add(FlexItem(minButtonWidth, minitemheight, servButtonBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 10).withFlex(1));
@@ -710,7 +778,7 @@ void ConnectView::updateLayout()
     serverBox.items.add(FlexItem(80, minpassheight, *mServerAudioInfoLabel).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
     serverBox.items.add(FlexItem(5, 8).withFlex(0));
 
-    minHeight = 5*minitemheight + 3*minpassheight + 58;
+    minHeight = 6*minitemheight + 3*minpassheight + 62;
 
     // public groups stuff
 
@@ -771,9 +839,6 @@ void ConnectView::updateLayout()
     connectHorizBox.items.clear();
     connectHorizBox.flexDirection = FlexBox::Direction::row;
     connectHorizBox.items.add(FlexItem(100, 100, *mConnectTab).withMargin(3).withFlex(1));
-    if (!recentsIsTab()) {
-        connectHorizBox.items.add(FlexItem(335, 100, *mRecentsGroup).withMargin(3).withFlex(0).withHeight((float) FlexItem::notAssigned));   // Auto height = stretched to the row (JUCE never stretches an item with an assigned size) so all recents fit / scroll
-    }
 
     mainBox.items.clear();
     mainBox.flexDirection = FlexBox::Direction::column;
@@ -789,36 +854,8 @@ void ConnectView::resized()  {
 
     mConnectComponentBg->setRectangle (getLocalBounds().toFloat());
 
-    if (getWidth() > 700) {
-        if (recentsIsTab()) {
-            // move recents to main connect component, out of tab
-            int adjcurrtab = jmax(0, mConnectTab->getCurrentTabIndex() - 1);
-
-            mConnectTab->removeTab(0);
-            mRecentsGroup->addAndMakeVisible(mRecentsContainer.get());
-            addAndMakeVisible(mRecentsGroup.get());
-
-            mConnectTab->setCurrentTabIndex(adjcurrtab);
-            updateLayout();
-        }
-    } else {
-        if (!recentsIsTab()) {
-            int tabsel = mConnectTab->getCurrentTabIndex();
-            mRecentsGroup->removeChildComponent(mRecentsContainer.get());
-            mRecentsGroup->setVisible(false);
-
-            mConnectTab->addTab(TRANS("RECENTS"), Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0), mRecentsContainer.get(), false);
-            mConnectTab->moveTab(2, 0);
-            mConnectTab->setCurrentTabIndex(tabsel + 1);
-            updateLayout();
-        }
-    }
 
 
-    if (!recentsIsTab()) {   // RECENTS wide enough for the full group + name text (335 -> up to 600)
-        const int recentsW = jlimit(335, 600, getWidth() - 720);
-        for (auto& it : connectHorizBox.items) if (it.associatedComponent == mRecentsGroup.get()) it.width = (float) recentsW;
-    }
     mainBox.performLayout(getLocalBounds().reduced(2, 2));
 
     mServerConnectContainer->setBounds(0,0,
@@ -840,10 +877,8 @@ void ConnectView::resized()  {
     mPublicGroupsListBox->setBounds(mPublicGroupComponent->getLocalBounds().reduced(4).withTrimmedTop(10));
 
 
-    if (!recentsIsTab()) {
-        mRecentsContainer->setBounds(mRecentsGroup->getLocalBounds().reduced(4).withTrimmedTop(10));
-    }
-    recentsBox.performLayout(mRecentsContainer->getLocalBounds());
+    // Recents is a tab in every width; in a wide window the list keeps a readable width.
+    recentsBox.performLayout(mRecentsContainer->getLocalBounds().withSizeKeepingCentre(jmin(820, mRecentsContainer->getWidth()), mRecentsContainer->getHeight()));
 
     mServerInfoLabel->setBounds(mServerStatusLabel->getBounds());
 
@@ -862,24 +897,19 @@ void ConnectView::groupJoinFailed()
 void ConnectView::showActiveGroupTab()
 {
 
-    int adjindex = mConnectTab->getCurrentTabIndex() + (recentsIsTab() ? 0 : 1);
-    if (adjindex != 1 && adjindex != 2) {
-        if (currConnectionInfo.groupIsPublic) {
-            showPublicGroupTab();
-        } else {
-            showPrivateGroupTab();
-        }
+    if (mConnectTab->getCurrentContentComponent() != mServerConnectViewport.get()) {
+        showPrivateGroupTab();
     }
 }
 
 void ConnectView::showPrivateGroupTab()
 {
-    mConnectTab->setCurrentTabIndex(recentsIsTab() ? 1 : 0);
+    mConnectTab->setCurrentTabIndex(tabIndexOf(mServerConnectViewport.get()));
 }
 
 void ConnectView::showPublicGroupTab()
 {
-    mConnectTab->setCurrentTabIndex(recentsIsTab() ? 2 : 1);
+    showPrivateGroupTab();   // there is no public group tab
 }
 
 bool ConnectView::getServerGroupAndPasswordText(String & retgroup, String & retpass) const
@@ -902,23 +932,19 @@ void ConnectView::visibilityChanged ()
         currConnectionInfo.groupPassword = mServerGroupPasswordEditor->getText();
         updateState();
     }
+    updateStagesActive();
 }
 
 
 void ConnectView::connectTabChanged (int newCurrentTabIndex)
 {
-    // normalize index to have recents as 0
-    int adjindex = !recentsIsTab() ? newCurrentTabIndex + 1 : newCurrentTabIndex;
+    if (! mTabsReady) return;   // tabs are still being built
 
-    // Public groups are disabled in SonoBus RP.
-    if (adjindex == 2) {
-        mConnectTab->setCurrentTabIndex(1);
-        return;
-    }
-    else if (adjindex == 1) {
-        // private groups
+    if (mConnectTab->getTabContentComponent(newCurrentTabIndex) == mServerConnectViewport.get()) {
         resetPrivateGroupLabels();
     }
+    updateStagesActive();
+
 }
 
 void ConnectView::publicGroupLogin()
@@ -1182,7 +1208,7 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
     else if (buttonThatWasClicked == mPublicServerAddGroupButton.get()) {
 
         if (processor.getNetworkTopologyMode() == SonobusAudioProcessor::NetworkTopologyHostedMix) {
-            mPublicServerStatusInfoLabel->setText(TRANS("Hosted Mix mode currently uses private-group flow only."), dontSendNotification);
+            mPublicServerStatusInfoLabel->setText(TRANS("Hosted Mix mode currently uses private-stage flow only."), dontSendNotification);
             return;
         }
 
@@ -1230,7 +1256,7 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
     else if (buttonThatWasClicked == mServerPasteButton.get()) {
         if (attemptToPasteConnectionFromClipboard()) {
             updateServerFieldsFromConnectionInfo();
-            updateServerStatusLabel(TRANS("Filled in Group information from clipboard! Press 'Connect to Group' to join..."), false);
+            updateServerStatusLabel(TRANS("Filled in Stage information from clipboard! Press 'Connect to Stage' to join..."), false);
         }
     }
     else if (buttonThatWasClicked == mServerCopyButton.get()) {
@@ -2029,6 +2055,7 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
     processor.setNetworkTopologyMode(mode);
 
     currConnectionInfo = info;
+    currConnectionInfo.userName = currConnectionInfo.userName.substring(0, SonobusAudioProcessor::kMaxUserNameLength);
 
     if (mode != SonobusAudioProcessor::NetworkTopologyHostedMix) {
         processor.hostedControlDisconnect();
@@ -2036,13 +2063,13 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
 
     if (currConnectionInfo.groupName.isEmpty() && !allowEmptyGroup) {
         if (info.groupIsPublic) {
-            mPublicServerStatusInfoLabel->setText(TRANS("You need to specify a group name!"), dontSendNotification);
+            mPublicServerStatusInfoLabel->setText(TRANS("You need to specify a stage name!"), dontSendNotification);
             mPublicServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
             mPublicServerGroupEditor->repaint();
             mPublicServerStatusInfoLabel->setVisible(true);
         }
         else {
-            mServerStatusLabel->setText(TRANS("You need to specify a group name!"), dontSendNotification);
+            mServerStatusLabel->setText(TRANS("You need to specify a stage name!"), dontSendNotification);
             mServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
             mServerGroupEditor->repaint();
             mServerInfoLabel->setVisible(false);
@@ -2130,6 +2157,76 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
     }
 }
 
+void ConnectView::runUiShots(const File & dir)
+{
+    dir.createDirectory();
+    struct Step { int w, h; String tab; int waitMs; bool openRows; };
+    auto steps = std::make_shared<std::vector<Step>>();
+    const std::pair<int, int> sizes[] = { { 1320, 812 }, { 1000, 700 }, { 660, 640 } };
+    for (const auto & size : sizes) {
+        steps->push_back({ size.first, size.second, "STAGES", 4500, false });
+        steps->push_back({ size.first, size.second, "STAGES", 600, true });
+        steps->push_back({ size.first, size.second, "RECENTS", 600, false });
+        steps->push_back({ size.first, size.second, "PRIVATE STAGE", 600, false });
+    }
+    updateState();
+    setVisible(true);
+    toFront(false);
+    Component::SafePointer<ConnectView> safe(this);
+    juce::Rectangle<int> before;
+    if (auto * ed = findParentComponentOfClass<AudioProcessorEditor>()) before = ed->getLocalBounds();
+    auto run = std::make_shared<std::function<void(size_t)>>();
+    *run = [safe, steps, dir, run, before](size_t i) {
+        if (safe == nullptr) return;
+        if (i >= steps->size()) {   // back to the size the window had; in a stage, one more picture of the main window
+            auto * ed = safe->findParentComponentOfClass<AudioProcessorEditor>();
+            if (ed != nullptr && ! before.isEmpty()) ed->setSize(jmax(1100, before.getWidth()), before.getHeight());
+            const bool inStage = safe->processor.isConnectedToServer() && safe->processor.getCurrentJoinedGroup().isNotEmpty();
+            if (! inStage) { dir.getChildFile("done.txt").replaceWithText("done"); return; }
+            safe->setVisible(false);
+            Timer::callAfterDelay(14000, [safe, dir, before] {
+                if (safe == nullptr) return;
+                if (auto * ed2 = safe->findParentComponentOfClass<AudioProcessorEditor>()) {
+                    const Image img = ed2->createComponentSnapshot(ed2->getLocalBounds(), true, 1.0f);
+                    const File out = dir.getChildFile("90-main-in-stage.png");
+                    out.deleteFile();
+                    FileOutputStream os(out);
+                    if (os.openedOk()) PNGImageFormat().writeImageToStream(img, os);
+                    if (! before.isEmpty()) ed2->setSize(before.getWidth(), before.getHeight());
+                }
+                dir.getChildFile("done.txt").replaceWithText("done\nmonitor delay from stage: " + String(safe->processor.getMonitoringDelayTimeFromStage(), 2) + " ms\n");
+            });
+            return;
+        }
+        const Step s = (*steps)[i];
+        auto * ed = safe->findParentComponentOfClass<AudioProcessorEditor>();
+        if (ed != nullptr && (ed->getWidth() != s.w || ed->getHeight() != s.h)) ed->setSize(s.w, s.h);
+        int index = -1;
+        for (int t = 0; t < safe->mConnectTab->getNumTabs(); ++t)
+            if (safe->mConnectTab->getTabNames()[t] == s.tab) index = t;
+        if (index >= 0) safe->mConnectTab->setCurrentTabIndex(index);
+        if (s.openRows)
+            for (auto * c : safe->mStagesView->getChildren())
+                if (auto * tree = dynamic_cast<TreeView*>(c))
+                    if (auto * root = tree->getRootItem())
+                        for (int r : { 0, 4 }) if (root->getNumSubItems() > r) root->getSubItem(r)->setOpen(true);
+        Timer::callAfterDelay(s.waitMs, [safe, steps, dir, run, i, s, index] {
+            if (safe == nullptr) return;
+            Component * target = safe->findParentComponentOfClass<AudioProcessorEditor>();
+            if (target == nullptr) target = safe.getComponent();
+            const Image img = target->createComponentSnapshot(target->getLocalBounds(), true, 1.0f);
+            const String name = String(i).paddedLeft('0', 2) + "-" + String(s.w) + "-" + (index >= 0 ? s.tab.replaceCharacter(' ', '_') : s.tab.replaceCharacter(' ', '_') + "-not-a-tab")
+                              + (s.openRows ? "-open" : "") + ".png";
+            const File out = dir.getChildFile(name);
+            out.deleteFile();
+            FileOutputStream os(out);
+            if (os.openedOk()) PNGImageFormat().writeImageToStream(img, os);
+            (*run)(i + 1);
+        });
+    };
+    (*run)(0);
+}
+
 void ConnectView::updateRecents()
 {
     recentsListModel.updateState();
@@ -2149,7 +2246,7 @@ void ConnectView::resetPrivateGroupLabels()
 {
     if (!mServerInfoLabel) return;
 
-    mServerInfoLabel->setText(TRANS("All who join the same Group will be able to connect with each other."), dontSendNotification);
+    mServerInfoLabel->setText(TRANS("All who join the same Stage will be able to connect with each other."), dontSendNotification);
     mServerInfoLabel->setVisible(true);
     mServerStatusLabel->setVisible(false);
 }
@@ -2212,7 +2309,10 @@ bool ConnectView::handleSonobusURL(const URL & url)
     auto & pvals = url.getParameterValues();
 
     int ind;
-    if ((ind = pnames.indexOf("g", true)) >= 0) {
+    // The stage name: "stage" in newer links, "g" in older ones.
+    ind = pnames.indexOf("stage", true);
+    if (ind < 0) ind = pnames.indexOf("g", true);
+    if (ind >= 0) {
         currConnectionInfo.groupName = pvals[ind];
 
         if ((ind = pnames.indexOf("p", true)) >= 0) {
@@ -2281,13 +2381,13 @@ void ConnectView::populateFromRecent(const AooServerConnectionInfo & info)
 {
     currConnectionInfo = info;
     updateServerFieldsFromConnectionInfo();
-    mServerStatusLabel->setText(TRANS("Press Connect to Group to join"), dontSendNotification);
+    mServerStatusLabel->setText(TRANS("Press Connect to Stage to join"), dontSendNotification);
     mServerStatusLabel->setVisible(true);
     mServerInfoLabel->setVisible(false);
     mServerGroupPasswordEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupPasswordEditor->repaint(); mServerGroupEditor->repaint();
-    if (recentsIsTab() && mConnectTab->getNumTabs() > 1) mConnectTab->setCurrentTabIndex(1);   // narrow window: recents live in a tab — show the form
+    if (recentsIsTab()) showPrivateGroupTab();   // narrow window: recents live in a tab, so show the form
 }
 
 void ConnectView::updateServerFieldsFromConnectionInfo()
@@ -2301,7 +2401,7 @@ void ConnectView::updateServerFieldsFromConnectionInfo()
         mServerHostEditor->setText( hostport, false);
         mPublicServerHostEditor->setText( hostport, false);
     }
-    mServerUsernameEditor->setText(currConnectionInfo.userName, false);
+    mServerUsernameEditor->setText(currConnectionInfo.userName.substring(0, SonobusAudioProcessor::kMaxUserNameLength), false);
     mPublicServerUsernameEditor->setText(currConnectionInfo.userName, false);
     if (currConnectionInfo.groupIsPublic) {
         mPublicServerGroupEditor->setText(currConnectionInfo.groupName, false);

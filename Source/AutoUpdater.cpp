@@ -40,6 +40,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <atomic>
+#include <algorithm>
+#include <string>
 #if SONOBUSPLUS_BUILD
 extern std::atomic<bool> sbPlusQuitWithoutConfirm;   // Defined in SonobusPluginEditor.cpp (SIGUSR1 quit path)
 #endif
@@ -153,7 +155,14 @@ class UpdateDialog  : public Component
 public:
     UpdateDialog (const String& newVersion, const String& releaseNotes, bool canInstallInPlace = false)
     {
+       #if SONOBUSPLUS_BUILD
+        {   // "SonoBus RP 1.2.8 (build ...)": the notes start with the product name and version
+            const String first = releaseNotes.upToFirstOccurrenceOf ("\n", false, false).trim();
+            titleLabel.setText (first.startsWith ("SonoBus RP ") ? first + "  (build " + newVersion + ")" : "SonoBus RP build " + newVersion, dontSendNotification);
+        }
+       #else
         titleLabel.setText ("SonoBus version " + newVersion, dontSendNotification);
+       #endif
         titleLabel.setFont ({ 15.0f, Font::bold });
         titleLabel.setJustificationType (Justification::centred);
         addAndMakeVisible (titleLabel);
@@ -172,6 +181,7 @@ public:
        #endif
         contentLabel.setFont (15.0f);
         contentLabel.setJustificationType (Justification::topLeft);
+        contentLabel.setMinimumHorizontalScale (1.0f);   // wrap onto more lines, never squeeze the letters
         addAndMakeVisible (contentLabel);
 
         releaseNotesLabel.setText ("Release notes:", dontSendNotification);
@@ -205,7 +215,7 @@ public:
                                                   BinaryData::sonobus_logo_96_pngSize);
         lookAndFeelChanged();
 
-        setSize (500, 300);
+        setSize (560, 340);
     }
 
     void resized() override
@@ -217,7 +227,7 @@ public:
 
         titleLabel.setBounds (topSlice.removeFromTop (25));
         topSlice.removeFromTop (5);
-        contentLabel.setBounds (topSlice.removeFromTop (25));
+        contentLabel.setBounds (topSlice.removeFromTop (jmax (62, topSlice.getHeight())));
 
         auto buttonBounds = b.removeFromBottom (40); // 60
         //buttonBounds.removeFromBottom (8); // 25
@@ -289,7 +299,11 @@ private:
 
     Label titleLabel, contentLabel, releaseNotesLabel;
     TextEditor releaseNotesEditor;
+   #if JUCE_WINDOWS
+    TextButton chooseButton { TRANS("Download") }, cancelButton { TRANS("Cancel") };   // the Windows package is a zip
+   #else
     TextButton chooseButton { TRANS("Download Installer") }, cancelButton { TRANS("Cancel") };
+   #endif
     TextButton installButton { TRANS("Install and relaunch") };   
     ToggleButton dontAskAgainButton { "Don't ask again" };
     std::unique_ptr<Drawable> appIcon;
@@ -327,8 +341,22 @@ void LatestVersionCheckerAndUpdater::askUserForLocationToDownload (const Version
 
 }
 
+#if JUCE_WINDOWS && SONOBUSPLUS_BUILD
+static bool sbRelaunchAfterExit (const File& program);   // defined at the end of this file
+
+// A note that a later quit can close by itself. The system's own message box would hold a quit until someone
+// presses OK, which an unattended player never does.
+static void sbShowUpdateNote (AlertWindow::AlertIconType icon, const String& title, const String& text)
+{
+    auto* note = new AlertWindow (title, text, icon);
+    note->addButton (TRANS("OK"), 0, KeyPress (KeyPress::returnKey), KeyPress (KeyPress::escapeKey));
+    note->enterModalState (true, nullptr, true);
+}
+#endif
+
 // Can THIS running copy be replaced in place? macOS .app bundle, owned folder we
 // can write (a user folder, /Applications when the user owns it), not app-translocated, not running off a mounted DMG.
+// Windows: the program file, in a folder this user can write to.
 static bool sbInPlaceUpdatePossible (File& bundleOut)
 {
    #if JUCE_MAC && SONOBUSPLUS_BUILD
@@ -338,6 +366,16 @@ static bool sbInPlaceUpdatePossible (File& bundleOut)
     if (path.startsWith ("/private/var/folders") || path.startsWith ("/Volumes/")) return false;   // translocated / DMG
     if (! app.getParentDirectory().hasWriteAccess() || ! app.hasWriteAccess()) return false;
     bundleOut = app;
+    return true;
+   #elif JUCE_WINDOWS && SONOBUSPLUS_BUILD
+    const File exe = File::getSpecialLocation (File::currentExecutableFile);
+    if (! exe.existsAsFile() || ! exe.hasFileExtension (".exe")) return false;
+    // A folder such as Program Files refuses the write: those copies use the download instead.
+    const File probe = exe.getParentDirectory().getChildFile (".sbrp-write-test");
+    probe.deleteFile();
+    if (! probe.create().wasOk()) return false;
+    probe.deleteFile();
+    bundleOut = exe;
     return true;
    #else
     ignoreUnused (bundleOut); return false;
@@ -682,7 +720,7 @@ void LatestVersionCheckerAndUpdater::downloadAndInstall (const VersionInfo::Asse
 // appcast, unpack with ditto, and verify the staged app before touching anything (codesign --verify --deep --strict,
 // Developer ID team, spctl notarization assessment, same bundle id, newer CFBundleVersion stamp). Swap keeping one
 // "<name>.app.previous", then relaunch via `open -n` once this process has exited. Settings live in Application
-// Support and are untouched. Any failure leaves the running bundle alone.
+// Support and are untouched. Any failure leaves the running bundle alone. Windows has its own steps in doUpdate().
 class InPlaceUpdateThread : public ThreadWithProgressWindow
 {
 public:
@@ -811,8 +849,93 @@ private:
         current.setLastModificationTime (Time::getCurrentTime());
         installedPath = current;
         return Result::ok();
+       #elif JUCE_WINDOWS && SONOBUSPLUS_BUILD
+        // Windows: the package is a zip with the program in a folder. The running program file can be renamed, so
+        // it steps aside as "<name>.exe.previous" (one kept) and the new one takes its place. Nothing vouches for
+        // the file but the checksum from the update server, so an answer without one is refused.
+        File current;
+        if (! sbInPlaceUpdatePossible (current)) return Result::fail ("This copy cannot be updated in place. Use Download instead.");
+        if (asset.sha256.trim().isEmpty()) return Result::fail ("The update carries no checksum");
+        const File parent = current.getParentDirectory();
+        const File work   = parent.getChildFile (".sbrp-update");
+        work.deleteRecursively(); work.createDirectory();
+        if (! work.isDirectory()) return Result::fail ("Could not create " + work.getFullPathName());
+        struct Cleanup { File w; ~Cleanup() { w.deleteRecursively(); } } cleanup { work };
+
+        // 1. download
+        setStatusMessage ("Downloading " + asset.name + "...");
+        int statusCode = 0;
+        auto in = VersionInfo::createInputStreamForAsset (asset, statusCode);
+        if (in == nullptr || statusCode != 200) return Result::fail ("Download failed (" + String (statusCode) + "): " + asset.url);
+        const File zip = work.getChildFile (asset.name);
+        {
+            FileOutputStream fo (zip);
+            if (! fo.openedOk()) return Result::fail ("Could not write " + zip.getFullPathName());
+            int64 total = 0;
+            for (;;) {
+                if (threadShouldExit()) return Result::fail ("Cancelled");
+                auto n = fo.writeFromInputStream (*in, 65536);
+                if (n == 0) break;
+                total += n;
+                setStatusMessage ("Downloading... " + File::descriptionOfSizeInBytes (total));
+            }
+        }
+        in.reset();
+        if (asset.size > 0 && zip.getSize() != asset.size)
+            return Result::fail ("Download size mismatch (" + String (zip.getSize()) + " vs " + String (asset.size) + ")");
+        setStatusMessage ("Verifying download...");
+        if (SHA256 (zip).toHexString().toLowerCase() != asset.sha256.trim().toLowerCase()) return Result::fail ("Download checksum mismatch");
+
+        // 2. unpack
+        setStatusMessage ("Unpacking...");
+        const File stage = work.getChildFile ("stage"); stage.createDirectory();
+        {
+            ZipFile package (zip);
+            if (package.getNumEntries() == 0) return Result::fail ("The download is not a zip package");
+            const auto unpacked = package.uncompressTo (stage);
+            if (unpacked.failed()) return Result::fail ("Unpack failed: " + unpacked.getErrorMessage());
+        }
+        File staged;
+        for (const auto& e : stage.findChildFiles (File::findFiles, true, current.getFileName())) { staged = e; break; }
+        if (staged == File()) return Result::fail ("The download does not hold " + current.getFileName());
+
+        // 3. check before touching anything: a Windows program, carrying the build the update server named
+        {
+            MemoryBlock program;
+            if (staged.getSize() < 1024 * 1024 || ! staged.loadFileAsData (program) || program.getSize() < 2
+                || program[0] != 'M' || program[1] != 'Z')
+                return Result::fail ("The downloaded program is not valid");
+            const String build = asset.name.fromFirstOccurrenceOf ("sonobus-", false, true).upToFirstOccurrenceOf ("-win", false, true);
+            if (build.containsChar ('.') && build.length() >= 15)
+            {
+                const auto* bytes = static_cast<const char*> (program.getData());
+                const auto* end = bytes + program.getSize();
+                const std::string narrow = build.toStdString();
+                std::string wide;   // the same text as 16-bit characters
+                for (char c : narrow) { wide += c; wide += '\0'; }
+                if (std::search (bytes, end, narrow.begin(), narrow.end()) == end && std::search (bytes, end, wide.begin(), wide.end()) == end)
+                    return Result::fail ("The downloaded program is not build " + build);
+            }
+        }
+        if (threadShouldExit()) return Result::fail ("Cancelled");
+
+        // 4. swap, ONE .previous kept
+        setStatusMessage ("Installing...");
+        const File previous = parent.getChildFile (current.getFileName() + ".previous");
+        previous.deleteFile();
+        if (previous.exists()) return Result::fail ("Could not remove " + previous.getFileName());
+        if (! current.moveFileTo (previous)) return Result::fail ("Could not set the current program aside");
+        if (! staged.moveFileTo (current)) {
+            previous.moveFileTo (current);   // restore
+            return Result::fail ("Could not move the new program into place (restored the current one)");
+        }
+        // The licence and readme files of the package follow the program; they are not worth failing for.
+        for (const auto& f : staged.getParentDirectory().findChildFiles (File::findFiles, false))
+            f.copyFileTo (parent.getChildFile (f.getFileName()));
+        installedPath = current;
+        return Result::ok();
        #else
-        return Result::fail ("In-place update is macOS only");
+        return Result::fail ("In-place update is not available on this system");
        #endif
     }
 
@@ -829,8 +952,13 @@ void LatestVersionCheckerAndUpdater::installInPlace (const VersionInfo::Asset& z
         File installed = inplace != nullptr ? inplace->installedPath : File();
         inplace.reset();
         if (r.failed()) {
+           #if JUCE_WINDOWS && SONOBUSPLUS_BUILD
+            sbShowUpdateNote (AlertWindow::WarningIcon, "Update not installed",
+                              r.getErrorMessage() + "\n\nThe current version keeps running. You can use Download instead.");
+           #else
             AlertWindow::showMessageBoxAsync (AlertWindow::WarningIcon, "Update not installed",
                                               r.getErrorMessage() + "\n\nThe current version keeps running. You can use Download Installer instead.");
+           #endif
             return;
         }
        #if JUCE_MAC && SONOBUSPLUS_BUILD
@@ -841,6 +969,15 @@ void LatestVersionCheckerAndUpdater::installInPlace (const VersionInfo::Asset& z
             "while kill -0 " + pid + " 2>/dev/null; do sleep 0.3; done; /usr/bin/open -n " + installed.getFullPathName().quoted() }, 0);
         sbPlusQuitWithoutConfirm.store (true);   // no "you are connected" confirmation — the user just chose to relaunch
         if (auto* app = JUCEApplicationBase::getInstance()) app->systemRequestedQuit();
+       #elif JUCE_WINDOWS && SONOBUSPLUS_BUILD
+        // Start the new program once this process has gone, then quit the normal way so the settings are saved.
+        if (! sbRelaunchAfterExit (installed)) {
+            sbShowUpdateNote (AlertWindow::InfoIcon, "Update installed",
+                              "The new version is in place. Quit SonoBus RP and start it again to use it.");
+            return;
+        }
+        sbPlusQuitWithoutConfirm.store (true);
+        if (auto* app = JUCEApplicationBase::getInstance()) app->systemRequestedQuit();
        #else
         ignoreUnused (installed);
        #endif
@@ -849,3 +986,36 @@ void LatestVersionCheckerAndUpdater::installInPlace (const VersionInfo::Asset& z
 
 //==============================================================================
 JUCE_IMPLEMENT_SINGLETON (LatestVersionCheckerAndUpdater)
+
+#if JUCE_WINDOWS && SONOBUSPLUS_BUILD
+// Kept at the end of the file so the Windows header cannot disturb the code above.
+#ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+ #define NOMINMAX
+#endif
+#ifndef NOGDI
+ #define NOGDI
+#endif
+#include <windows.h>
+
+// A hidden helper waits for this process to end and then starts the program. It inherits no handles, so nothing of
+// this process (sockets, files) stays open in it.
+static bool sbRelaunchAfterExit (const File& program)
+{
+    const String path = program.getFullPathName().replace ("'", "''");
+    const String command = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command \"Wait-Process -Id "
+                         + String ((int) GetCurrentProcessId()) + " -Timeout 120 -ErrorAction SilentlyContinue; Start-Process -FilePath '" + path + "'\"";
+    std::wstring line (command.toWideCharPointer());
+    STARTUPINFOW si;
+    ZeroMemory (&si, sizeof (si));
+    si.cb = sizeof (si);
+    PROCESS_INFORMATION pi;
+    ZeroMemory (&pi, sizeof (pi));
+    if (! CreateProcessW (nullptr, &line[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
+    CloseHandle (pi.hThread);
+    CloseHandle (pi.hProcess);
+    return true;
+}
+#endif

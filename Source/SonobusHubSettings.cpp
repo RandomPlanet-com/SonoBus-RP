@@ -3,6 +3,7 @@
 // SonoBus RP — Hub Server settings persistence (see SonobusHubSettings.h).
 
 #include "SonobusHubSettings.h"
+#include <cctype>
 #include "SonobusHubServer.h"
 
 #include <cerrno>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <random>
 #include <variant>
 
 #ifndef _WIN32
@@ -71,8 +73,19 @@ const std::vector<Binding>& bindings() {
         // ── web status page ──
         { { "web_port",           "--web-port",                        Tier::Restart }, &HubLaunchArgs::webPort },
         { { "web_password",       "--web-password",                    Tier::Restart }, &HubLaunchArgs::webPassword },
-        { { "location",           "--location",                        Tier::Restart }, &HubLaunchArgs::location },
+        { { "location",           "--location",                        Tier::Live    }, &HubLaunchArgs::location },
         { { "geoip",              "--geoip",                           Tier::Live    }, &HubLaunchArgs::geoip },   
+        // ── stage limits and the stage directory ──
+        { { "max_players",        "--max-players",                     Tier::Live    }, &HubLaunchArgs::maxPlayers },
+        { { "max_channels",       "--max-channels",                    Tier::Live    }, &HubLaunchArgs::maxChannels },
+        { { "list_stage",         "--list-stage",                      Tier::Live    }, &HubLaunchArgs::listStage },
+        { { "stage_genre",        "--stage-genre",                     Tier::Live    }, &HubLaunchArgs::stageGenre },
+        { { "stage_description",  "--stage-description",               Tier::Live    }, &HubLaunchArgs::stageDescription },
+        { { "stage_country",      "--stage-country",                   Tier::Live    }, &HubLaunchArgs::stageCountry },
+        { { "stage_names",        "--stage-names",                     Tier::Live    }, &HubLaunchArgs::stageNames },
+        { { "stage_directory",    "--stage-directory",                 Tier::Restart }, &HubLaunchArgs::stageDirectory },
+        { { "stage_hub_id",       "--stage-hub-id",                    Tier::Restart }, &HubLaunchArgs::stageHubId },
+        { { "stage_hub_key",      "--stage-hub-key",                   Tier::Restart }, &HubLaunchArgs::stageHubKey },
     };
     return b;
 }
@@ -144,8 +157,18 @@ const std::vector<FormSpec>& formSpecs() {
         { 0, "public_address",     "Public address",      0, nullptr },
         { 0, "public_port",        "Public port",                       0, nullptr },
         { 0, "udp_port",           "Hub audio UDP port",                0, nullptr },
-        { 0, "group",              "Group",                             0, nullptr },
-        { 0, "group_password",     "Group password",                    3, nullptr },
+        { 0, "group",              "Stage name",                        0, nullptr },
+        { 0, "group_password",     "Stage password",                    3, nullptr },
+        { 0, nullptr,              "Stage limits",                      0, nullptr },
+        { 0, "max_players",        "Most players",                      0, nullptr },
+        { 0, "max_channels",       "Most channels per player",          0, nullptr },
+        { 0, nullptr,              "Stage directory",                   0, nullptr },
+        { 0, "list_stage",         "List this stage",                   1, nullptr },
+        { 0, "location",           "City",                              0, nullptr },
+        { 0, "stage_country",      "Country (two letters)",             0, nullptr },
+        { 0, "stage_genre",        "Genre",                             2, "Any,Rock/Pop,Jazz/Blues,Funk/Soul/R&B,Country/Folk,Classical/Choral,Electronic,Worship" },
+        { 0, "stage_description",  "Description",                       0, nullptr },
+        { 0, "stage_names",        "Player names in the listing",       2, "Automatic,Show,Hide" },
         { 0, nullptr,              "Audio",                             0, nullptr },
         { 0, "samplerate",         "Sample rate (Hz)",                  2, "44100,48000,88200,96000" },
         { 0, "blocksize",          "Block size (samples)",              2, "16,32,64,128,256" },   // 16 added (experiment)
@@ -154,7 +177,6 @@ const std::vector<FormSpec>& formSpecs() {
         { 0, nullptr,              "Web page",                          0, nullptr },   
         { 0, "web_port",           "Web page port",    0, nullptr },
         { 0, "web_password",       "Web password", 3, nullptr },
-        { 0, "location",           "Location on web page",        0, nullptr },
         { 0, "geoip",              "Player locations", 1, nullptr },   
 
         { 1, nullptr,              "Fan-out & sink buffers",            0, nullptr },
@@ -228,14 +250,21 @@ const char* tipFor(const std::string& key) {
         { "public_address",     "The address outside players use to reach this hub. Detected automatically. Type a domain or address only to override it." },
         { "public_port",        "The outside port for hub audio. Normally the same as the hub audio UDP port." },
         { "udp_port",           "The UDP port that carries audio. Forward it on your router for players outside your network." },
-        { "group",              "The group name players join." },
-        { "group_password",     "Optional. Players must enter this password to join." },
+        { "group",              "The name of the stage players join." },
+        { "group_password",     "Optional. Players must enter this password to join. A listed stage with a password shows as locked." },
+        { "max_players",        "The most players this stage takes at once. 0 = no limit. Each player's audio goes to every other player, so the hub's upload grows quickly with the player count." },
+        { "max_channels",       "The most channels one player may send. A stereo pair counts as 2. Extra channels are not passed on. 0 = no limit." },
+        { "list_stage",         "Shows this stage at stages.randomplanet.com so players can find it. Its name, genre, description, city and this hub's public address are shown. Player names are sent to the directory; on a locked stage only the directory's operator sees them. Needs the city, and the ports forwarded." },
+        { "stage_genre",        "The genre shown in the stage directory." },
+        { "stage_description",  "One line shown in the stage directory, up to 160 characters." },
+        { "stage_country",      "The two-letter country code shown in the stage directory, for example US, CA, GB or DE. Players can sort and filter the stage list by it." },
+        { "stage_names",        "Who sees player names in the stage directory. Automatic shows them when the stage has no password and hides them from the public when it has one. The directory's operator always sees them." },
         { "samplerate",         "The sample rate of the session. Every player follows the hub." },
         { "blocksize",          "Audio block size. Smaller blocks mean lower latency and a heavier load on every machine." },
         { "log_file",           "Where the hub writes its log. It starts a new file when this one reaches 50 MB." },
         { "web_port",           "Port for the hub's web status page. 0 turns the page off." },
         { "web_password",       "Password for changing settings from the web page." },
-        { "location",           "A place name shown on the web page, such as your city." },
+        { "location",           "The stage's city, shown on the web page and in the stage directory. Required to list the stage." },
         { "geoip",              "Shows each outside player's city and state. Their public IP address is sent to ip-api.com for the lookup." },
         { "sink_buffer_lan_ms", "How much audio the hub holds for each player on your local network. Blank uses the default of 1.33 ms." },
         { "pace_spread",        "Spreads the hub's outgoing packets across this share of each audio block." },
@@ -321,6 +350,13 @@ std::string validate(const HubLaunchArgs& a) {
     if (a.aooDrain < 0 || a.aooDrain > 1) return "aoo_drain must be 0 or 1";
     if (a.aooHandoff < 0 || a.aooHandoff > 1) return "aoo_handoff must be 0 or 1";
     if (a.aooGovArmBlocks < 0 || a.aooGovArmBlocks > 64) return "aoo_gov_arm_blocks must be 0..64 (0 = sink auto)";
+    if (a.maxPlayers < 0 || a.maxPlayers > 999) return "Most players must be 0..999 (0 = no limit)";
+    if (a.maxChannels < 0 || a.maxChannels > HUB_MAX_CHANNELS_PER_PEER) return "Most channels per player must be 0.." + std::to_string(HUB_MAX_CHANNELS_PER_PEER) + " (0 = no limit)";
+    if (a.stageDescription.size() > 160) return "Description must be 160 characters or fewer";
+    if (!a.stageCountry.empty() && !(a.stageCountry.size() == 2 && std::isalpha((unsigned char) a.stageCountry[0]) && std::isalpha((unsigned char) a.stageCountry[1])))
+        return "Country must be a two-letter code, for example US";
+    if (a.stageNames != "Automatic" && a.stageNames != "Show" && a.stageNames != "Hide") return "Player names in the listing must be Automatic, Show or Hide";
+    if (a.listStage && juce::String::fromUTF8(a.location.c_str()).trim().isEmpty()) return "Enter the city to list this stage";
     if (a.aooSlackBlocks < 0 || a.aooSlackBlocks > 64) return "aoo_slack_blocks must be 0..64";
     if (a.aooBlockqExtra < 1 || a.aooBlockqExtra > 256) return "aoo_blockq_extra must be 1..256";
     return {};
@@ -463,12 +499,43 @@ void applyToHub(SonobusHubServer& hub, const HubLaunchArgs& a) {
     hub.setConnectedSockets(a.connectedSockets);   // Per-listener connected send sockets
     if (!a.dumpPeer.empty()) hub.setDumpPeer(a.dumpPeer, a.dumpSecs > 0 ? a.dumpSecs : 30);
     hub.setSessionSettingsSnapshot(sessionSnapshot(a));   // Recent sessions remember the settings in force
+    applyStageToHub(hub, a);
+}
+
+void applyStageToHub(SonobusHubServer& hub, const HubLaunchArgs& a) {
+    SonobusHubServer::StageSettings st;
+    st.maxPlayers = a.maxPlayers;
+    st.maxChannels = a.maxChannels;
+    st.list = a.listStage;
+    st.genre = a.stageGenre.empty() ? "Any" : a.stageGenre;
+    st.description = a.stageDescription;
+    st.country = juce::String::fromUTF8(a.stageCountry.c_str()).trim().toUpperCase().toStdString();
+    st.city = juce::String::fromUTF8(a.location.c_str()).trim().toStdString();
+    st.names = a.stageNames == "Show" ? 1 : a.stageNames == "Hide" ? 2 : 0;
+    hub.applyStageSettings(st);
+}
+
+const char* stageGenres() { return "Any,Rock/Pop,Jazz/Blues,Funk/Soul/R&B,Country/Folk,Classical/Choral,Electronic,Worship"; }
+
+bool ensureStageIdentity(HubLaunchArgs& a) {
+    if (!a.stageHubId.empty() && a.stageHubKey.size() >= 16) return false;
+    if (a.stageHubId.empty()) a.stageHubId = juce::Uuid().toDashedString().toStdString();
+    std::random_device rd;   // the system's random source
+    const char* abc = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    std::string k;
+    for (int i = 0; i < 40; ++i) k += abc[rd() % 57];
+    a.stageHubKey = k;
+    return true;
 }
 
 // ─── recent sessions ────────────────────────────────────
 std::vector<std::pair<std::string, std::string>> sessionSnapshot(const HubLaunchArgs& a) {
     std::vector<std::pair<std::string, std::string>> out;
-    for (auto& f : fields()) out.emplace_back(f.key, getValueString(a, f.key).toStdString());
+    for (auto& f : fields()) {
+        const std::string k = f.key;
+        if (k == "stage_hub_id" || k == "stage_hub_key" || k == "stage_directory") continue;   // identity, not a session setting
+        out.emplace_back(f.key, getValueString(a, f.key).toStdString());
+    }
     return out;
 }
 

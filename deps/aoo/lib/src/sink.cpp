@@ -197,9 +197,14 @@ static int32_t sink_tap_int(const char* name, int32_t def, bool* set){
     return def;
 }
 
-// Fast recovery after a line storm (WAN profile). Read once per process, first from the network thread.
+// Fast recovery after a rough patch (default on). Read once per process, first from the network thread.
 static bool adapt_fast_recover(){
-    static const bool on = sink_tap_int("SB_AOO_ADAPT_FAST_RECOVER", 0, nullptr) != 0;
+    static const bool on = sink_tap_int("SB_AOO_ADAPT_FAST_RECOVER", 1, nullptr) != 0;
+    return on;
+}
+// The same on the LAN profile, where the wait is short (SB_AOO_ADAPT_LAN_FAST=0 keeps the slow release only).
+static bool adapt_lan_fast(){
+    static const bool on = sink_tap_int("SB_AOO_ADAPT_LAN_FAST", 1, nullptr) != 0;
     return on;
 }
 // SB_AOO_ADAPT_GLIDE_PPM: speed-up used to play out excess depth without a splice (default 10000 = 1 %; 0 = splice).
@@ -1201,7 +1206,7 @@ void source_desc::do_update(const sink &s){
                 adapt_t0_ = -1; adapt_win_start_ = -1; adapt_ewma_max_ = -1; adapt_ewma_sd_ = 0;
                 adapt_last_retarget_ = -1; adapt_last_shrink_ = -1e9;
                 adapt_glide_active_.store(false, std::memory_order_relaxed); adapt_glide_g_ = 0; adapt_fast_wait_s_ = 0; adapt_fast_last_t_ = -1e9; adapt_fast_depth_ = 0;
-                (void) adapt_fast_recover(); (void) adapt_glide_max();   // read the switches here, never first on the audio thread
+                (void) adapt_fast_recover(); (void) adapt_lan_fast(); (void) adapt_glide_max();   // read the switches here, never first on the audio thread
                 adapt_underruns_sec_ = 0; adapt_strike_secs_ = 0; adapt_clean_secs_ = 0; adapt_shrink_pending_ = false; adapt_headroom_prev_ = 0; adapt_warm_ = false; adapt_warm_at_ = -1; adapt_committed_ = false; adapt_commit_blocks_ = 0; adapt_last_shadow_ = -1e9;
                 memset(adapt_hist_, 0, sizeof(adapt_hist_)); adapt_hist_slice_ = 0; adapt_hist_filled_ = 0; adapt_hist_slice_t0_ = -1; adapt_last_arrival_ = -1; adapt_hist_blocks_ = 0; adapt_up_secs_ = 0; adapt_last_up_ = -1e9; adapt_emerg_late_ms_ = 0; adapt_emerg_win_grown_ = 0; memset(adapt_stall_ts_, 0, sizeof(adapt_stall_ts_)); adapt_stall_idx_ = 0; adapt_stall_n_ = 0; adapt_stalls_excluded_ = 0; adapt_stall_clean_secs_ = 0;
                 static bool logged = false;
@@ -2557,6 +2562,7 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
                 static const double lan_stall_extra_ms = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_LAN_STALL_MS", 5, nullptr) * 1.0);
                 const double depth_ms = governor_target_blocks_ * adapt_block_s_ * 1e3;
                 if (gap_ms > depth_ms + lan_stall_extra_ms){
+                    adapt_stall_clean_secs_ = 0;   // a stall also restarts the wait of the fast recovery
                     adapt_stall_ts_[adapt_stall_idx_] = now; adapt_stall_idx_ = (adapt_stall_idx_ + 1) % kAdaptStallRing;
                     adapt_stall_n_ = std::min<int32_t>(kAdaptStallRing, adapt_stall_n_ + 1);
                     int32_t recent = 0; for (int32_t k = 0; k < adapt_stall_n_; ++k) if (now - adapt_stall_ts_[k] <= 120.0) recent++;
@@ -2756,6 +2762,7 @@ void source_desc::adapt_retarget(const sink& s, double now){
                 // Arming is a fresh start: the histogram still holds the join transient's gaps, and pre-arming
                 // strike grows (+3) sit in the headroom; both would be inherited by the zero-tolerance floor.
                 adapt_zero_armed_ = true; adapt_zero_floor_ = 0; adapt_headroom_blocks_ = 0;
+                adapt_fast_wait_s_ = 0; adapt_fast_last_t_ = -1e9;   // the join's churn does not count against the fast recovery
                 for (int32_t sl = 0; sl < kAdaptHistSlices; ++sl) memset(adapt_hist_[sl], 0, sizeof(adapt_hist_[0]));
                 adapt_hist_filled_ = 0; adapt_hist_slice_t0_ = now; adapt_hist_blocks_ = adapt_floor_blocks_;
                 sink_evlog("adapt_lan_zero_armed", governor_target_blocks_);
@@ -2877,20 +2884,29 @@ void source_desc::adapt_retarget(const sink& s, double now){
         // No automatic shrink after the commit: every shrink is an audible splice.
         // The regular shrink's target is logged instead (adapt_shadow_shrink).
         if (T <= cur - 2 && (now - adapt_last_shadow_) >= (double) shrink_hold_s){ adapt_last_shadow_ = now; sink_evlog("adapt_shadow_shrink", T); }   // Own clock, so it cannot starve the decay
-        // FAST RECOVERY after a storm (WAN, SB_AOO_ADAPT_FAST_RECOVER=1). The need is sized from the most recent
+        // FAST RECOVERY after a rough patch (SB_AOO_ADAPT_FAST_RECOVER, default on). The need is sized from the most recent
         // adapt_fast_wait_s_ seconds only (the full minute still remembers the storm). When that need sits well
         // below the depth and nothing grew in that time, the older slices and the headroom are dropped and the
         // depth goes there in one decision, played out without a splice. A depth that has to grow again within
         // a minute raises the wait, and with it the look-back, to twice the calm that did not last (at least
         // double, at most 120 s); five clean minutes reset it, so a line that stays rough keeps what it needs.
+        // On the LAN profile the wait is short and the depth returns all the way to the need: a local link that
+        // stumbled once is back within seconds, and one that keeps stumbling backs off the same way.
         bool fast_done = false;
-        if (!adapt_lan_profile_ && adapt_fast_recover() && adapt_block_s_ > 0){
-            static const int32_t fast_base_s = std::max<int32_t>(5, sink_tap_int("SB_AOO_ADAPT_FAST_WAIT_S", 10, nullptr));
-            static const int32_t fast_margin = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_FAST_MARGIN_BLOCKS", 2, nullptr));
+        if (adapt_fast_recover() && adapt_block_s_ > 0 && (!adapt_lan_profile_ || adapt_lan_fast())){
+            static const int32_t fast_base_wan = std::max<int32_t>(5, sink_tap_int("SB_AOO_ADAPT_FAST_WAIT_S", 10, nullptr));
+            static const int32_t fast_base_lan = std::max<int32_t>(3, sink_tap_int("SB_AOO_ADAPT_LAN_FAST_WAIT_S", 5, nullptr));
+            static const int32_t fast_marg_wan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_FAST_MARGIN_BLOCKS", 2, nullptr));
+            static const int32_t fast_marg_lan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_LAN_FAST_MARGIN_BLOCKS", 0, nullptr));
             static const double  late_pm     = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_LATE_PER_MIN", 2, nullptr) * 1.0);
             static const double  wan_margin  = std::max<int32_t>(0, std::min<int32_t>(10000, sink_tap_int("SB_AOO_ADAPT_WAN_MARGIN_US", 2000, nullptr))) / 1000.0;
+            const bool lan = adapt_lan_profile_;
+            const bool zero = lan && adapt_lan_zero() && adapt_zero_armed_;
+            const int32_t fast_base_s = lan ? fast_base_lan : fast_base_wan;
+            const int32_t fast_margin = lan ? fast_marg_lan : fast_marg_wan;
             if (adapt_fast_wait_s_ <= 0) adapt_fast_wait_s_ = fast_base_s;
-            const int32_t clean_s = adapt_stall_clean_secs_;
+            // Calm = no stall and no grow (and on LAN no dropout second either) for the whole wait.
+            const int32_t clean_s = lan ? std::min<int32_t>(adapt_clean_secs_, adapt_stall_clean_secs_) : adapt_stall_clean_secs_;
             if (adapt_fast_last_t_ > 0 && (now - adapt_fast_last_t_) <= 60.0 && cur > adapt_fast_depth_){
                 // Wait at least twice as long as the calm that turned out not to last.
                 adapt_fast_wait_s_ = std::min<int32_t>(120, std::max<int32_t>(adapt_fast_wait_s_ * 2, (int32_t) std::ceil(2.0 * (now - adapt_fast_last_t_))));
@@ -2906,7 +2922,7 @@ void source_desc::adapt_retarget(const sink& s, double now){
                 const int32_t ncalm = std::min<int32_t>(kAdaptHistSlices, 1 + (int32_t) std::ceil(std::max(0.0, (double) adapt_fast_wait_s_ - age_cur) / 10.0));
                 const double calm_s = age_cur + 10.0 * (ncalm - 1);
                 if (calm_s >= 8.0){
-                    const double allow = std::max(1.0, late_pm * calm_s / 60.0);
+                    const double allow = zero ? 0.0 : std::max(1.0, late_pm * calm_s / 60.0);
                     int32_t above[kAdaptHistBuckets + 1]; above[kAdaptHistBuckets] = 0;
                     for (int32_t b = kAdaptHistBuckets - 1; b >= 0; --b){
                         int32_t c = 0;
@@ -2915,14 +2931,15 @@ void source_desc::adapt_retarget(const sink& s, double now){
                     }
                     int32_t H = kAdaptHistBuckets - 1;
                     for (int32_t h = 0; h < kAdaptHistBuckets - 1; ++h){ if (above[h + 1] <= allow){ H = h; break; } }
-                    const double margin_ms = adapt_block_s_ * 1e3 + wan_margin;
+                    const double margin_ms = adapt_block_s_ * 1e3 + (lan ? 0.0 : wan_margin);
                     const int32_t need = std::max<int32_t>(adapt_floor_blocks_, (int32_t) std::ceil((H + margin_ms) / (adapt_block_s_ * 1e3)));
                     const int32_t D = std::min<int32_t>(adapt_max_blocks_, need + fast_margin);
-                    if (D <= cur - std::max<int32_t>(2, cur / 8)){               // worth a move: at least 2 blocks and an eighth of the depth
+                    if (D <= cur - (lan ? 2 : std::max<int32_t>(2, cur / 8))){   // worth a move: at least 2 blocks (WAN also an eighth of the depth), so it does not hunt one block above the need
                         for (int32_t k = ncalm; k < kAdaptHistSlices; ++k)       // forget the slices that hold the storm
                             memset(adapt_hist_[(adapt_hist_slice_ - k + kAdaptHistSlices) % kAdaptHistSlices], 0, sizeof(adapt_hist_[0]));
                         adapt_headroom_blocks_ = 0; adapt_headroom_prev_ = 0;
                         adapt_hist_blocks_ = need; adapt_base_blocks_ = need;
+                        if (zero) adapt_zero_floor_ = need;                      // the grow-only floor restarts from here
                         adapt_last_shrink_ = now; adapt_fast_last_t_ = now; adapt_fast_depth_ = D;
                         adapt_glide_request_ = adapt_glide_max() > 0;
                         adapt_apply_target(D);
@@ -3038,8 +3055,7 @@ void source_desc::check_outdated_blocks(){
 void source_desc::check_missing_blocks(const sink& s){
     if (blockqueue_.empty()){
         if (!ack_list_.empty()){
-            LOG_WARNING("bug: acklist not empty");
-            ack_list_.clear();
+            ack_list_.clear();   // left over after loss; nothing to report per block
         }
         return;
     }

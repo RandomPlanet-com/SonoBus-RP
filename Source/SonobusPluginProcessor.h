@@ -499,8 +499,13 @@ public:
     int getRecentServerConnectionInfos(Array<AooServerConnectionInfo> & retarray);
     void clearRecentServerConnectionInfos();
 
+    static constexpr int kMaxUserNameLength = 30;   // displayed name, in characters
     bool setCurrentUsername(const String & name);
     String getCurrentUsername() const { return mCurrentUsername; }
+
+    // The instrument this player shows to others (stage list, hub). Empty = not given.
+    void setCurrentInstrument(const String & instrument);
+    String getCurrentInstrument() const;
 
     // peer stuff
     
@@ -555,6 +560,9 @@ public:
     bool getRemotePeerHubSendMuted(int index) const;   // That player muted their send (relayed by the hub)
     int64_t getRemotePeerHubUplinkLost(int index) const;   // Per-player uplink loss as seen by the hub (-1 unknown)
     bool getSelfHubLatency(float & toHubMs, float & fromHubMs, float & rttMs, int64_t & uplinkLost) const;
+    // How late the other players on the stage hear this player, averaged over them; this player's own time to the
+    // hub when alone. Negative when not known yet.
+    double getMonitoringDelayTimeFromStage() const;
     int getSelfHubLatencyAgeS() const;   // Seconds since the hub's last latency report for us (-1 = never)
 
     // Per-listener overrides for the hub's mix-minus-self. Sends /sb/hxmute or /sb/hxgain to the hub peer; the hub
@@ -1513,6 +1521,8 @@ private:
     static constexpr int kHostedControlMaxDiagnosticEvents = 8;
     static constexpr int kHostedControlMaxQueuedSendScaffold = 16;
     String mCurrentUsername;
+    CriticalSection mInstrumentLock;
+    String mCurrentInstrument;
     // Our own to/from-hub legs as the hub computes them (/sb/hxlat self entry)
     float mSelfHubLatToMs = -1.0f, mSelfHubLatFromMs = -1.0f, mSelfHubRttMs = -1.0f;
     int64_t mSelfHubUplinkLost = -1;

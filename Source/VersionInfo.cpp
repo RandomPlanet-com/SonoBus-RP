@@ -35,7 +35,7 @@ std::unique_ptr<InputStream> VersionInfo::createInputStreamForAsset (const Asset
     
     ;
     
-    return std::unique_ptr<InputStream> (downloadUrl.createInputStream (URL::InputStreamOptions(URL::ParameterHandling::inAddress).withExtraHeaders(extraHeaders).withResponseHeaders(&responseHeaders).withStatusCode(&statusCode).withNumRedirectsToFollow(1)));
+    return std::unique_ptr<InputStream> (downloadUrl.createInputStream (URL::InputStreamOptions(URL::ParameterHandling::inAddress).withExtraHeaders(extraHeaders).withResponseHeaders(&responseHeaders).withStatusCode(&statusCode).withNumRedirectsToFollow(5)));   // the update server hands the file on to its storage in more than one step
 }
 
 #if SONOBUSPLUS_BUILD

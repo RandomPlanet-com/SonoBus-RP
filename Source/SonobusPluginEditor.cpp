@@ -366,7 +366,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainGroupLabel->setJustificationType(Justification::centredLeft);
     mMainGroupLabel->setFont(Font(21.0f, Font::bold));   // Header more visible (was 16)
     mMainGroupLabel->setEnabled(false);
-    mMainGroupLabel->setTitle(TRANS("Group Name"));
+    mMainGroupLabel->setTitle(TRANS("Stage Name"));
 
 
     mMainUserLabel = std::make_unique<Label>("user", "");
@@ -731,7 +731,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mAltConnectButton->addListener(this);
     //mAltConnectButton->setColour(TextButton::buttonOnColourId, Colours::transparentBlack);
     //mAltConnectButton->setColour(TextButton::buttonColourId, Colours::transparentBlack);
-    mAltConnectButton->setTooltip(TRANS("Show the connections page, while staying connected to current group"));
+    mAltConnectButton->setTooltip(TRANS("Show the connections page, while staying connected to current stage"));
     mAltConnectButton->setTitle(TRANS("Connect to Other"));
 
 
@@ -806,9 +806,9 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mSettingsButton->addMouseListener(this, false);
 
     mMainLinkButton = std::make_unique<SonoDrawableButton>("link",  DrawableButton::ButtonStyle::ImageOnButtonBackground);
-    mMainLinkButton->setTitle(TRANS("Group Action Menu"));
+    mMainLinkButton->setTitle(TRANS("Stage Action Menu"));
     mMainLinkButton->addListener(this);
-    mMainLinkButton->setTooltip(TRANS("Press for group action menu"));
+    mMainLinkButton->setTooltip(TRANS("Press for stage action menu"));
 
     mMainLinkArrow = Drawable::createFromImageData(BinaryData::triangle_disclosure_svg, BinaryData::triangle_disclosure_svgSize);
     mMainLinkArrow->setInterceptsMouseClicks(false, false);
@@ -1405,7 +1405,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
             // switch to group page
             mConnectView->showPrivateGroupTab();
 
-            updateServerStatusLabel(TRANS("Filled in Group information from clipboard! Press 'Connect to Group' to join..."), false);
+            updateServerStatusLabel(TRANS("Filled in Stage information from clipboard! Press 'Connect to Stage' to join..."), false);
         }
         
         
@@ -2993,8 +2993,8 @@ void SonobusAudioProcessorEditor::handleURL(const String & urlstr)
     URL url(urlstr);
     if (url.isWellFormed()) {
         if (currConnected && currGroup.isNotEmpty()) {
-            AlertWindow::showMessageBoxAsync(AlertWindow::InfoIcon, TRANS("Already in a group"),
-                                             TRANS("Disconnect from this group, then open the link again."));
+            AlertWindow::showMessageBoxAsync(AlertWindow::InfoIcon, TRANS("Already in a stage"),
+                                             TRANS("Disconnect from this stage, then open the link again."));
             return;
         }
         if (!currConnected || currGroup.isEmpty()) {
@@ -3006,7 +3006,7 @@ void SonobusAudioProcessorEditor::handleURL(const String & urlstr)
                 //showConnectPopup(true);
                 // switch to group page
                 //mConnectTab->setCurrentTabIndex(mConnectTab->getNumTabs() > 2 ? 1 : 0);
-                //updateServerStatusLabel(TRANS("Filled in Group from link! Press 'Connect to Group' to join..."), false);
+                //updateServerStatusLabel(TRANS("Filled in Stage from link! Press 'Connect to Stage' to join..."), false);
             }
         }
     }
@@ -3861,7 +3861,7 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
 
         if (processor.getNumberRemotePeers() == 0 && mPeerContainer->getPendingPeerCount() == 0) {
             String labstr;
-            labstr << TRANS("Waiting for other users to join group") << " \"" << currGroup << "\"...";
+            labstr << TRANS("Waiting for other users to join stage") << " \"" << currGroup << "\"...";
             mMainMessageLabel->setText(labstr, dontSendNotification);
             mMainMessageLabel->setVisible(true);
         } else {
@@ -4156,7 +4156,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
         else if (ev.type == ClientEvent::GroupJoinEvent) {
             String statstr;
             if (ev.success) {
-                statstr = TRANS("Joined Group: ") + ev.group;
+                statstr = TRANS("Joined Stage: ") + ev.group;
 
                 //AccessibilityHandler::postAnnouncement(statstr, AccessibilityHandler::AnnouncementPriority::high);
 
@@ -4181,7 +4181,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             } else {
 
                 if (processor.getCurrentJoinedGroup().isEmpty()) {
-                    statstr = TRANS("Failed to join group: ") + ev.message;
+                    statstr = TRANS("Failed to join stage: ") + ev.message;
 
                     mConnectView->groupJoinFailed();
                    #if SONOBUSPLUS_BUILD
@@ -4201,9 +4201,9 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
         else if (ev.type == ClientEvent::GroupLeaveEvent) {
             String statstr;
             if (ev.success) {
-                statstr = TRANS("Left Group: ") + ev.group;
+                statstr = TRANS("Left Stage: ") + ev.group;
             } else {
-                statstr = TRANS("Failed to leave group: ") + ev.message;
+                statstr = TRANS("Failed to leave stage: ") + ev.message;
             }
 
             //AccessibilityHandler::postAnnouncement(statstr, AccessibilityHandler::AnnouncementPriority::high);
@@ -4229,7 +4229,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
 
             if (!currConnectionInfo.groupIsPublic && ev.user != processor.getHubPeerUsername()) {   // The hub is not a person
                 String mesg;
-                mesg << ev.user << TRANS(" - joined group");
+                mesg << ev.user << TRANS(" - joined stage");
                 mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, ev.user, "", "", mesg));
             }
 
@@ -4242,7 +4242,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
         else if (ev.type == ClientEvent::PeerLeaveEvent) {
             if (!currConnectionInfo.groupIsPublic && ev.user != processor.getHubPeerUsername()) {   
                 String mesg;
-                mesg << ev.user << TRANS(" - left group");
+                mesg << ev.user << TRANS(" - left stage");
                 mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, ev.user, "", "", mesg));
             }
 
@@ -4310,7 +4310,7 @@ void SonobusAudioProcessorEditor::copyGroupLink()
 #else
     const bool singleurl = true;
     if (mConnectView && mConnectView->copyInfoToClipboard(singleurl)) {
-        auto msg = TRANS("Copied group connection info to clipboard for you to share with others");
+        auto msg = TRANS("Copied stage connection info to clipboard for you to share with others");
         showPopTip(msg, 3000, mMainLinkButton.get());
     }
 #endif
@@ -4321,9 +4321,9 @@ void SonobusAudioProcessorEditor::showGroupMenu(bool show)
     Array<GenericItemChooserItem> items;
 
 #if JUCE_IOS || JUCE_ANDROID
-    items.add(GenericItemChooserItem(TRANS("Share Group Link"), {}, nullptr, false));
+    items.add(GenericItemChooserItem(TRANS("Share Stage Link"), {}, nullptr, false));
 #else
-    items.add(GenericItemChooserItem(TRANS("Copy Group Link"), {}, nullptr, false));
+    items.add(GenericItemChooserItem(TRANS("Copy Stage Link"), {}, nullptr, false));
 #endif
 
     // The stock Group Latency Match relies on the per-peer latency
@@ -4334,7 +4334,7 @@ void SonobusAudioProcessorEditor::showGroupMenu(bool show)
     std::vector<int> menuActions;
     menuActions.push_back(kActCopyLink);
     if (!hostedMenu) {
-        items.add(GenericItemChooserItem(TRANS("Group Latency Match..."), {}, nullptr, true));
+        items.add(GenericItemChooserItem(TRANS("Stage Latency Match..."), {}, nullptr, true));
         menuActions.push_back(kActLatencyMatch);
     }
 
@@ -4342,7 +4342,7 @@ void SonobusAudioProcessorEditor::showGroupMenu(bool show)
     menuActions.push_back(kActVdoNinja);
 
     if (!hostedMenu) {   // A hub serves ONE group chosen by its operator — nothing to suggest (banked for a public hub directory)
-        items.add(GenericItemChooserItem(TRANS("Suggest New Group..."), {}, nullptr, true));
+        items.add(GenericItemChooserItem(TRANS("Suggest New Stage..."), {}, nullptr, true));
         menuActions.push_back(kActSuggestGroup);
     }
 
@@ -4451,7 +4451,7 @@ void SonobusAudioProcessorEditor::showLatencyMatchPrompt(const String & name, fl
 
 
         String mesg;
-        mesg << name << " " << TRANS("requests to use a matched group latency of:");
+        mesg << name << " " << TRANS("requests to use a matched stage latency of:");
         mesg << " " << lrintf(latencyms) << " ms";
         
         mLatMatchApproveComponent->label.setText(mesg, dontSendNotification);
@@ -4479,7 +4479,7 @@ void SonobusAudioProcessorEditor::showLatencyMatchPrompt(const String & name, fl
 void SonobusAudioProcessorEditor::showSuggestedGroupPrompt(const String &name, const String &group, const String & grouppass, bool ispublic, const StringArray & others)
 {
     if (!mSuggestedGroupComponent) {
-        mSuggestedGroupComponent = std::make_unique<ApproveComponent>(TRANS("Connect To Group"), TRANS("Ignore"));
+        mSuggestedGroupComponent = std::make_unique<ApproveComponent>(TRANS("Connect To Stage"), TRANS("Ignore"));
     }
 
 
@@ -4506,13 +4506,13 @@ void SonobusAudioProcessorEditor::showSuggestedGroupPrompt(const String &name, c
 
         String mesg;
         if (ispublic) {
-            mesg << TRANS("Requested to join a new public group:");
+            mesg << TRANS("Requested to join a new public stage:");
         } else {
-            mesg << TRANS("Requested to join a new private group:");
+            mesg << TRANS("Requested to join a new private stage:");
         }
 
         mesg << "\n   " <<  TRANS("From: ") << name;
-        mesg << "\n   " <<  TRANS("New Group: ") << group;
+        mesg << "\n   " <<  TRANS("New Stage: ") << group;
         mesg << "\n   " <<  TRANS("With: ") << others.joinIntoString(", ");
 
         mSuggestedGroupComponent->label.setText(mesg, dontSendNotification);
@@ -5629,7 +5629,7 @@ public:
     {
         info = SonobusPlusVersion::get();
         logo = ImageCache::getFromMemory(BinaryData::sonobus_logo_96_png, BinaryData::sonobus_logo_96_pngSize);
-        setSize(560, 300);
+        setSize(640, 300);
     }
 
     void paint (Graphics& g) override
@@ -5651,7 +5651,7 @@ public:
         String ver = info.marketing.isNotEmpty() ? ("Version " + info.marketing) : String();
         if (info.version.isNotEmpty()) ver += (ver.isNotEmpty() ? String::fromUTF8("  \u00b7  release ") : String("Release ")) + info.version;
         if (ver.isEmpty()) ver = "Development build (" + info.upstreamBase + ")";
-        g.drawText(ver, r.removeFromTop(26), Justification::centredLeft);
+        g.drawFittedText(ver, r.removeFromTop(26), Justification::centredLeft, 1, 0.8f);   // the whole line, never cut off
 
         g.setFont(Font(13.0f));
         r.removeFromTop(14);
@@ -5927,8 +5927,8 @@ void SonobusAudioProcessorEditor::getCommandInfo (CommandID cmdID, ApplicationCo
             }
             break;
         case SonobusCommands::ShowGroupMenu:
-            info.setInfo(TRANS("Show Group Menu"),
-                TRANS("Show Group Menu"),
+            info.setInfo(TRANS("Show Stage Menu"),
+                TRANS("Show Stage Menu"),
                 TRANS("Popup"), 0);
             info.setActive(true);
             if (useKeybindings) {
@@ -5955,9 +5955,9 @@ void SonobusAudioProcessorEditor::getCommandInfo (CommandID cmdID, ApplicationCo
             break;
         case SonobusCommands::CopyGroupLink:
 #if JUCE_IOS || JUCE_ANDROID
-            name = TRANS("Share Group Link");
+            name = TRANS("Share Stage Link");
 #else
-            name = TRANS("Copy Group Link");
+            name = TRANS("Copy Stage Link");
 #endif
 
             info.setInfo (name, name,
@@ -5968,8 +5968,8 @@ void SonobusAudioProcessorEditor::getCommandInfo (CommandID cmdID, ApplicationCo
             }
             break;
         case SonobusCommands::GroupLatencyMatch:
-            info.setInfo (TRANS("Group Latency Match..."),
-                          TRANS("Group Latency Match..."),
+            info.setInfo (TRANS("Stage Latency Match..."),
+                          TRANS("Stage Latency Match..."),
                           TRANS("Popup"), 0);
             info.setActive(currConnected && !currGroup.isEmpty() && !processor.isHostedMixModeEnabled());   // No per-peer latency test in hub mode
             if (useKeybindings) {
@@ -5986,8 +5986,8 @@ void SonobusAudioProcessorEditor::getCommandInfo (CommandID cmdID, ApplicationCo
             }
             break;
         case SonobusCommands::SuggestNewGroup:
-            info.setInfo (TRANS("Suggest New Group..."),
-                          TRANS("Suggest New Group..."),
+            info.setInfo (TRANS("Suggest New Stage..."),
+                          TRANS("Suggest New Stage..."),
                           TRANS("Popup"), 0);
             info.setActive(currConnected && !currGroup.isEmpty() && !processor.isHostedMixModeEnabled());   // Not on a hub (one group, operator-chosen)
             if (useKeybindings) {
@@ -6247,7 +6247,7 @@ StringArray SonobusAudioProcessorEditor::SonobusMenuBarModel::getMenuBarNames()
 {
     return StringArray(TRANS("File"),
                        TRANS("Connect"),
-                       TRANS("Group"),
+                       TRANS("Stage"),
                        TRANS("Transport"),
                        TRANS("View")
                        );

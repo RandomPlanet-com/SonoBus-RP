@@ -826,7 +826,7 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
     pvf->optionsRemoveButton = std::make_unique<TextButton>(TRANS("Remove"));
     pvf->optionsRemoveButton->addListener(this);
     pvf->optionsRemoveButton->setLookAndFeel(&pvf->smallLnf);
-    pvf->optionsRemoveButton->setTooltip(TRANS("Removes user from your own connections, does not affect the whole group"));
+    pvf->optionsRemoveButton->setTooltip(TRANS("Removes user from your own connections, does not affect the whole stage"));
 
     pvf->optionsBlockButton = std::make_unique<TextButton>(TRANS("BLOCK"));
     pvf->optionsBlockButton->addListener(this);
@@ -2184,6 +2184,7 @@ void PeersContainerView::updatePeerViews(int specific)
         const bool inSession = processor.isConnectedToServer() && processor.getCurrentJoinedGroup().isNotEmpty();
         if (hubIdx < 0 || !inSession) {
             htext = (hubIdx < 0 && inSession) ? TRANS("Hub: not connected") : String();
+            mLinkJoinMs = 0;   // the Link light starts over at the next join
             // The line paints from the rich copy whenever one exists, so an empty text changed nothing
             if (auto* rl = dynamic_cast<SbRichLabel*>(mHubStatusLabel.get())) rl->clearRich();
             mHubStatusLabel->setColour(Label::textColourId, mutedTextColor);
@@ -2217,6 +2218,12 @@ void PeersContainerView::updatePeerViews(int specific)
                 if (processor.isHubPeer(processor.getRemotePeerUserName(pi))) continue;
                 totaldrops = jmax(totaldrops, processor.getRemotePeerPacketsDropped(pi));
             }
+            // The Link light leaves out the first 10 seconds after a join, while the buffers find their depth.
+            const uint32 linkNow = Time::getMillisecondCounter();
+            if (mLinkJoinMs == 0) { mLinkJoinMs = linkNow == 0 ? 1 : linkNow; mLinkBase = -1; mHubDropsN = 0; }
+            const bool linkSettling = linkNow - mLinkJoinMs < 10000;
+            if (! linkSettling && mLinkBase < 0) { mLinkBase = totaldrops; mHubDropsN = 0; }
+            const int64_t linkdrops = mLinkBase < 0 ? 0 : jmax((int64_t) 0, totaldrops - mLinkBase);
             const String hsep = String::fromUTF8("  \xe2\x94\x82  "); // "  │  " field divider (was a small dot)
             // The line is built in parts so each field can carry its own colour (SbRichLabel):
             // head (hub, port, format) regular; latency legs + ping coloured like the rows; Mb/s regular; drops coloured by the last minute.
@@ -2230,11 +2237,35 @@ void PeersContainerView::updatePeerViews(int specific)
                 if (sport > 0) headPart << ":" << sport;
             }
             if (!hubconn) headPart << "  " << TRANS("disconnected");
-            headPart << hsep << "PCM 16 bit" << hsep << TRANS("Latency (ms)") << " ";
-            const String upStr = String::fromUTF8("\xe2\x86\x91 ") + sendStr;
-            const String dnStr = String::fromUTF8("\xe2\x86\x93 ") + recvStr;
-            const String pingPart = TRANS("Ping") + " " + pingStr;   // No slash, one unit label
-            dropsPart << hsep << TRANS("drops from hub") << " " << String(totaldrops);   // your own hub→you link (rows carry each player's uplink)
+            headPart << hsep << "PCM 16 bit" << hsep;
+            // Two figures and a light. Ping = the network round trip to the hub. Delay = the whole loop the player
+            // feels: that round trip, the buffering on the way (the hub's buffer for this player, this player's
+            // receive buffer, one packet) and the audio interface in and out. Link = drops on the way from the hub.
+            float netMs = -1.0f, bufMs = -1.0f, ifaceMs = -1.0f, delayMs = -1.0f;
+            {
+                float sTo = -1, sFrom = -1, sRtt = -1; int64_t sLost = -1;
+                const bool self = processor.getSelfHubLatency(sTo, sFrom, sRtt, sLost);
+                const float to = self ? sTo : (haveLat ? linfo.outgoingMs : -1.0f);
+                const float from = self ? sFrom : (haveLat ? linfo.incomingMs : -1.0f);
+                netMs = (self && sRtt >= 0.0f) ? sRtt : (haveLat ? linfo.pingMs : -1.0f);
+                if (to >= 0.0f && from >= 0.0f && netMs >= 0.0f) {
+                    const float packetMs = 1000.0f * 32.0f / 48000.0f;   // one audio block on the wire
+                    bufMs = jmax(0.0f, to + from - netMs) + packetMs;
+                    if (JUCEApplicationBase::isStandaloneApp() && getAudioDeviceManager && getAudioDeviceManager()) {
+                        if (auto* cad = getAudioDeviceManager()->getCurrentAudioDevice()) {
+                            const double sr = cad->getCurrentSampleRate();   // input + output latency, each with its buffer
+                            if (sr > 0.0) ifaceMs = (float) (1000.0 * (cad->getInputLatencyInSamples() + cad->getOutputLatencyInSamples()
+                                                                       + 2 * cad->getCurrentBufferSizeSamples()) / sr);
+                        }
+                    }
+                    delayMs = netMs + bufMs + jmax(0.0f, ifaceMs);
+                }
+            }
+            const String upStr = TRANS("Ping") + " " + pingStr + " ms";
+            const String dnStr = hsep + TRANS("Delay") + " ";
+            const String pingPart = (delayMs >= 0.0f ? String((recvStr.startsWith("~") ? "~" : "")) + String((int) std::lround(delayMs)) : String("?")) + " ms";
+            dropsPart << hsep << TRANS("Link") << " ";
+            const String linkDot = String::fromUTF8("\xe2\x97\x8f");
             {   // Who is recording, anywhere on the hub (you included)
                 StringArray recs;
                 if (processor.isRecordingToFile()) recs.add(TRANS("you"));
@@ -2244,44 +2275,55 @@ void PeersContainerView::updatePeerViews(int specific)
                 }
                 if (recs.size() > 0) recPart << hsep << String::fromUTF8("\xe2\x97\x8f ") << TRANS("REC") << ": " << recs.joinIntoString(", ");
             }
-            htext << headPart << upStr << "  " << dnStr << "  " << pingPart << ratePart << dropsPart << recPart;
+            htext << headPart << upStr << dnStr << pingPart << ratePart << dropsPart << linkDot << recPart;
             {   // colours
                 const uint32 nowms = Time::getMillisecondCounter();
                 if (mHubDropsN == 0 || nowms - mHubDropsT[mHubDropsN - 1] >= 5000) {
                     if (mHubDropsN == 12) { for (int k = 1; k < 12; ++k) { mHubDropsT[k-1] = mHubDropsT[k]; mHubDropsC[k-1] = mHubDropsC[k]; } mHubDropsN = 11; }
-                    mHubDropsT[mHubDropsN] = nowms; mHubDropsC[mHubDropsN] = totaldrops; mHubDropsN++;
+                    mHubDropsT[mHubDropsN] = nowms; mHubDropsC[mHubDropsN] = linkdrops; mHubDropsN++;
                 }
                 int64_t recent = 0;
-                for (int k = 0; k < mHubDropsN; ++k) { if (nowms - mHubDropsT[k] <= 60000) { recent = totaldrops - mHubDropsC[k]; break; } }
+                for (int k = 0; k < mHubDropsN; ++k) { if (nowms - mHubDropsT[k] <= 60000) { recent = linkdrops - mHubDropsC[k]; break; } }
                 const Colour reg = hubconn ? regularTextColor : mutedTextColor;
-                auto latcol  = [this](float ms){ return ms < sbplus::kLatOneWayGreenMs ? latGoodColor : ms < sbplus::kLatOneWayYellowMs ? latWarnColor : latBadColor; };   // Shared thresholds (SbLatencyColours.h)
-                auto pingcol = [this](float ms){ return ms < sbplus::kLatRttGreenMs ? latGoodColor : ms < sbplus::kLatRttYellowMs ? latWarnColor : latBadColor; };   // round-trip scale
+                auto delaycol = [this](float ms){ return ms <= sbplus::kDelayLoopGreenMs ? latGoodColor : ms <= sbplus::kDelayLoopYellowMs ? latWarnColor : latBadColor; };   // Shared thresholds (SbLatencyColours.h)
+                auto pingcol  = [this](float ms){ return ms <= sbplus::kStagePingGreenMs ? latGoodColor : ms <= sbplus::kStagePingYellowMs ? latWarnColor : latBadColor; };   // same scale as the stage list
                 const Colour dropcol = recent < 5 ? latGoodColor : recent <= 20 ? latWarnColor : latBadColor;   // per-minute, same bands as the rows
                 float cTo = -1, cFrom = -1, cRtt = -1; int64_t cLost = -1;
                 const bool haveSelf = processor.getSelfHubLatency(cTo, cFrom, cRtt, cLost);
                 {   // Say why the numbers are '~' (local estimate) when the hub's latency feed is dark
                     const int age = processor.getSelfHubLatencyAgeS();
-                    // Explain the fields on hover; the '~' note is appended when the hub's feed is dark
-                    String tip = (haveSelf ? "To hub " + String(cTo, 1) + "\nFrom hub " + String(cFrom, 1) + "\nRound trip " + String(cRtt, 1) + " ms"
-                                           : String("To hub\nFrom hub\nRound trip")) + "\ndrops = lost on the way to you";   // One data point per line
+                    // Hover: what the Delay is made of, then the drops behind the light. The '~' note is appended
+                    // when the hub's feed is dark.
+                    String tip;
+                    if (delayMs >= 0.0f) {
+                        tip << "Delay " << String(delayMs, 1) << " ms\nNetwork " << String(netMs, 1) << " ms\nBuffering " << String(bufMs, 1) << " ms\n"
+                            << (ifaceMs >= 0.0f ? "Audio interface " + String(ifaceMs, 1) + " ms" : String("Audio interface: not known"));
+                    } else {
+                        tip << "Delay = network + buffering + audio interface";
+                    }
+                    tip << "\nLink: " << String(recent) << " drops from the hub in the last minute, " << String(linkdrops) << " since you joined";
                     tip = String::fromUTF8(tip.toRawUTF8());
                     if (!(haveSelf || !hubconn))
                         tip << "\n" << (age < 0 ? TRANS("~ = local estimate: no latency report from the hub yet")
                                              : TRANS("~ = local estimate: no latency report from the hub for ") + String(age) + " s");
-                    if (mHubStatusLabel->getTooltip() != tip) mHubStatusLabel->setTooltip(tip);
+                    if (mHubStatusLabel->getTooltip() != tip) {
+                        mHubStatusLabel->setTooltip(tip);
+                        // Test aid (SB_UI_SHOTS=<folder>): the header line and its hover text, as text
+                        static const String shots = SystemStats::getEnvironmentVariable("SB_UI_SHOTS", {});
+                        if (shots.isNotEmpty()) File(shots).getChildFile("header.txt").replaceWithText(htext + "\n---\n" + tip + "\n");
+                    }
                 }
                 if (auto* rl = dynamic_cast<SbRichLabel*>(mHubStatusLabel.get())) {
                     AttributedString as; as.setJustification(Justification::centredLeft); as.setWordWrap(AttributedString::none);
                     const Font f = mHubStatusLabel->getFont();
                     as.append(headPart, f, reg);
                     const Colour est = hubconn ? mutedTextColor : reg;   // '~' local-estimate fields are dimmed
-                    as.append(upStr, f, haveSelf && hubconn ? latcol(cTo) : est);
-                    as.append("  ", f, reg);
-                    as.append(dnStr, f, haveSelf && hubconn ? latcol(cFrom) : est);
-                    as.append("  ", f, reg);
-                    as.append(pingPart, f, haveSelf && hubconn && cRtt >= 0.0f ? pingcol(cRtt) : est);
+                    as.append(upStr, f, haveSelf && hubconn && cRtt >= 0.0f ? pingcol(cRtt) : est);
+                    as.append(dnStr, f, reg);
+                    as.append(pingPart, f, haveSelf && hubconn && delayMs >= 0.0f ? delaycol(delayMs) : est);
                     as.append(ratePart, f, reg);
-                    as.append(dropsPart, f, hubconn ? dropcol : reg);
+                    as.append(dropsPart, f, reg);
+                    as.append(linkDot, f, hubconn && ! linkSettling ? dropcol : mutedTextColor);
                     as.append(recPart, f, reg);
                     rl->setRich(as);
                 }

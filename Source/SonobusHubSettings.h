@@ -149,6 +149,16 @@ struct HubLaunchArgs {
     int aooBlockqExtra = 8;    // SB_AOO_BLOCKQ_EXTRA  blockqueue headroom (blocks)
     int aooHandoff = 1;        // SB_AOO_HANDOFF       lead hand-off (audioqueue cap = target + bq)
     bool geoip = true;         // Look up each WAN player's city/state (ip-api.com) for the status page
+    // Stage limits and the stage directory. Live: they apply on Save. `location` is the stage's city.
+    int maxPlayers = 20;       // 0 = no limit
+    int maxChannels = 12;      // per player; 0 = no limit
+    bool listStage = false;    // the operator opts in
+    std::string stageGenre = "Any";
+    std::string stageDescription;
+    std::string stageCountry;  // two-letter country code for the listing, for example US; empty = not given
+    std::string stageNames = "Automatic";   // player names in the listing: Automatic (shown when open, hidden when locked) / Show / Hide
+    std::string stageDirectory = "https://stages.randomplanet.com/api/1/";   // not on the form
+    std::string stageHubId, stageHubKey;    // this hub's identity at the directory, created on first start; never shown
 };
 
 // ─── Per-launch metadata (where values came from) ─────────────────────────────
@@ -215,6 +225,11 @@ void clearSinkEnv();
 // Configure a freshly constructed SonobusHubServer from `a` (everything that
 // is set BEFORE start()). Shared by headless, GUI initialise and GUI restart.
 void applyToHub(SonobusHubServer& hub, const HubLaunchArgs& a);
+// The stage limits and listing settings, live: call after every Save (window and web page).
+void applyStageToHub(SonobusHubServer& hub, const HubLaunchArgs& a);
+const char* stageGenres();   // comma list for the genre choice; the directory's list wins once it is known
+// First start: give this hub its directory identity (kept in hub_settings.json). True = created, caller saves.
+bool ensureStageIdentity(HubLaunchArgs& a);
 // Resolve the AOO signaling endpoint the hub's own client connects to.
 void resolveServerEndpoint(const HubLaunchArgs& a, std::string& host, int& port);
 

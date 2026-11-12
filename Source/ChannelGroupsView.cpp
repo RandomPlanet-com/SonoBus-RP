@@ -3648,6 +3648,11 @@ void ChannelGroupsView::toggleAllMonitorDelay()
         }
     }
 
+    // Switching it on with no time set would do nothing: start from how late the stage hears this player.
+    const double fromStage = doDisable ? -1.0 : processor.getMonitoringDelayTimeFromStage();
+    auto fill = [fromStage](DelayParams& p) { if (fromStage > 0.0 && p.delayTimeMs <= 0.0f) p.delayTimeMs = (float) fromStage; };
+    fill(metparams); fill(fileparams); fill(sbparams);
+
     // set them all
     metparams.enabled = !doDisable;
     processor.setMetronomeMonitorDelayParams(metparams);
@@ -3661,6 +3666,7 @@ void ChannelGroupsView::toggleAllMonitorDelay()
 
     for (int i=0; i < numgroups; ++i) {
         processor.getInputMonitorDelayParams(i, eparam);
+        fill(eparam);
         eparam.enabled = !doDisable;
         processor.setInputMonitorDelayParams(i, eparam);
     }

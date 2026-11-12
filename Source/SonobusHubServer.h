@@ -396,7 +396,7 @@ struct HubPeer {
     uint32_t holdLateRing[12] = {};   // PM: late blocks per 10-s window, last 2 min (bursty links never give 12 consecutive bad windows)
     int      holdLateIdx = 0;
     int     holdFollowWindows = 0;    // consecutive samples with the measured target a block or more above the hold
-    int64_t holdNoDecayUntilMs = 0;   // after a follow the hold stays up for a while, so it cannot flap with the decay
+    int64_t holdNoDecayUntilMs = 0;   // after a follow the slow decay waits, so the hold cannot flap; the one-step return does not wait
     int     holdFastWindows = 3;      // calm samples required before a one-step return to the target (doubles on a relapse)
     int64_t holdFastAtMs = 0;         // time of the last one-step return
     double  holdFastToMs = 0;         // hold that step chose
@@ -461,6 +461,7 @@ struct HubPeer {
     std::atomic<int32_t> lanDepthBlocks { 0 };   // Live depth of this player's adaptive LAN sink in blocks (0 = not known)
     std::mutex verLock;                   // guards the two strings below (receive thread writes, UI snapshot reads)
     std::string clientVersion, clientOs;  // Player's version and system (/sb/hxver); empty for players that do not report it
+    std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
     // Last chirp-onset mach ticks seen in this peer's decoded
@@ -807,6 +808,7 @@ public:
         bool isRecording = false;   
         bool isSendMuted = false;   // Send muted (relayed to everyone)
         std::string clientVersion, clientOs;   // Player's version and system; empty when the player does not report it
+        std::string clientInstrument;          // Player's instrument; empty when not given
         int clientDevBuf = -1, clientDevSr = -1;   // Player's audio buffer + sample rate
         bool  isLan = false;
         uint64_t lostBlocks = 0;             // Total blocks of this player's stream the hub lost (never arrived, not resent) — the 'Drops' column
@@ -845,8 +847,34 @@ public:
         std::string portLocalText;           // Local tier — sockets bound + host firewall inspection
         int64_t portCheckVerifiedAtMs = 0;   // Epoch ms of the last player-verified check (viewer renders local time)
         int portCheckState = 0;              // 0 running/not run, 1 all forwarded, 2 a port failed, 3 skipped
+        // Stage limits and the stage directory listing
+        int stageMaxPlayers = 0;             // 0 = no limit
+        int stageMaxChannels = 0;            // per player; 0 = no limit
+        int stageListingState = 0;           // 0 listing off, 1 listed, 2 not listed (reason in text), 3 directory not reachable, 4 checking
+        std::string stageListingText;        // one line for the status area, e.g. "Listed at stages.randomplanet.com"
     };
     UiSnapshot snapshotForUI() const;
+
+    // ─── Stage limits, kick and the stage directory (control path only, never the audio threads) ───
+    struct StageSettings {
+        int maxPlayers = 20;                 // 0 = no limit
+        int maxChannels = 12;                // per player; 0 = no limit (HUB_MAX_CHANNELS_PER_PEER still applies)
+        bool list = false;                   // listed at the stage directory (the operator opts in)
+        std::string genre = "Any";
+        std::string description;
+        std::string city;
+        std::string country;                 // two-letter code, empty = not given
+        int names = 0;                       // player names in the listing: 0 automatic (shown on an open stage, hidden on a locked one), 1 show, 2 hide
+    };
+    void applyStageSettings(const StageSettings& s);   // any thread; limits apply to the next join / format change
+    StageSettings stageSettings() const;
+    uint64_t stageSettingsGeneration() const { return mStageGen.load(std::memory_order_relaxed); }
+    uint64_t stageMembersGeneration() const { return mStageMembersGen.load(std::memory_order_relaxed); }   // changes on every join and leave
+    // Removes a player now and keeps that name and address out for blockMinutes. False = no such player.
+    bool kickPlayer(const std::string& userName, int blockMinutes = 60);
+    void setStageListingStatus(int state, const std::string& text);   // written by the directory client
+    // Join check used by the built-in connection server: empty = allow, else the reason shown to the player.
+    std::string stageJoinRefusal(const std::string& ip, const std::string& user, int othersInStage);
     int getSampleRate() const { return mSampleRate; }
     int getBlockSize() const { return mBlockSize; }
     int getMixerChannels() const { return mChannels; }
@@ -1498,6 +1526,17 @@ private:
     mutable uint64_t mLastCpuUserUs = 0;
     mutable uint64_t mLastCpuSysUs = 0;
     mutable float mLastCpuPct = 0.0f;
+    mutable std::mutex mCpuMutex;              // snapshotForUI runs on several threads (window, web page, internals)
+    // Stage limits, kick blocks and the listing status line
+    mutable std::mutex mStageMutex;
+    StageSettings mStage;
+    struct StageBlock { std::string ip, user; int64_t untilMs = 0; };
+    std::vector<StageBlock> mStageBlocks;
+    int mStageListingState = 0;
+    std::string mStageListingText;
+    std::atomic<uint64_t> mStageGen{0};
+    std::atomic<uint64_t> mStageMembersGen{0};
+    std::atomic<int> mStageMaxChannels{12};   // read by the format handler without the lock
     mutable int64_t mLastLatBroadcastMs = 0;
     mutable uint32_t mLatBroadcastCount = 0;   // /sb/hxlat 1 Hz throttle (snapshotForUI runs at 5 Hz)
 public:

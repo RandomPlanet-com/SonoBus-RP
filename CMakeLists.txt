@@ -47,8 +47,8 @@ set(DISPLAY_VERSION "${PROJECT_VERSION}${BETA_VERSION_SUFFIX}")
 # Shown on the web page / About as "Hub 1.0.0 (build <commit>, <date>)". Bump here on hub releases.
 # Apple-style versioning — marketing version (CFBundleShortVersionString) + date build id
 # (CFBundleVersion, stamped by the release scripts as YYYY.MM.DD.HHMM). The updater keeps comparing the DATE build.
-set(SONOBUS_PLUS_VERSION "1.2.8")
-set(SONOBUS_HUB_VERSION "1.2.9")
+set(SONOBUS_PLUS_VERSION "1.3.0")
+set(SONOBUS_HUB_VERSION "1.3.0")
 # the client's date build id + source commit as compile-time defines for platforms
 # without an Info.plist (Windows/Linux). Mac bundles still read CFBundleVersion/SBPlusCommit stamped at release.
 #   -DSONOBUS_PLUS_BUILD=YYYY.MM.DD.HHMM[-dev]   (a build script passes the configure time)
@@ -309,6 +309,8 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         Source/CompressorView.h
         Source/ConnectView.cpp
         Source/ConnectView.h
+        Source/StagesView.cpp
+        Source/StagesView.h
         Source/DebugLogC.h
         Source/EffectParams.cpp
         Source/EffectParams.h
@@ -808,6 +810,8 @@ target_sources(SonoBusHub PRIVATE
     Source/SonobusHubGeo.h
     Source/SonobusHubUpdater.cpp
     Source/SonobusHubUpdater.h
+    Source/SonobusHubDirectory.cpp
+    Source/SonobusHubDirectory.h
     Source/SonobusHubLayout.cpp
     Source/SonobusHubLayout.h
     Source/SonobusHubWebIcon.h
@@ -910,6 +914,8 @@ target_sources(SonoBusHub PRIVATE
     Source/SonobusHubGeo.h
     Source/SonobusHubUpdater.cpp
     Source/SonobusHubUpdater.h
+    Source/SonobusHubDirectory.cpp
+    Source/SonobusHubDirectory.h
     Source/SonobusHubLayout.cpp
     Source/SonobusHubLayout.h
     Source/SonobusHubWebIcon.h

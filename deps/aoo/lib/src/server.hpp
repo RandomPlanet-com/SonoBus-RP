@@ -40,6 +40,7 @@ public:
     void close(bool notify=true);
 
     bool is_active() const { return socket >= 0; }
+    std::string sb_user_name() const;   // logged-in user name, empty before login
 
     void send_message(const char *msg, int32_t);
 
@@ -156,6 +157,8 @@ public:
     int32_t run() override;
 
     int32_t quit() override;
+
+    void sb_wake() { signal(); }   // run loop picks up pending kicks
 
     int32_t events_available() override;
 

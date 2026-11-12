@@ -148,6 +148,7 @@ h2{font-size:15px;margin:0 0 10px;color:var(--teal);font-weight:600}
 .sig.on{background:#5fd26b}.sig.off{background:#555}
 .kvs{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px}
 .kv{color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}.kv b{color:var(--text);font-weight:600}
+.kv b.slot{display:inline-block;font-variant-numeric:tabular-nums}#k_up{min-width:12.5ch}#k_n{min-width:3ch}#k_audio{min-width:20ch}#k_codec{min-width:12ch}#k_cpu{min-width:6.5ch}#k_srv{min-width:24ch}#k_udp{min-width:5.5ch}#k_ver{min-width:10ch}
 .tools{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:12px}
 button{background:var(--teal2);color:var(--text);border:1px solid var(--teal);border-radius:6px;padding:6px 14px;font:13px inherit;cursor:pointer}
 button:hover{background:#245452}button:disabled{opacity:.5;cursor:default}
@@ -162,8 +163,8 @@ th,td{padding:7px 6px;text-align:left;white-space:nowrap;border-bottom:1px solid
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--card);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;white-space:normal;line-height:1.15;vertical-align:bottom}
 th.num,td.num{text-align:left}
 .u{color:var(--dim);font-size:11px;margin-left:2px}.sl{margin:0 4px}.sw{white-space:nowrap}.sa{color:#fff;margin-left:4px;font-size:10px}
-#ptable{width:1553px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}
-td.user{white-space:normal;word-break:break-word;position:relative;overflow:visible}
+#ptable{width:1749px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}#ptable th.nosort{cursor:default}.nc{text-transform:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}
+td.user{white-space:normal;word-break:break-word;position:relative;overflow:visible}td.ins{white-space:normal;word-break:break-word}
 tr:last-child td{border-bottom:0}
 .g{color:#5fd26b}.y{color:#e3c141}.r{color:#ff5e5e}.d{color:#777}.rec{color:#ff5e5e;font-weight:700}
 .wrap{overflow:auto}
@@ -183,6 +184,7 @@ tr:last-child td{border-bottom:0}
 .notice{color:var(--dim);padding:6px 0}
 iframe.log{width:100%;height:70vh;border:0;background:#0e0e0e;border-radius:6px}
 
+button.kick{padding:1px 6px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.kick:hover{background:#6a2a2a}
 button.slink{padding:2px 8px;font-size:12px;margin-right:6px}button.srm{padding:1px 7px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.srm:hover{background:#6a2a2a}#stable tbody tr[data-g]{cursor:pointer}#stable tbody tr[data-g]:hover td{background:#1b1b1b}#stable tbody tr.sel td{background:var(--teal2)}
 td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 #grp{width:230px}#gmsg{width:320px}.tools label{color:var(--dim)}.tools input[type=password],.tools input[type=text]{background:#1f1f1f;color:var(--text);border:1px solid #333;border-radius:5px;padding:6px 8px;font:13px inherit;width:230px}
@@ -190,32 +192,32 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 </style></head><body>
 <div class="card">
  <div class="head"><img class="logo" src="/icon.png" alt=""><div class="titles"><h1 id="title">SonoBus RP Hub</h1><span class="sub" id="where"></span></div></div>
- <div class="kvs" id="hub"><span class="kv"><b id="k_upd"></b></span><span class="kv">uptime <b id="k_up">–</b></span><span class="kv">players <b id="k_n">–</b></span><span class="kv">audio <b id="k_audio">–</b></span><span class="kv">codec <b id="k_codec">–</b></span><span class="kv">hub CPU <b id="k_cpu">–</b></span><span class="kv">server <b id="k_srv">–</b></span><span class="kv">audio UDP <b id="k_udp">–</b></span><span class="kv">version <b id="k_ver">–</b> <span class="d" id="k_build"></span></span><span class="kv r" id="k_err"></span></div>
+ <div class="kvs" id="hub"><span class="kv"><b id="k_upd"></b></span><span class="kv">uptime <b class="slot" id="k_up">–</b></span><span class="kv">players <b class="slot" id="k_n">–</b></span><span class="kv">audio <b class="slot" id="k_audio">–</b></span><span class="kv">codec <b class="slot" id="k_codec">–</b></span><span class="kv">hub CPU <b class="slot" id="k_cpu">–</b></span><span class="kv">server <b class="slot" id="k_srv">–</b></span><span class="kv">audio UDP <b class="slot" id="k_udp">–</b></span><span class="kv">version <b class="slot" id="k_ver">–</b> <span class="d" id="k_build"></span></span><span class="kv r" id="k_err"></span></div>
  <div class="tools">
-  <button id="copy" title="Copy this hub's group link for players">Copy Group Link</button><span id="link" class="link"></span>
+  <button id="copy" title="Copy this hub's stage link for players">Copy Stage Link</button><span id="link" class="link"></span>
   <span style="flex:1 1 auto"></span>
-  <span id="pcwrap" style="display:flex;flex-direction:column;align-items:flex-end;gap:2px"><span id="pc" class="sub"></span><span id="pcl" class="sub d" style="font-size:12px"></span></span><button id="pcbtn" title="Ask a connected player to probe this hub's ports from outside again">Re-run port check</button>
+  <span id="pcwrap" style="display:flex;flex-direction:column;align-items:flex-end;gap:2px"><span id="pc" class="sub"></span><span id="pcl" class="sub d" style="font-size:12px"></span><span id="sdir" class="sub" style="font-size:12px"></span><span id="slim" class="sub d" style="font-size:12px"></span></span><button id="pcbtn" title="Ask a connected player to probe this hub's ports from outside again">Re-run port check</button>
   <button id="restartbtn" class="warn" title="Restart the hub. Every player drops and rejoins.">Restart Hub</button>
   <button id="updbtn" class="warn" style="display:none" title="Download and install the new hub. The hub restarts, so every player drops and rejoins.">Install Update</button>
   <button id="viewlog" title="Open the hub's connection log in a new window">View Log</button>
  </div>
 </div>
-<div class="tabs" style="position:relative"><a href="/licenses" target="_blank" class="d" style="position:absolute;right:4px;bottom:6px;font-size:12px" title="Third-party notices for the libraries in this hub">Notices</a><a class="tab" href="#status" data-tab="status" title="Players, group link and recent sessions.">Status</a><a class="tab" href="#settings" data-tab="settings" title="Hub settings.">Settings</a><a class="tab" href="#log" data-tab="log" title="Connection history and the hub log.">Log</a></div>
+<div class="tabs" style="position:relative"><a href="/licenses" target="_blank" class="d" style="position:absolute;right:4px;bottom:6px;font-size:12px" title="Third-party notices for the libraries in this hub">Notices</a><a class="tab" href="#status" data-tab="status" title="Players, stage link and recent stages.">Status</a><a class="tab" href="#settings" data-tab="settings" title="Hub settings.">Settings</a><a class="tab" href="#log" data-tab="log" title="Connection history and the hub log.">Log</a></div>
 <div class="card pane" id="pane-status">
- <div class="tools" style="margin:0 0 12px"><label for="grp">Group</label><input type="text" id="grp" title="Type a new group name, then click Apply."><button id="grpbtn" class="warn" title="Switch the hub to this group. The hub restarts and players must rejoin.">Apply (restarts hub)</button><span style="flex:1 1 auto"></span><input type="text" id="gmsg" maxlength="1000" placeholder="Message to the group" title="Sends a chat message to every player, from Hub."><button id="gmsgbtn" title="Send this message to every player.">Send</button><span id="gmsgnote" class="msg"></span></div>
+ <div class="tools" style="margin:0 0 12px"><label for="grp">Stage</label><input type="text" id="grp" title="Type a new stage name, then click Apply."><button id="grpbtn" class="warn" title="Switch the hub to this stage. The hub restarts and players must rejoin.">Apply (restarts hub)</button><span style="flex:1 1 auto"></span><input type="text" id="gmsg" maxlength="1000" placeholder="Message to the stage" title="Sends a chat message to every player, from Hub."><button id="gmsgbtn" title="Send this message to every player.">Send</button><span id="gmsgnote" class="msg"></span></div>
  <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
- <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"></colgroup><thead><tr>
- <th title="Point at a name to see the player's address">Player</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down Mb/s</th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="15" class="d">no players</td></tr></tbody></table></div>
+ <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"><col style="width:56px"></colgroup><thead><tr>
+ <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
  <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
 
- <h2 style="margin-top:20px" title="Groups this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent sessions</h2>
- <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Group</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Group link for this session (this hub's address + that group and password)">Group link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
+ <h2 style="margin-top:20px" title="Stages this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent stages</h2>
+ <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Stage</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Stage link (this hub's address + that stage name and password)">Stage link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
  <div id="sdetail" style="display:none">
-  <h2 style="margin-top:18px" id="sdtitle">Session</h2>
+  <h2 style="margin-top:18px" id="sdtitle">Stage</h2>
   <div class="wrap"><table id="rtable"><colgroup><col style="width:200px"><col style="width:170px"><col style="width:176px"><col style="width:176px"><col style="width:52px"><col style="width:52px"><col style="width:36px"></colgroup><thead><tr><th>Player</th><th>Location</th><th>Last joined</th><th>Last left</th><th class="num">Joins</th><th>Net</th><th></th></tr></thead><tbody id="recent"><tr><td colspan="6" class="d">–</td></tr></tbody></table></div>
   <div class="tools">
-   <label for="spw">Password</label><input type="password" id="spw" placeholder="(no password)" autocomplete="new-password" title="The password the hub will use for this group — edit it, or clear it for no password">
-   <button id="sapply" class="warn" title="Write this session's group, password and hub settings to hub_settings.json and restart the hub — players must rejoin">Apply and restart hub</button>
+   <label for="spw">Password</label><input type="password" id="spw" placeholder="(no password)" autocomplete="new-password" title="The password the hub will use for this stage — edit it, or clear it for no password">
+   <button id="sapply" class="warn" title="Write this stage's name, password and hub settings to hub_settings.json and restart the hub — players must rejoin">Apply and restart hub</button>
    <span id="sdmsg" class="msg"></span>
   </div>
  </div>
@@ -225,7 +227,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <div id="settingsNote" class="notice">loading…</div>
  <div class="form" id="form" style="display:none"><div class="col" id="col0"></div><div class="col" id="col1"></div></div>
  <div class="tools" id="settingsTools" style="display:none">
-  <button id="reset" title="Put every setting back to its default, keeping your group name and password.">Reset to Defaults</button><button id="reload" title="Undo your edits and go back to the last saved settings.">Revert</button><button id="save" title="Save these settings. Some take effect after Save &amp; Restart.">Save</button><button id="saveRestart" class="warn" title="Save these settings and restart the hub. Players must rejoin.">Save &amp; Restart</button>
+  <button id="reset" title="Put every setting back to its default, keeping your stage name and password.">Reset to Defaults</button><button id="reload" title="Undo your edits and go back to the last saved settings.">Revert</button><button id="save" title="Save these settings. Some take effect after Save &amp; Restart.">Save</button><button id="saveRestart" class="warn" title="Save these settings and restart the hub. Players must rejoin.">Save &amp; Restart</button>
   <span id="smsg" class="msg"></span>
  </div>
 </div>
@@ -241,22 +243,28 @@ const esc=(s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;
 const kb=(b)=> b<0?'–':(b*8>=1e6?(b*8/1e6).toFixed(1)+' Mb/s':Math.round(b*8/1000)+' kb/s')
 const LATC={g:__LATG__,y:__LATY__,rg:__LATRG__,ry:__LATRY__};   // shared thresholds (SbLatencyColours.h), filled at serve time
 const col=(v,g,y)=> v<g?'g':v<y?'y':'r';
+// Upload a full stage needs: every player gets every other player's stream, 2 channels each at about 2.4 Mbit/s.
+const stageLimits=(mp,mc,out)=>{const pl=mp>0?mp+' players':'no player limit',ch=mc>0?mc+' channels each':'no channel limit';
+ if(mp<=0)return `Limits: ${pl}, ${ch}. Upload now ${kb(out)}.`;
+ const x=mp*(mp-1)*2.4,xs=x<999.5?Math.round(x)+' Mbit/s':(x/1000).toFixed(1)+' Gbit/s';
+ return `Limits: ${pl}, ${ch}. A full stage needs about ${xs} upload (2 channels each); now ${kb(out)}.`;};
 const dur=(s)=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return (h?h+'h ':'')+String(m).padStart(h?2:1,'0')+'m '+String(s%60).padStart(2,'0')+'s';};
 
 // place only when its text changes (no innerHTML rebuild each second) so nothing shifts and a text selection
 // survives the 1-s refresh (copy/paste works).
 const setT=(el,t)=>{if(el.textContent!==t)el.textContent=t;};
 const setH=(el,h)=>{if(!el||!el.dataset)return;if(el.dataset.h!==h){el.dataset.h=h;el.innerHTML=h;}};   // guard (Safari threw on a missing cell)
-const rowMap=new Map();const COLS=15;
+const rowMap=new Map();const COLS=17,VERC=15;
 
 // order); numeric columns sort by the value behind the cell ('–'/unknown lowest), text columns case-insensitively.
 // The choice is kept in JS state (re-applied after every 1-s rebuild) and per browser in localStorage.
-const NUMC=new Set([2,4,5,6,7,8,9,10,11,12,13]);
-let sort={c:-1,d:1};try{const s=JSON.parse(localStorage.getItem('sbhub.sort')||'null');if(s&&typeof s.c==='number'&&(s.d===1||s.d===-1))sort=s;}catch(e){}
+const NUMC=new Set([3,5,6,7,8,9,10,11,12,13,14]);
+let sort={c:-1,d:1};try{const s=JSON.parse(localStorage.getItem('sbhub.sort2')||'null');if(s&&typeof s.c==='number'&&(s.d===1||s.d===-1))sort=s;}catch(e){}
 const rowKeys=new Map();
-const ths=[...document.querySelectorAll('#ptable thead th')];
-ths.forEach((th,i)=>{th.dataset.label=th.textContent;th.onclick=()=>{if(sort.c!==i)sort={c:i,d:1};else if(sort.d===1)sort={c:i,d:-1};else sort={c:-1,d:1};try{localStorage.setItem('sbhub.sort',JSON.stringify(sort));}catch(e){}drawSortMarks();applySort();};});
-const sortHead=(label,mark)=>{if(!mark)return esc(label);const k=label.lastIndexOf(' ');return esc(label.slice(0,k+1))+`<span class="sw">${esc(label.slice(k+1))}<span class="sa">${mark}</span></span>`;};
+const ths=[...document.querySelectorAll('#ptable thead th:not(.nosort)')];
+ths.forEach((th,i)=>{th.dataset.label=th.textContent;th.onclick=()=>{if(sort.c!==i)sort={c:i,d:1};else if(sort.d===1)sort={c:i,d:-1};else sort={c:-1,d:1};try{localStorage.setItem('sbhub.sort2',JSON.stringify(sort));}catch(e){}drawSortMarks();applySort();};});
+const unitCase=(h)=>h.replace(/Mb\/s/g,'<span class="nc">Mb/s</span>');   // headers are upper-cased; a unit keeps its own case
+const sortHead=(label,mark)=>{if(!mark)return unitCase(esc(label));const k=label.lastIndexOf(' ');return unitCase(esc(label.slice(0,k+1)))+`<span class="sw">${unitCase(esc(label.slice(k+1)))}<span class="sa">${mark}</span></span>`;};
 function drawSortMarks(){ths.forEach((th,i)=>setH(th,sortHead(th.dataset.label,sort.c===i?(sort.d===1?'▲':'▼'):'')));}
 function applySort(){if(sort.c<0)return;const c=sort.c,d=sort.d;
  const ids=[...rowMap.keys()].sort((a,b)=>{const ka=rowKeys.get(a)[c],kb=rowKeys.get(b)[c];const r=NUMC.has(c)?(ka-kb):String(ka).localeCompare(String(kb),undefined,{sensitivity:'base',numeric:true});return r*d;});
@@ -273,22 +281,22 @@ const sSort={col:-1,desc:false},rSort={col:-1,desc:false},SKEYS=['group','firstU
 function sortRows(rows,st,keys){if(st.col<0||st.col>=keys.length)return rows;const k=keys[st.col],m=st.desc?-1:1;return rows.slice().sort((a,b)=>{const x=a[k],y=b[k];return m*((typeof x==='string')?String(x).localeCompare(String(y),undefined,{sensitivity:'base'}):(x>y)-(x<y));});}
 function hookSort(id,st,keys,draw){const ths=document.querySelectorAll('#'+id+' thead th');const base=[...ths].map(t=>t.textContent);ths.forEach((t,i)=>{if(i>=keys.length)return;t.style.cursor='pointer';t.onclick=()=>{if(st.col!==i){st.col=i;st.desc=false;}else if(!st.desc)st.desc=true;else st.col=-1;ths.forEach((h,j)=>{h.innerHTML=sortHead(base[j],j===st.col?(st.desc?'▼':'▲'):'');});draw();};});}
 function drawSessions(){const tb=$('sessions');
- tb.innerHTML=sessions.length?sortRows(sessions,sSort,SKEYS).map(s=>`<tr data-g="${esc(s.group)}" class="${s.group===selGroup?'sel':''}"><td class="user">${esc(s.group)}${s.password?' <span class="d">pw: '+esc(s.password)+'</span>':''}${s.current?' <span class="g" title="the group the hub is serving now">● current</span>':''}</td><td>${ft(s.firstUsedMs)}</td><td>${ft(s.lastUsedMs)}</td><td class="num">${s.playerCount}</td><td class="pl"><button class="slink" data-link="${esc(s.link||'')}" title="Copy this session's group link">Copy link</button> <span class="d link">${esc(s.link||'')}</span></td><td class="num">${s.current?'':'<button class="srm" title="Remove this session from the list">✕</button>'}</td></tr>`).join(''):'<tr><td colspan="6" class="d">no sessions yet</td></tr>';
+ tb.innerHTML=sessions.length?sortRows(sessions,sSort,SKEYS).map(s=>`<tr data-g="${esc(s.group)}" class="${s.group===selGroup?'sel':''}"><td class="user">${esc(s.group)}${s.password?' <span class="d">pw: '+esc(s.password)+'</span>':''}${s.current?' <span class="g" title="the stage the hub is serving now">● current</span>':''}</td><td>${ft(s.firstUsedMs)}</td><td>${ft(s.lastUsedMs)}</td><td class="num">${s.playerCount}</td><td class="pl"><button class="slink" data-link="${esc(s.link||'')}" title="Copy this stage's link">Copy link</button> <span class="d link">${esc(s.link||'')}</span></td><td class="num">${s.current?'':'<button class="srm" title="Remove this stage from the list">✕</button>'}</td></tr>`).join(''):'<tr><td colspan="6" class="d">no stages yet</td></tr>';
  tb.querySelectorAll('tr[data-g]').forEach(tr=>{tr.onclick=()=>{selGroup=(selGroup===tr.dataset.g)?null:tr.dataset.g;$('sdmsg').textContent='';drawSessions();};});
  tb.querySelectorAll('button.slink').forEach(b=>{b.onclick=async(ev)=>{ev.stopPropagation();const ok=await copyText(b.dataset.link);b.textContent=ok?'Copied':'Copy failed';setTimeout(()=>b.textContent='Copy link',1500);};});
- tb.querySelectorAll('button.srm').forEach(b=>{b.onclick=async(ev)=>{ev.stopPropagation();const g=b.closest('tr').dataset.g;if(!confirm('Remove the session "'+g+'" from Recent sessions?'))return;
+ tb.querySelectorAll('button.srm').forEach(b=>{b.onclick=async(ev)=>{ev.stopPropagation();const g=b.closest('tr').dataset.g;if(!confirm('Remove the stage "'+g+'" from Recent stages?'))return;
    try{const r=await fetch(api('/api/sessions/remove'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:g})});const d=await r.json();if(!d.ok){alert(d.error||'remove failed');return;}if(selGroup===g)selGroup=null;loadSessions(true);}catch(e){alert('remove failed');}};});
  drawDetail();}
 function drawDetail(){const picked=sessions.find(x=>x.group===selGroup),s=picked||sessions.find(x=>x.current);const d=$('sdetail');if(!s){d.style.display='none';return;}d.style.display='';
  $('spw').closest('.tools').style.display=picked?'':'none';
- setT($('sdtitle'),(picked?'Players seen in "'+s.group+'"':'Players seen in this session')+' ('+s.playerCount+')');
- $('recent').innerHTML=s.players.length?sortRows(s.players,rSort,RKEYS).map(p=>`<tr><td class="user">${esc(p.user)}</td><td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${ft(p.lastJoinMs)}</td><td>${p.lastLeftMs>=p.lastJoinMs?ft(p.lastLeftMs):'<span class="g">connected</span>'}</td><td class="num">${p.joins}</td><td>${p.lan?'LAN':'WAN'}</td><td>${p.lastLeftMs>=p.lastJoinMs?`<button class="srm prm" data-u="${esc(p.user)}" title="Remove this player from the session's list">✕</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="d">no players recorded in this session</td></tr>';
- $('recent').querySelectorAll('button.prm').forEach(b=>{b.onclick=async()=>{const u=b.dataset.u;if(!confirm('Remove "'+u+'" from this session\'s players?'))return;
+ setT($('sdtitle'),(picked?'Players seen on "'+s.group+'"':'Players seen on this stage')+' ('+s.playerCount+')');
+ $('recent').innerHTML=s.players.length?sortRows(s.players,rSort,RKEYS).map(p=>`<tr><td class="user">${esc(p.user)}</td><td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${ft(p.lastJoinMs)}</td><td>${p.lastLeftMs>=p.lastJoinMs?ft(p.lastLeftMs):'<span class="g">connected</span>'}</td><td class="num">${p.joins}</td><td>${p.lan?'LAN':'WAN'}</td><td>${p.lastLeftMs>=p.lastJoinMs?`<button class="srm prm" data-u="${esc(p.user)}" title="Remove this player from this stage's list">✕</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="d">no players recorded on this stage</td></tr>';
+ $('recent').querySelectorAll('button.prm').forEach(b=>{b.onclick=async()=>{const u=b.dataset.u;if(!confirm('Remove "'+u+'" from this stage\'s players?'))return;
    try{const r=await fetch(api('/api/sessions/removeplayer'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:s.group,user:u})});const d=await r.json();if(!d.ok){alert(d.error||'remove failed');return;}loadSessions(true);}catch(e){alert('remove failed');}};});
  if(pwPrefillGroup!==selGroup){$('spw').value=s.password||'';pwPrefillGroup=selGroup;}$('spw').placeholder=s.password?'':'(no password — type one to set it)';
  $('sapply').disabled=restarting;}
 $('sapply').onclick=async()=>{const s=sessions.find(x=>x.group===selGroup);if(!s)return;
- if(!confirm('Switch the hub to group "'+s.group+'" with the settings it ran with, and restart? Every player will have to rejoin.'))return;
+ if(!confirm('Switch the hub to stage "'+s.group+'" with the settings it ran with, and restart? Every player will have to rejoin.'))return;
  const m=$('sdmsg');m.textContent='applying…';m.className='msg';
  try{const r=await fetch(api('/api/sessions/apply'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:s.group,password:$('spw').value})});const d=await r.json();
  if(!d.ok){m.textContent=d.error||('HTTP '+r.status);m.className='msg err';return;}
@@ -314,6 +322,10 @@ async function tick(){
  const pcat=h.portVerifiedAtMs>0?' at '+new Date(h.portVerifiedAtMs).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
  setH($('pc'),`<span class="${pcc}">${esc((h.portCheck||'').replace(')',pcat+')'))}</span>`);
  setH($('pcl'),esc(h.portLocal||''));
+ const tin=(prev&&dt>0)?(h.bytesInTotal-prev.hub.bytesInTotal)/dt:-1,tout=(prev&&dt>0)?(h.bytesOutTotal-prev.hub.bytesOutTotal)/dt:-1;
+ const sls=h.stageListingState|0,sdc=sls==1?'g':(sls==2||sls==4)?'y':sls==3?'r':'d';
+ setH($('sdir'),`<span class="${sdc}">${esc(sls==0?'Stage directory: not listed (turn on List this stage in Settings)':'Stage directory: '+(h.stageListingText||''))}</span>`);
+ setT($('slim'),stageLimits(h.stageMaxPlayers|0,h.stageMaxChannels|0,tout));
  setT($('k_up'),dur(h.uptimeSec));setT($('k_n'),String(d.peers.length));setT($('k_audio'),`${h.sampleRate} Hz / ${h.blockSize} samples`);setT($('k_codec'),h.codec);
  setT($('k_cpu'),h.cpuPct.toFixed(1)+'%');setT($('k_srv'),`${h.publicAddress}:${h.serverPort}`);setT($('k_udp'),String(h.udpPort));
  updUrl=h.updateUrl||'';$('k_upd').style.cursor=updUrl?'pointer':'';if(document.activeElement!==$('grp'))$('grp').value=h.group||'';$('updbtn').style.display=h.updateReady?'':'none';setT($('k_upd'),h.update||'');setT($('k_ver'),'Hub '+(h.hubVersion||''));setT($('k_build'),`(build ${h.build||''}${h.commit?', '+h.commit:''})`);setT($('k_err'),'');
@@ -340,29 +352,34 @@ async function tick(){
    const pair=(x,y)=>`${x}<span class="d sl">/</span>${y}`;
    const mb=(v)=> v<0?'–':(v*8/1e6).toFixed(1);
    const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}`:'<span class="d">–</span>';
-   const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
+   const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,esc(p.inst||''),loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
 
-   rowKeys.set(p.id,[p.user.toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
+   rowKeys.set(p.id,[p.user.toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
    let tr=rowMap.get(p.id);
-   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([2,5,7,8,11].includes(i))td.className='num';if([4,6,9,10].includes(i))td.className='ctr';if(i===0)td.className='user';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
+   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===0)td.className='user';if(i===1)td.className='ins';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
    cells.forEach((c,i)=>setH(tr.children[i],c));
-   if(tr.children[COLS-1].title!==(p.ver||''))tr.children[COLS-1].title=p.ver||'';}
+   setH(tr.children[COLS-1],h.settingsEnabled?`<button class="kick" data-u="${esc(p.user)}" title="Remove this player from the stage and keep them out for 1 hour">Kick</button>`:'');   // rebuilt only when the name or the setting changes
+   if(tr.children[VERC].title!==(p.ver||''))tr.children[VERC].title=p.ver||'';}
   for(const [id,tr] of rowMap){if(!seen.has(id)){tr.remove();rowMap.delete(id);rowKeys.delete(id);}}
   applySort();
   $('norows').style.display=rowMap.size?'none':'';
   if((sessN++%10)===0)loadSessions(false);
-  const tin=(prev&&dt>0)?(h.bytesInTotal-prev.hub.bytesInTotal)/dt:-1,tout=(prev&&dt>0)?(h.bytesOutTotal-prev.hub.bytesOutTotal)/dt:-1;
   setT($('f_in'),kb(tin));setT($('f_out'),kb(tout));}
  prev=d;prevT=now;}catch(e){setT($('k_err'),restarting?'hub restarting…':'hub not responding: '+e);}
 }
 async function copyText(t){let ok=false;if(navigator.clipboard&&window.isSecureContext){try{await navigator.clipboard.writeText(t);ok=true;}catch(e){}}if(!ok){const ta=document.createElement('textarea');ta.value=t;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,t.length);try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}return ok;}
-$('copy').onclick=async()=>{const ok=await copyText($('link').textContent);$('copy').textContent=ok?'Copied':'Copy failed';setTimeout(()=>$('copy').textContent='Copy Group Link',1500);};
+$('copy').onclick=async()=>{const ok=await copyText($('link').textContent);$('copy').textContent=ok?'Copied':'Copy failed';setTimeout(()=>$('copy').textContent='Copy Stage Link',1500);};
 $('pcbtn').onclick=async()=>{const r=await fetch(api('/api/portcheck'),{method:'POST'});if(r.status==403){$('pc').innerHTML='<span class="y">set web_password to use this</span>';}};
 $('viewlog').onclick=()=>{window.open(api('/log'),'_blank');};
 const post=(p,b)=>fetch(api(p),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 const needPw=(r,d)=>{if(!r.ok||!d.ok)alert(d.error||('Set a Web password to use this (HTTP '+r.status+')'));};
+$('rows').addEventListener('click',async(ev)=>{const b=ev.target.closest('button.kick');if(!b)return;const u=b.dataset.u;
+ if(!confirm('Remove '+u+' from the stage? They cannot come back for 1 hour.'))return;
+ b.disabled=true;try{const r=await post('/api/kick',{user:u});const d=await r.json().catch(()=>({}));
+ if(!r.ok||!d.ok){alert(d.error||('Kick failed (HTTP '+r.status+')'));b.disabled=false;return;}b.textContent='Kicked';}
+ catch(e){alert('kick failed: '+e);b.disabled=false;}});
 $('restartbtn').onclick=async()=>{if(!confirm('Restart the hub? Every player drops and rejoins.'))return;try{const r=await post('/api/settings',{values:{},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
-$('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!confirm('Switch the hub to group "'+g+'"? The hub restarts and players must rejoin.'))return;try{const r=await post('/api/settings',{values:{group:g},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
+$('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!confirm('Switch the hub to stage "'+g+'"? The hub restarts and players must rejoin.'))return;try{const r=await post('/api/settings',{values:{group:g},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('gmsgbtn').onclick=async()=>{const t=$('gmsg').value.trim();if(!t)return;try{const r=await post('/api/chat',{message:t});const d=await r.json().catch(()=>({}));needPw(r,d);if(d.ok){$('gmsg').value='';$('gmsgnote').textContent='sent to '+d.sent;setTimeout(()=>$('gmsgnote').textContent='',3000);}}catch(e){}};
 $('gmsg').onkeydown=(e)=>{if(e.key==='Enter')$('gmsgbtn').click();};
 $('k_upd').onclick=()=>{if(updUrl)window.open(updUrl,'_blank');};
@@ -398,10 +415,10 @@ async function save(restart){
 $('save').onclick=()=>save(false);
 $('saveRestart').onclick=()=>{if(confirm('Save and restart the hub? Every player will have to rejoin.'))save(true);};
 $('reload').onclick=loadSettings;
-$('reset').onclick=()=>{if(!confirm('Put every setting back to its default? Your group name and password stay. Nothing changes until you click Save.'))return;
+$('reset').onclick=()=>{if(!confirm('Put every setting back to its default? Your stage name and password stay. Nothing changes until you click Save.'))return;
  for(const f of fields){if(!f.key||f.key=='group'||f.kind==3)continue;const el=$('f_'+f.key);if(!el)continue;if(f.kind==1)el.checked=f.def=='1';else el.value=f.def;}
  $('smsg').textContent='Defaults restored. Click Save to keep them.';$('smsg').className='msg';};
-const TIPS={Player:'Player name',Inputs:'How many channels this player sends','First used':'When this group was first hosted','Last used':'When this group was last hosted',Players:'How many players have joined this group',Group:'The group name players join','Last joined':'When this player last joined','Last left':'When this player last left',Joins:'How many times this player has joined',Net:'Whether this player is on the local network or the internet'};
+const TIPS={Player:'Player name',Inputs:'How many channels this player sends','First used':'When this stage was first hosted','Last used':'When this stage was last hosted',Players:'How many players have joined this stage',Stage:'The stage name players join','Last joined':'When this player last joined','Last left':'When this player last left',Joins:'How many times this player has joined',Net:'Whether this player is on the local network or the internet'};
 document.querySelectorAll('th:not([title])').forEach(t=>{const m=TIPS[t.textContent.trim()];if(m)t.title=m;});
 const KV={k_upd:'Whether a newer hub is available',k_up:'How long the hub has been running',k_n:'Players connected right now',k_audio:'Sample rate and block size',k_codec:'Audio format',k_cpu:'CPU used by the hub',k_srv:'The address and port players connect to',f_in:'Total audio coming into the hub',f_out:'Total audio going out of the hub'};
 for(const k in KV){const e=$(k);if(e&&e.parentElement)e.parentElement.title=KV[k];}
@@ -466,7 +483,7 @@ async function load(){
  const d=await r.json();const pre=$('log');const atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40;
  const html=d.lines.length?d.lines.map(l=>`<span class="${cls(l)}">${esc(l)}</span>`).join('\n'):'<span class="dim">(nothing yet)</span>';
  if(html!==last){last=html;pre.innerHTML=html;if(atBottom)pre.scrollTop=pre.scrollHeight;}
- $('note').textContent=(d.file?'file: '+d.file+'  —  ':'')+($('conn').checked?'connection/security events kept by the hub (last 2000); untick to see the whole hub log tail':'last '+$('n').value+' lines of the hub log')+'  —  '+new Date().toLocaleTimeString();
+ $('note').textContent=(d.file?'file: '+d.file+'  —  ':'')+($('conn').checked?'connection/security events kept by the hub (last 2000); untick Connections only to see the whole hub log tail':'last '+$('n').value+' lines of the hub log')+'  —  '+new Date().toLocaleTimeString();
  }catch(e){$('msg').textContent='log unavailable: '+e;}
 }
 $('conn').onchange=load;$('n').onchange=load;$('now').onclick=load;
@@ -522,6 +539,8 @@ std::string SonobusHubWeb::buildStatusJson() const {
       << "\"settingsEnabled\":" << ((mArgs && !mPassword.empty() && mSettingsFile != juce::File()) ? "true" : "false") << ",\"pollMs\":1000,"
       << "\"portVerifiedAtMs\":" << s.portCheckVerifiedAtMs << ","
       << "\"playersSinceStart\":" << mHub.playersSinceStart() << ","
+      << "\"stageMaxPlayers\":" << s.stageMaxPlayers << ",\"stageMaxChannels\":" << s.stageMaxChannels << ","
+      << "\"stageListingState\":" << s.stageListingState << ",\"stageListingText\":\"" << jsonEscape(s.stageListingText) << "\","
       << "\"joinLink\":\"" << jsonEscape(SonobusHubWeb::joinLink(s)) << "\"},\"peers\":[";
     bool first = true;
     for (const auto& p : s.peers) {
@@ -548,6 +567,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
           << ",\"location\":\"" << jsonEscape(locationFor(p.ipAddr, p.isLan)) << "\""   
           << ",\"recording\":" << (p.isRecording ? "true" : "false") << ",\"muted\":" << (p.isSendMuted ? "true" : "false") << ",\"devBuf\":" << p.clientDevBuf << ",\"devSr\":" << p.clientDevSr
           << ",\"ver\":\"" << jsonEscape(p.clientVersion) << "\",\"os\":\"" << jsonEscape(p.clientOs) << "\""
+          << ",\"inst\":\"" << jsonEscape(p.clientInstrument) << "\""
           << ",\"joinedAtMs\":" << p.joinedAtMs << "}";
     }
     o << "]}";
@@ -587,6 +607,7 @@ void SonobusHubWeb::handleClient(int fd) {
         if (mPassword.empty() || !mArgs || mSettingsFile == juce::File()) { sendAll(fd, httpResponse(403, "Forbidden", "application/json", "{\"ok\":false,\"error\":\"set web_password (and a settings file) to enable settings from the web page\"}")); return; }
         if (path == "/api/portcheck") { mHub.requestPortCheck(); sendAll(fd, httpResponse(200, "OK", "application/json", "{\"ok\":true}")); return; }
         if (path == "/api/settings") { bool ok = false; const std::string reply = applySettings(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
+        if (path == "/api/kick") { bool ok = false; const std::string reply = kickRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/chat") { bool ok = false; const std::string reply = chatRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/update/install") { bool ok = false; const std::string reply = startUpdate(ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/sessions/removeplayer") { bool ok = false; const std::string reply = removePlayerRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
@@ -729,7 +750,7 @@ std::string SonobusHubWeb::applySessionRequest(const std::string& body, bool& ok
     const std::string pwOverride = obj->getProperty("password").toString().toStdString();
     if (group.empty()) return "{\"ok\":false,\"error\":\"no group given\"}";
     SonobusHubServer::SessionRecord rec;
-    if (!mHub.sessionFor(group, rec)) return "{\"ok\":false,\"error\":\"no recent session for group '" + jsonEscape(group) + "'\"}";
+    if (!mHub.sessionFor(group, rec)) return "{\"ok\":false,\"error\":\"no recent stage named '" + jsonEscape(group) + "'\"}";
     sb_hub_gui::HubLaunchArgs n = *mArgs;
     int applied = 0; std::string err;
     if (!hs::applySession(n, rec.group, pwOverride, rec.settings, applied, err))   // The field is authoritative: empty = NO password (it is prefilled with the session's password)
@@ -738,12 +759,28 @@ std::string SonobusHubWeb::applySessionRequest(const std::string& body, bool& ok
     if (n.logFile != mArgs->logFile && !n.logFile.empty()) { std::cout << "[HUB-WEB] log file -> " << n.logFile << " (live)\n"; hs::redirectLogFile(n.logFile); }
     n.dumpPeer = mArgs->dumpPeer; n.dumpSecs = mArgs->dumpSecs;
     *mArgs = n;
+    hs::applyStageToHub(mHub, n);
     std::cout << "[HUB-SESSION] apply group='" << rec.group << "' (" << applied << " settings) -> restart\n";
     std::ostringstream o;
     o << "{\"ok\":true,\"group\":\"" << jsonEscape(rec.group) << "\",\"applied\":" << applied << ",\"passwordOverridden\":" << (pwOverride.empty() ? "false" : "true") << ",\"restarting\":true}";
     if (mRequestRestart) mRequestRestart();
     ok = true;
     return o.str();
+}
+
+// POST /api/kick, body {"user":"..."}, gated like the other POSTs. Removes the player and keeps them out for an hour.
+std::string SonobusHubWeb::kickRequest(const std::string& body, bool& ok) {
+    ok = false;
+    const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
+    const std::string user = obj->getProperty("user").toString().toStdString();
+    if (user.empty()) return "{\"ok\":false,\"error\":\"no player given\"}";
+    constexpr int kBlockMinutes = 60;
+    if (!mHub.kickPlayer(user, kBlockMinutes)) return "{\"ok\":false,\"error\":\"no such player\"}";
+    std::cout << "[HUB-WEB] kick '" << user << "' (blocked " << kBlockMinutes << " min)\n";
+    ok = true;
+    return "{\"ok\":true}";
 }
 
 // POST /api/chat, body {"message":"..."}, gated like the other POSTs.
@@ -901,6 +938,7 @@ std::string SonobusHubWeb::applySettings(const std::string& body, bool& ok) {
     }
     n.dumpPeer = mArgs->dumpPeer; n.dumpSecs = mArgs->dumpSecs;
     *mArgs = n;
+    hs::applyStageToHub(mHub, n);   // stage limits and listing are live
     std::ostringstream o;
     o << "{\"ok\":true,\"changed\":[";
     for (size_t i = 0; i < changed.size(); ++i) o << (i ? "," : "") << "\"" << jsonEscape(changed[i]) << "\"";

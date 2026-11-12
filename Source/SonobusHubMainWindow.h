@@ -24,6 +24,7 @@
 
 #include "JuceHeader.h"
 #include "SonobusHubServer.h"
+#include "SonobusHubDirectory.h"
 #include "SonobusHubWeb.h"   // Optional web page (off by default on macOS since)
 #include "SonobusHubGeo.h"   // Player locations in the native table
 #include "SonobusHubSettings.h"
@@ -45,6 +46,7 @@ public:
     void setSnapshot(const SonobusHubServer::UiSnapshot& s);
     void setUpdate(const juce::String& line, const juce::String& url) { mUpdateLine = line; mUpdateUrl = url; repaint(); }   
     void setLocation(const juce::String& loc) { mLocation = loc; repaint(); }   // The `location` setting
+    void setOutRate(float bytesPerSec) { mOutBytesPerSec = bytesPerSec; }   // hub upload now, for the limits line; painted with the next snapshot
     void paint(juce::Graphics& g) override;
     void mouseUp(const juce::MouseEvent&) override { if (mUpdateUrl.isNotEmpty()) juce::URL(mUpdateUrl).launchInDefaultBrowser(); }
 private:
@@ -52,6 +54,7 @@ private:
     juce::String mUpdateLine, mUpdateUrl;
     juce::String mLocation, mPlatform;
     juce::Image mIcon;   // Hub icon top-left, like the web page
+    float mOutBytesPerSec = -1.0f;   // -1 = not measured yet
 };
 
 class PeerTable : public juce::Component, public juce::SettableTooltipClient {
@@ -70,7 +73,9 @@ public:
     // Click a column header to sort (▲ ascending, again ▼ descending, again = hub order).
     // Applied inside setSnapshot so the choice survives the 1-s refresh. Kept in memory only — the hub has no
     // per-app properties file (hub_settings.json is the strict launch-args model).
+    // Right-click on a player row: menu with "Remove from stage for 1 hour...", confirmed, then onKick(user name).
     void mouseDown(const juce::MouseEvent& e) override;
+    std::function<void(const std::string& user)> onKick;
 private:
     void applySort();
     int mSortCol = -1;
@@ -148,7 +153,7 @@ public:
     void resized() override;
     StatusHeader header;
     // The web page's header tools in the native GUI.
-    juce::TextButton copyLinkButton{"Copy Group Link"};
+    juce::TextButton copyLinkButton{"Copy Stage Link"};
     juce::Label linkLabel;
     juce::TextButton portCheckButton{"Re-run port check"};
     juce::TextButton installUpdateButton{"Install Update"};
@@ -387,6 +392,8 @@ private:
     std::vector<std::string> mArgv;   // original argv (for relaunch)
     std::unique_ptr<SonobusHubServer> mHub;
     std::unique_ptr<SonobusHubWeb> mWeb;   // Holds a reference to *mHub → reset BEFORE mHub
+    std::unique_ptr<HubStageDirectory> mStageDirectory;   // Holds a reference to *mHub → reset BEFORE mHub
+    void startStageDirectory();
     bool mStartFailed = false;   // Surfaced as an alert after makeWindow
     std::unique_ptr<HubMainWindow> mWindow;
 };

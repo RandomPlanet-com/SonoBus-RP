@@ -106,14 +106,15 @@ void StatusHeader::paint(juce::Graphics& g) {
     // key/value line
     juce::String host = !mSnap.publicAddressHost.empty() ? juce::String(mSnap.publicAddressHost)
                       : !mSnap.advertisedPublicHost.empty() ? juce::String(mSnap.advertisedPublicHost) : juce::String("(auto)");
-    struct KV { juce::String k, v; };
+    // `widest` = the value's realistic widest text: each value keeps that width so nothing to its right moves
+    struct KV { juce::String k, v; const char* widest; };
     const KV kvs[] = {
-        { "uptime", hubDurText(uptimeS) }, { "players", juce::String((int) mSnap.peers.size()) },
-        { "audio", juce::String(mSnap.sampleRate) + " Hz / " + juce::String(mSnap.blockSize) + " samples" },
-        { "codec", "PCM 16-bit" }, { "hub CPU", juce::String(mSnap.hubCpuPct, 1) + "%" },
-        { "server", host + (mSnap.aooServerPort > 0 ? ":" + juce::String(mSnap.aooServerPort) : juce::String()) },
-        { "audio UDP", juce::String(mSnap.localUdpPort) },
-        { "version", juce::String("Hub ") + SONOBUS_HUB_VERSION + "  (build " + juce::String(hubBuildId()) + ", " + juce::String(hubCommitId()) + ")" } };   // Date build id
+        { "uptime", hubDurText(uptimeS), "999h 59m" }, { "players", juce::String((int) mSnap.peers.size()), "999" },
+        { "audio", juce::String(mSnap.sampleRate) + " Hz / " + juce::String(mSnap.blockSize) + " samples", "48000 Hz / 128 samples" },
+        { "codec", "PCM 16-bit", "" }, { "hub CPU", juce::String(mSnap.hubCpuPct, 1) + "%", "100.0%" },
+        { "server", host + (mSnap.aooServerPort > 0 ? ":" + juce::String(mSnap.aooServerPort) : juce::String()), "" },
+        { "audio UDP", juce::String(mSnap.localUdpPort), "65535" },
+        { "version", juce::String("Hub ") + SONOBUS_HUB_VERSION + "  (build " + juce::String(hubBuildId()) + ", " + juce::String(hubCommitId()) + ")", "" } };   // Date build id
     auto kvRow = bounds.removeFromTop(24);
     int x = kvRow.getX();
     const juce::Font fk(15.0f), fv(15.0f, juce::Font::bold);
@@ -122,7 +123,7 @@ void StatusHeader::paint(juce::Graphics& g) {
         int w = (int) fk.getStringWidthFloat(kv.k) + 6;
         g.drawText(kv.k, x, kvRow.getY(), w, kvRow.getHeight(), juce::Justification::centredLeft); x += w;
         g.setFont(fv); g.setColour(pal::text);
-        w = (int) fv.getStringWidthFloat(kv.v) + 22;
+        w = (int) std::max(fv.getStringWidthFloat(kv.v), fv.getStringWidthFloat(kv.widest)) + 22;
         g.drawText(kv.v, x, kvRow.getY(), w, kvRow.getHeight(), juce::Justification::centredLeft); x += w;
     }
     // Port check: local tier (dim) + external tier (coloured)
@@ -135,6 +136,32 @@ void StatusHeader::paint(juce::Graphics& g) {
         juce::String t(mSnap.portCheckText);
         if (mSnap.portCheckVerifiedAtMs > 0) t = t.replaceFirstOccurrenceOf(")", " at " + hubClockShort(mSnap.portCheckVerifiedAtMs) + ")");
         g.setColour(mSnap.portCheckState == 1 ? pal::green : mSnap.portCheckState == 2 ? pal::red : pal::textDim);
+        g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
+    }
+    {   // Stage directory listing
+        const int st = mSnap.stageListingState;
+        juce::String t("Stage directory: ");
+        if (st == 0) t << "not listed (turn on List this stage in Settings)";
+        else t << (!mSnap.stageListingText.empty() ? juce::String::fromUTF8(mSnap.stageListingText.c_str())
+                                                     : juce::String(st == 4 ? "checking" : st == 1 ? "listed" : "not listed"));
+        g.setColour(st == 1 ? pal::green : (st == 2 || st == 4) ? pal::yellow : st == 3 ? pal::red : pal::textDim);
+        g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
+    }
+    {   // Limits, the upload a full stage needs (every player gets every other player's stream) and the upload now
+        const int mp = mSnap.stageMaxPlayers, mc = mSnap.stageMaxChannels;
+        juce::String t("Limits: ");
+        t << (mp > 0 ? juce::String(mp) + (mp == 1 ? " player" : " players") : juce::String("no player limit")) << ", "
+          << (mc > 0 ? juce::String(mc) + (mc == 1 ? " channel each" : " channels each") : juce::String("no channel limit")) << ".";
+        const bool haveNow = mOutBytesPerSec >= 0.0f;
+        if (mp > 0) {
+            const double mbit = (double) mp * (double) (mp - 1) * 2.4;   // about 2.4 Mbit/s per 2-channel stream
+            const juce::String need = mbit < 1000.0 ? juce::String((int) std::lround(mbit)) + " Mbit/s" : juce::String(mbit / 1000.0, 1) + " Gbit/s";
+            t << " A full stage needs about " << need << " upload (2 channels each)";
+            t << (haveNow ? "; now " + hubRateText(mOutBytesPerSec) + "." : juce::String("."));
+        } else if (haveNow) {
+            t << " Upload now " << hubRateText(mOutBytesPerSec) << ".";
+        }
+        g.setColour(pal::textDim);
         g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
     }
     if (mUpdateLine.isNotEmpty()) {   // Update check against randomplanet.com
@@ -152,33 +179,34 @@ void PeerTable::setSnapshot(std::vector<SonobusHubServer::UiPeerSnapshot> peers)
 
 // Sort keys per column (indexes follow colName[] in paint). Numeric columns sort by the value behind the cell
 // (a pair sorts by its first value); unknown / "-" = -1 = lowest. Text columns sort case-insensitively.
-static bool peerSortIsText(int col) { return col == 0 || col == 1 || col == 3 || col == 14; }
+static bool peerSortIsText(int col) { return col == 0 || col == 1 || col == 2 || col == 4 || col == 15; }
 static double peerSortNumber(const SonobusHubServer::UiPeerSnapshot& p, int col, int64_t nowMs) {
     switch (col) {
-        case 2: return p.recvChannels;
-        case 4: return p.inBytesPerSec;
-        case 5: return (double) p.lostBlocks;
-        case 6: {
+        case 3: return p.recvChannels;
+        case 5: return p.inBytesPerSec;
+        case 6: return (double) p.lostBlocks;
+        case 7: {
             float toHub = 0.0f, fromHub = 0.0f;
             const bool have = SonobusHubServer::computeHubLatency(p.smoothedRttUpMs, p.smoothedRttMs, p.sinkBufMs, toHub, fromHub, p.clientRecvBufMs);
             return have ? toHub : -1.0;
         }
-        case 7: return p.jitterBufferFillPct;
-        case 8: return p.jitP99Ms;
-        case 9: return p.sinkBufMs;
-        case 10: return p.clientRxUnderruns10s >= 0 ? (double) (p.clientRxUnderrunsTotal + p.clientRxPopsTotal) : -1.0;
-        case 11: return p.clientLatFeedAgeS;
-        case 12: return p.clientDevBuf;
-        case 13: return p.joinedAtMs > 0 ? (double) (nowMs - p.joinedAtMs) : -1.0;
+        case 8: return p.jitterBufferFillPct;
+        case 9: return p.jitP99Ms;
+        case 10: return p.sinkBufMs;
+        case 11: return p.clientRxUnderruns10s >= 0 ? (double) (p.clientRxUnderrunsTotal + p.clientRxPopsTotal) : -1.0;
+        case 12: return p.clientLatFeedAgeS;
+        case 13: return p.clientDevBuf;
+        case 14: return p.joinedAtMs > 0 ? (double) (nowMs - p.joinedAtMs) : -1.0;
         default: return 0.0;
     }
 }
 static juce::String peerSortText(const SonobusHubServer::UiPeerSnapshot& p, int col) {
     switch (col) {
         case 0: return juce::String::fromUTF8(p.userName.c_str());
-        case 1: return juce::String::fromUTF8(p.location.c_str());
-        case 3: return p.isSendMuted ? "muted" : p.lastBlocksNonZero > 0 ? "sending" : "silent";
-        case 14: return juce::String::fromUTF8(p.clientVersion.c_str());
+        case 1: return juce::String::fromUTF8(p.clientInstrument.c_str());
+        case 2: return juce::String::fromUTF8(p.location.c_str());
+        case 4: return p.isSendMuted ? "muted" : p.lastBlocksNonZero > 0 ? "sending" : "silent";
+        case 15: return juce::String::fromUTF8(p.clientVersion.c_str());
         default: return {};
     }
 }
@@ -194,7 +222,25 @@ void PeerTable::applySort() {
     });
 }
 void PeerTable::mouseDown(const juce::MouseEvent& e) {
-    if (e.y >= kHeaderH || e.mods.isPopupMenu()) return;   // header row only
+    if (e.mods.isPopupMenu()) {   // right-click on a player row: remove menu; on the header: nothing
+        if (e.y < kHeaderH || !onKick) return;
+        const int row = (e.y - kHeaderH) / kRowH;
+        if (row < 0 || row >= (int) mPeers.size()) return;
+        const std::string user = mPeers[(size_t) row].userName;   // by name: the rows refresh and re-sort under the menu
+        if (user.empty()) return;
+        juce::PopupMenu menu;
+        menu.addItem(1, "Remove from stage for 1 hour...");
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition(),
+            [sp = juce::Component::SafePointer<PeerTable>(this), user](int result) {
+                if (result != 1 || !sp) return;
+                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Remove player",
+                    "Remove " + juce::String::fromUTF8(user.c_str()) + " from the stage? They cannot come back for 1 hour.",
+                    "Remove", "Cancel", sp.getComponent(),
+                    juce::ModalCallbackFunction::create([sp, user](int r) { if (r == 1 && sp && sp->onKick) sp->onKick(user); }));
+            });
+        return;
+    }
+    if (e.y >= kHeaderH) return;   // header row only
     int col = -1;
     for (size_t i = 0; i + 1 < mColX.size(); ++i) if (e.x >= mColX[i] && e.x < mColX[i + 1]) { col = (int) i; break; }
     if (col < 0) return;
@@ -214,26 +260,27 @@ static void hubDrawSortArrow(juce::Graphics& g, float x, float cy, bool desc) {
     g.fillPath(p);
 }
 void PeerTable::paint(juce::Graphics& g) {
-    // Same columns as the web page, all left-aligned: Player, Location, Inputs, Signal, Up / Down, Lost (hub),
-    // To / From hub, JitBuf, Net jitter, Hub / Player buf (A/M), Dropouts (xN = overloads), Lat feed, Device,
-    // Connected, Version. The address is in the name's tooltip. The Player and Location columns grow to their
-    // longest text, so nothing truncates.
-    constexpr int kNumCols = 15;
+    // Same columns as the web page, all left-aligned: Player, Instrument, Location, Inputs, Signal, Up / Down,
+    // Lost (hub), To / From hub, JitBuf, Net jitter, Hub / Player buf (A/M), Dropouts (xN = overloads), Lat feed,
+    // Device, Connected, Version. The address is in the name's tooltip. The Player, Instrument and Location
+    // columns grow to their longest text, so nothing truncates.
+    constexpr int kNumCols = 16;
     const int paddingX = 10;
     auto rowFont = juce::Font(16.0f);
     auto unitFont = juce::Font(12.0f);
     auto headFont = juce::Font(14.0f, juce::Font::bold);
-    static const int colWFixed[kNumCols] = { 150, 110, 64, 86, 126, 94, 152, 70, 112, 166, 112, 78, 86, 106, 134 };
-    static const char* colName[kNumCols] = { "Player", "Location", "Inputs", "Signal", "Up / Down Mb/s", "Lost (hub)", "To / From hub",
+    static const int colWFixed[kNumCols] = { 150, 110, 110, 64, 86, 126, 94, 152, 70, 112, 166, 112, 78, 86, 106, 134 };
+    static const char* colName[kNumCols] = { "Player", "Instrument", "Location", "Inputs", "Signal", "Up / Down Mb/s", "Lost (hub)", "To / From hub",
                                              "JitBuf", "Net jitter", "Hub / Player buf", "Dropouts", "Lat feed", "Device", "Connected", "Version" };
     int colW[kNumCols]; for (int i = 0; i < kNumCols; ++i) colW[i] = colWFixed[i];
     {
-        int w = colWFixed[0], lw = colWFixed[1];
+        int w = colWFixed[0], iw = colWFixed[1], lw = colWFixed[2];
         for (auto& p : mPeers) {
             w = std::max(w, rowFont.getStringWidth(juce::String::fromUTF8(p.userName.c_str())) + 40);   // + record dot
+            iw = std::max(iw, rowFont.getStringWidth(juce::String::fromUTF8(p.clientInstrument.c_str())) + 18);
             lw = std::max(lw, rowFont.getStringWidth(juce::String::fromUTF8(p.location.c_str())) + 18);
         }
-        mUserColW = w; colW[0] = w; colW[1] = lw;
+        mUserColW = w; colW[0] = w; colW[1] = iw; colW[2] = lw;
     }
     mColX.assign(kNumCols + 1, 0);
     { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { mColX[i] = x; x += colW[i]; } mColX[kNumCols] = x; mRequiredWidth = x + paddingX; }
@@ -290,6 +337,7 @@ void PeerTable::paint(juce::Graphics& g) {
             juce::String name = (p.isRecording ? juce::String::fromUTF8("\xe2\x97\x8f ") : juce::String()) + juce::String::fromUTF8(p.userName.c_str());
             cell(name, p.isRecording ? juce::Colours::red : pal::text);
         }
+        cell(juce::String::fromUTF8(p.clientInstrument.c_str()), pal::text);   // empty when the player has not set one
         cell(p.location.empty() ? juce::String::fromUTF8("\xe2\x80\xa6") : juce::String::fromUTF8(p.location.c_str()), p.location.empty() ? pal::textDim : pal::text);
         cell(juce::String(p.recvChannels), pal::text);
         const bool sending = p.lastBlocksNonZero > 0;
@@ -378,12 +426,8 @@ void PeerTable::mouseMove(const juce::MouseEvent& e) {
 juce::String PeerTable::getTooltip() {
     if (mHoverRow < 0 || mHoverRow >= (int) mPeers.size()) return {};
     const auto& p = mPeers[(size_t) mHoverRow];
-    if (mHoverCol == 0) {   // User: address + audio device (+ feed warning)
+    if (mHoverCol == 0) {   // Player: the address, as on the web page (+ feed warning); the audio device has its own column
         juce::String t = juce::String(p.ipAddr) + ":" + juce::String(p.port);
-        if (p.clientDevBuf > 0 && p.clientDevSr > 0) {
-            const juce::String sr = (p.clientDevSr % 1000 == 0) ? juce::String(p.clientDevSr / 1000) + "k" : juce::String(p.clientDevSr / 1000.0, 1) + "k";
-            t << "   audio " << p.clientDevBuf << " @ " << sr;
-        }
         if (p.clientLatFeedAgeS > 35) t << "\n" << juce::String::fromUTF8("\xe2\x9a\xa0 the hub's latency report has not reached this player for ") << p.clientLatFeedAgeS << " s";
         return t;
     }
@@ -457,7 +501,7 @@ void RecentTable::mouseDown(const juce::MouseEvent& e) {
         if (p.lastLeftMs < p.lastJoinMs) return;
         const std::string user = p.user;
         juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Remove player",
-            "Remove \"" + juce::String::fromUTF8(user.c_str()) + "\" from this session's players?",
+            "Remove \"" + juce::String::fromUTF8(user.c_str()) + "\" from this stage's players?",
             "Remove", "Cancel", this,
             juce::ModalCallbackFunction::create([sp = juce::Component::SafePointer<RecentTable>(this), user](int result) {
                 if (result == 1 && sp && sp->onRemove) sp->onRemove(user);
@@ -580,8 +624,8 @@ void SessionTable::mouseDown(const juce::MouseEvent& e) {
         const auto& sd = mRows[(size_t) row];
         if (sd.group == mCurrentGroup || !onRemove) return;
         const std::string group = sd.group;
-        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Remove session",
-            "Remove \"" + juce::String::fromUTF8(group.c_str()) + "\" from Recent sessions?\n\nIts remembered players and settings go with it.",
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Remove stage",
+            "Remove \"" + juce::String::fromUTF8(group.c_str()) + "\" from Recent stages?\n\nIts remembered players and settings go with it.",
             "Remove", "Cancel", this,
             juce::ModalCallbackFunction::create([sp = juce::Component::SafePointer<SessionTable>(this), group](int result) { if (result == 1 && sp && sp->onRemove) sp->onRemove(group); }));
         return;
@@ -611,7 +655,7 @@ void SessionTable::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWhee
 void SessionTable::paint(juce::Graphics& g) {
     constexpr int kNumCols = 6;
     int colW[kNumCols] = { 262, 132, 132, 60, 200, 30 };   // + "X" column (remove)
-    static const char* colName[kNumCols] = { "Group", "First used", "Last used", "Players", "Group link", "" };
+    static const char* colName[kNumCols] = { "Stage", "First used", "Last used", "Players", "Stage link", "" };
     const int paddingX = 10;
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
@@ -668,7 +712,7 @@ void SessionTable::paint(juce::Graphics& g) {
     }
     if (mRows.empty()) {
         g.setColour(pal::textDim); g.setFont(juce::Font(14.0f, juce::Font::italic));
-        g.drawText("(no sessions yet)", area, juce::Justification::centred);
+        g.drawText("(no stages yet)", area, juce::Justification::centred);
     }
 }
 
@@ -685,18 +729,18 @@ StatusPage::StatusPage() {
     // Bottom strip — recent sessions (left) | selected session's personnel + password + Apply (right)
     addAndMakeVisible(sessionsLabel);
     addAndMakeVisible(sessionTable);
-    sessionsLabel.setText("  Recent sessions", juce::dontSendNotification);
+    sessionsLabel.setText("  Recent stages", juce::dontSendNotification);
     sessionsLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     sessionsLabel.setColour(juce::Label::textColourId, pal::accent);
     sessionsLabel.setColour(juce::Label::backgroundColourId, pal::bg);
-    sessionsLabel.setTooltip("Groups this hub has served, newest first. Click one to see who was in it; Apply & Restart switches the hub back to that group with the settings it ran with.");
+    sessionsLabel.setTooltip("Stages this hub has served, newest first. Click one to see who was on it; Apply & Restart switches the hub back to that stage with the settings it ran with.");
     addAndMakeVisible(recentLabel);
     addAndMakeVisible(recentTable);
-    recentLabel.setText("  Players seen in this session", juce::dontSendNotification);
+    recentLabel.setText("  Players seen on this stage", juce::dontSendNotification);
     recentLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     recentLabel.setColour(juce::Label::textColourId, pal::accent);
     recentLabel.setColour(juce::Label::backgroundColourId, pal::bg);
-    recentLabel.setTooltip("The distinct players seen in the selected session (from the hub's own join/leave events), newest first");
+    recentLabel.setTooltip("The distinct players seen on the selected stage (from the hub's own join/leave events), newest first");
     addAndMakeVisible(sessionPwLabel);
     addAndMakeVisible(sessionPwEditor);
     addAndMakeVisible(sessionApply);
@@ -710,10 +754,10 @@ StatusPage::StatusPage() {
     sessionPwEditor.setColour(juce::TextEditor::outlineColourId, pal::panelLight.brighter(0.2f));
     sessionPwEditor.setColour(juce::TextEditor::focusedOutlineColourId, pal::accent);
     sessionPwEditor.setSelectAllWhenFocused(false);
-    sessionPwEditor.setTextToShowWhenEmpty("select a session", pal::textDim);
-    sessionPwEditor.setTooltip("The password the hub will use for this group - edit it, or clear it for no password");
+    sessionPwEditor.setTextToShowWhenEmpty("select a stage", pal::textDim);
+    sessionPwEditor.setTooltip("The password the hub will use for this stage - edit it, or clear it for no password");
     sessionPwEditor.setEnabled(false);
-    sessionApply.setTooltip("Write this session's group, password and hub settings to hub_settings.json and restart the hub (players must rejoin)");
+    sessionApply.setTooltip("Write this stage's name, password and hub settings to hub_settings.json and restart the hub (players must rejoin)");
     sessionApply.setEnabled(false);
     sessionApply.onClick = [this]() { if (const auto* sd = sessionTable.selected(); sd && onApplySession) onApplySession(sd->group, sessionPwEditor.getText().toStdString()); };
 
@@ -728,7 +772,7 @@ StatusPage::StatusPage() {
     messageEditor.setColour(juce::TextEditor::textColourId, pal::text);
     messageEditor.setColour(juce::TextEditor::outlineColourId, pal::panelLight.brighter(0.2f));
     messageEditor.setColour(juce::TextEditor::focusedOutlineColourId, pal::accent);
-    messageEditor.setTextToShowWhenEmpty("Message to the group", pal::textDim);
+    messageEditor.setTextToShowWhenEmpty("Message to the stage", pal::textDim);
     messageEditor.setTooltip("Sends a chat message to every player, from Hub.");
     messageSend.setTooltip("Send this message to every player.");
     auto send = [this]() {
@@ -739,7 +783,7 @@ StatusPage::StatusPage() {
     };
     messageEditor.onReturnKey = send;
     messageSend.onClick = send;
-    groupLabel.setText("Group", juce::dontSendNotification);
+    groupLabel.setText("Stage", juce::dontSendNotification);
     groupLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     groupLabel.setColour(juce::Label::textColourId, pal::accent);
     groupEditor.setFont(juce::Font(16.0f));
@@ -750,15 +794,15 @@ StatusPage::StatusPage() {
     groupEditor.setSelectAllWhenFocused(false);
     groupEditor.onReturnKey = [this]() { if (onApplyGroup) onApplyGroup(groupEditor.getText().trim()); };
     groupApply.onClick = [this]() { if (onApplyGroup) onApplyGroup(groupEditor.getText().trim()); };
-    groupLabel.setTooltip("The group this hub is hosting. Players join by this name.");
-    groupEditor.setTooltip("Type a new group name, then click Apply.");
-    groupApply.setTooltip("Switch the hub to this group. The hub restarts and players must rejoin.");
+    groupLabel.setTooltip("The stage this hub is hosting. Players join by this name.");
+    groupEditor.setTooltip("Type a new stage name, then click Apply.");
+    groupApply.setTooltip("Switch the hub to this stage. The hub restarts and players must rejoin.");
     header.setTooltip("This hub's version, addresses, ports and current load.");
     peerLabel.setTooltip("Everyone connected to this hub right now. The heading counts the players connected now and the different players who have joined since the hub started. Hover a column for details.");
-    sessionPwLabel.setTooltip("The password for the selected session.");
-    sessionTable.setTooltip("Groups this hub has hosted. Click a row to select it, or click a column heading to sort.");
-    recentTable.setTooltip("Players seen in the selected session. Click a column heading to sort.");
-    // Copy Group Link + link text + Re-run port check, like the web page header.
+    sessionPwLabel.setTooltip("The password for the selected stage.");
+    sessionTable.setTooltip("Stages this hub has hosted. Click a row to select it, or click a column heading to sort.");
+    recentTable.setTooltip("Players seen on the selected stage. Click a column heading to sort.");
+    // Copy Stage Link + link text + Re-run port check, like the web page header.
     addAndMakeVisible(copyLinkButton);
     addAndMakeVisible(linkLabel);
     addAndMakeVisible(portCheckButton);
@@ -769,7 +813,7 @@ StatusPage::StatusPage() {
     copyLinkButton.onClick = [this]() {
         if (onCopyLink) onCopyLink();
         copyLinkButton.setButtonText("Copied");
-        juce::Timer::callAfterDelay(1500, [sp = juce::Component::SafePointer<StatusPage>(this)]() { if (sp) sp->copyLinkButton.setButtonText("Copy Group Link"); });
+        juce::Timer::callAfterDelay(1500, [sp = juce::Component::SafePointer<StatusPage>(this)]() { if (sp) sp->copyLinkButton.setButtonText("Copy Stage Link"); });
     };
     portCheckButton.onClick = [this]() { if (onRerunPortCheck) onRerunPortCheck(); };
 }
@@ -777,8 +821,8 @@ StatusPage::StatusPage() {
 void StatusPage::resized() {
     auto bounds = getLocalBounds();
     // Header bumped 76 → 100 for larger title + two info lines.
-    header.setBounds(bounds.removeFromTop(176));   // Icon + title + platform + KV + local/external port check (+ update line)
-    // Tool row — Copy Group Link, the link, Re-run port check (right).
+    header.setBounds(bounds.removeFromTop(210));   // Icon + title + platform + KV + local/external port check + stage directory + limits (+ update line)
+    // Tool row — Copy Stage Link, the link, Re-run port check (right).
     auto trow = bounds.removeFromTop(40).reduced(14, 4);
     portCheckButton.setBounds(trow.removeFromRight(170));
     if (installUpdateButton.isVisible()) { trow.removeFromRight(8); installUpdateButton.setBounds(trow.removeFromRight(130)); }
@@ -1071,12 +1115,12 @@ SettingsPanel::SettingsPanel(const HubLaunchArgs& running, const HubSettingsMeta
     mRevertButton.onClick = [this]() { controlsFromModel(mHaveFile ? mSaved : mRunning); refreshStatus("Reverted"); };
     mResetButton.onClick = [this]() {
         juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Reset to Defaults",
-            "Put every setting back to its default? Your group name and password stay. Nothing changes until you click Save.",
+            "Put every setting back to its default? Your stage name and password stay. Nothing changes until you click Save.",
             "Reset", "Cancel", this, juce::ModalCallbackFunction::create([this](int ok) {
                 if (ok) resetToDefaults();
             }));
     };
-    mResetButton.setTooltip("Put every setting back to its default, keeping your group name and password.");
+    mResetButton.setTooltip("Put every setting back to its default, keeping your stage name and password.");
     mRevertButton.setTooltip("Undo your edits and go back to the last saved settings.");
     mSaveButton.setTooltip("Save these settings. Some take effect after Restart Hub.");
     mSaveRestartButton.setTooltip("Save these settings and restart the hub. Players reconnect automatically.");
@@ -1341,6 +1385,13 @@ HubContent::HubContent(SonobusHubServer* hub,
         refreshSessionDetail();
     };
     mStatusPage.onApplySession = std::move(applySessionFn);
+    // Players table right-click: remove the player and keep them out for an hour
+    mStatusPage.peerTable.onKick = [this](const std::string& user) {
+        if (!mHub) return;
+        if (!mHub->kickPlayer(user, 60))
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Remove player",
+                                                   juce::String::fromUTF8(user.c_str()) + " is no longer on the stage.");
+    };
     // Tab pages are members; the TabbedComponent does NOT own them (deleteComponentWhenNotNeeded=false).
     mTabs.setTabBarDepth(32);
     mTabs.setOutline(0);
@@ -1386,15 +1437,15 @@ HubContent::HubContent(SonobusHubServer* hub,
     addAndMakeVisible(mQuitButton);
     mRestartButton.setTooltip("Restart the hub. Players reconnect automatically.");
     mQuitButton.setTooltip("Stop hosting and quit the hub.");
-    mStatusPage.copyLinkButton.setTooltip("Copy a link that opens this group in SonoBus RP.");
-    mStatusPage.linkLabel.setTooltip("The link players use to join this group.");
+    mStatusPage.copyLinkButton.setTooltip("Copy a link that opens this stage in SonoBus RP.");
+    mStatusPage.linkLabel.setTooltip("The link players use to join this stage.");
     mStatusPage.portCheckButton.setTooltip("Test whether players outside your network can reach this hub.");
     styleButton(mStatusPage.installUpdateButton, pal::accent, pal::bg);
     mStatusPage.installUpdateButton.setTooltip("Download and install the new hub. The hub restarts, so every player drops and rejoins.");
     mStatusPage.installUpdateButton.onClick = [this]() { startInstallUpdate(); };
     setTooltip("Total audio traffic through the hub right now.");
     auto& tabBar = mTabs.getTabbedButtonBar();
-    tabBar.getTabButton(0)->setTooltip("Players, group link and recent sessions.");
+    tabBar.getTabButton(0)->setTooltip("Players, stage link and recent stages.");
     tabBar.getTabButton(1)->setTooltip("Hub settings.");
     tabBar.getTabButton(2)->setTooltip("Connection history and the hub log.");
 
@@ -1492,7 +1543,8 @@ void HubContent::timerCallback() {
     // Derive per-second bandwidth from successive cumulative counters.
     int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    if (mLastSampleMs > 0) {
+    const bool haveRate = mLastSampleMs > 0;
+    if (haveRate) {
         int64_t dt = nowMs - mLastSampleMs;
         if (dt > 0) {
             mInBytesPerSec  = (float)((snap.bytesInTotal  - mLastBytesIn)  * 1000.0 / dt);
@@ -1523,6 +1575,7 @@ void HubContent::timerCallback() {
 
     for (auto& p : snap.peers) p.location = mGeo.locationFor(p.ipAddr, p.isLan, mGeoEnabled);   
     mStatusPage.linkLabel.setText(juce::String::fromUTF8(SonobusHubWeb::joinLink(snap).c_str()), juce::dontSendNotification);
+    mStatusPage.header.setOutRate(haveRate ? mOutBytesPerSec : -1.0f);   // before setSnapshot, which repaints
     mStatusPage.header.setSnapshot(snap);
     mSettings.setDetectedAddress(juce::String::fromUTF8(snap.advertisedPublicHost.c_str()));
     if (mLogFile != juce::File() && ++mLogCheckTicks >= 600) {
@@ -1564,8 +1617,8 @@ void HubContent::refreshSessionDetail() {
     else rows = mHub->recentPlayers(30);
     for (auto& r : rows) r.location = mGeo.locationFor(r.ip, r.lan, mGeoEnabled);
     mStatusPage.recentTable.setRows(std::move(rows));
-    mStatusPage.recentLabel.setText(sel ? "  Players seen in \"" + juce::String::fromUTF8(sel->group.c_str()) + "\""
-                                        : juce::String("  Players seen in this session"), juce::dontSendNotification);
+    mStatusPage.recentLabel.setText(sel ? "  Players seen on \"" + juce::String::fromUTF8(sel->group.c_str()) + "\""
+                                        : juce::String("  Players seen on this stage"), juce::dontSendNotification);
     mStatusPage.sessionApply.setEnabled(sel != nullptr);
     mStatusPage.sessionPwEditor.setEnabled(sel != nullptr);
     {   // Prefill only when the SELECTION changes
@@ -1575,7 +1628,7 @@ void HubContent::refreshSessionDetail() {
             mPwPrefillGroup = g;
         }
     }
-    mStatusPage.sessionPwEditor.setTextToShowWhenEmpty(!sel ? "select a session" : "(no password)", pal::textDim);
+    mStatusPage.sessionPwEditor.setTextToShowWhenEmpty(!sel ? "select a stage" : "(no password)", pal::textDim);
 }
 
 // ─── HubMainWindow ────────────────────────────────────────────────────────────
@@ -1598,7 +1651,12 @@ HubMainWindow::HubMainWindow(const juce::String& title,
     setResizeLimits(1180, 760, 8000, 8000);   // Below ~760 pt the sessions strip overlapped the password row
     setContentOwned(new HubContent(hub, running, meta, std::move(settingsCb),
                                    std::move(restartFn), std::move(quitFn), std::move(applyGroupFn), std::move(applyHoldFn), std::move(applySessionFn)), true);
-    centreWithSize(1500, 800);
+    {   // Wide enough for the whole Players table, never wider than the main display
+        const auto* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+        const int avail = disp != nullptr ? disp->userArea.getWidth() - 40 : 1820;
+        const int availH = disp != nullptr ? disp->userArea.getHeight() - 60 : 900;
+        centreWithSize(std::max(1180, std::min(1820, avail)), std::max(760, std::min(900, availH)));   // room for the status lines and the table
+    }
     setVisible(true);
     toFront(true);
 }
@@ -1646,9 +1704,9 @@ void HubJuceApp::initialise(const juce::String&) {
 // Nothing is hosted until the operator has named the group.
 void HubJuceApp::askFirstLaunch() {
     auto* w = new juce::AlertWindow("Welcome to SonoBus RP Hub",
-                                    "Choose a group name. Players use it to join this hub.",
+                                    "Choose a stage name. Players use it to join this hub.",
                                     juce::MessageBoxIconType::NoIcon);
-    w->addTextEditor("group", "", "Group name");
+    w->addTextEditor("group", "", "Stage name");
     w->addTextEditor("password", "", "Password (optional)");
     w->addButton("Start Hub", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("Quit", 0);
@@ -1702,6 +1760,7 @@ void HubJuceApp::startHubAndWindow() {
     makeWindow();
     installAppMenu();   // About SonoBus RP Hub
     startWeb();   // After makeWindow so the page shares the window's geo resolver
+    startStageDirectory();
 
     if (mStartFailed) {
         // Most likely a player launched before the hub on the same Mac (err 48).
@@ -1721,6 +1780,7 @@ void HubJuceApp::doRestart() {
     juce::MessageManager::callAsync([this]() {
         std::cout << "[HUB] GUI: Restart requested.\n";
         mWeb.reset();   // References the hub we are about to replace
+        if (mStageDirectory) { mStageDirectory->setLeaveOnStop(false); mStageDirectory.reset(); }   // the stage stays listed across a restart
         if (mHub) mHub->stop();
         // Recreate from scratch so atomic counters / state reset cleanly.
         // mArgs may have been updated by a Settings-tab Save, so this also
@@ -1744,6 +1804,7 @@ void HubJuceApp::doRestart() {
         mWindow.reset();
         makeWindow();
         startWeb();   // After the new window: the page binds to that window's geo resolver
+        startStageDirectory();
     });
 }
 
@@ -1869,8 +1930,8 @@ void HubJuceApp::applyHoldMode(bool print) {
 // comes up in the new group), then the same in-process restart as the button.
 void HubJuceApp::applyGroupAndRestart(const std::string& group) {
     if (group.empty()) {
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Group",
-                                               "Group name must not be empty.");
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Stage",
+                                               "Stage name must not be empty.");
         return;
     }
     if (group == mArgs.groupName) {
@@ -1897,22 +1958,22 @@ void HubJuceApp::applyGroupAndRestart(const std::string& group) {
 void HubJuceApp::applySessionAndRestart(const std::string& group, const std::string& passwordOverride) {
     SonobusHubServer::SessionRecord rec;
     if (group.empty() || !mHub || !mHub->sessionFor(group, rec)) {
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent sessions",
-                                               "No remembered session for group '" + juce::String::fromUTF8(group.c_str()) + "'.");
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent stages",
+                                               "No remembered stage named '" + juce::String::fromUTF8(group.c_str()) + "'.");
         return;
     }
     HubLaunchArgs n = mArgs;
     int applied = 0; std::string err;
     if (!hub_settings::applySession(n, rec.group, passwordOverride, rec.settings, applied, err)) {   // The field is authoritative — empty = NO password
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent sessions",
-                                               "Cannot apply session '" + juce::String::fromUTF8(rec.group.c_str()) + "': " + juce::String(err));
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent stages",
+                                               "Cannot apply stage '" + juce::String::fromUTF8(rec.group.c_str()) + "': " + juce::String(err));
         return;
     }
     bool needRelaunch = false;
     for (const auto& k : hub_settings::diffKeys(mArgs, n)) if (hub_settings::tierForKey(k) == hub_settings::Tier::Relaunch) needRelaunch = true;
     if (mMeta.file != juce::File()) {
         if (!applySavedSettings(n, err)) {
-            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent sessions", "Save FAILED: " + juce::String(err));
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Recent stages", "Save FAILED: " + juce::String(err));
             return;
         }
         mMeta.loadedFromFile = true;
@@ -1945,6 +2006,7 @@ bool HubJuceApp::applySavedSettings(const HubLaunchArgs& a, std::string& err) {
     n.dumpPeer = mArgs.dumpPeer;
     n.dumpSecs = mArgs.dumpSecs;
     if (n.holdMode != mArgs.holdMode && mHub) mHub->setHoldMode(n.holdMode == "print" ? 1 : 0);   // Live
+    if (mHub) hub_settings::applyStageToHub(*mHub, n);   // Live: stage limits and the directory listing
     mArgs = n;
     std::cout << "[HUB] GUI: settings saved to " << mMeta.file.getFullPathName() << "\n";
     return true;
@@ -1966,11 +2028,18 @@ bool HubJuceApp::doRelaunch(std::string& err) {
     return true;
 }
 
+void HubJuceApp::startStageDirectory() {
+    if (!mHub) return;
+    mStageDirectory = std::make_unique<HubStageDirectory>(*mHub, mArgs.stageDirectory, mArgs.stageHubId, mArgs.stageHubKey, hub_settings::dataDir());
+    mStageDirectory->startThread();
+}
+
 void HubJuceApp::shutdown() {
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
     mMenuModel.reset();
+    mStageDirectory.reset();   // removes the listing while the hub still exists
     mWeb.reset();   // FIRST — the web thread uses the window's geo resolver (HubContent::mGeo) and the hub;
                     // Destroying the window first would pull the resolver out from under sessionsJson.
                     // stop() joins the thread, so nothing is in flight after this.

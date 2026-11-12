@@ -13,6 +13,7 @@
 #include "GenericItemChooser.h"
 
 class RandomSentenceGenerator;
+class StagesView;
 
 
 class ConnectView :
@@ -85,6 +86,7 @@ public:
     void populateFromRecent(const AooServerConnectionInfo & info);   
 
     void updatePublicGroups();
+    void runUiShots(const File & dir);   // test aid: saves pictures of every tab at several window sizes
     void resetPrivateGroupLabels();
     void groupJoinFailed();
 
@@ -138,6 +140,8 @@ protected:
 
     std::unique_ptr<Label> mServerUserStaticLabel;
     std::unique_ptr<TextEditor> mServerUsernameEditor;
+    std::unique_ptr<Label> mServerInstrumentStaticLabel;
+    std::unique_ptr<ComboBox> mServerInstrumentCombo;
     std::unique_ptr<Label> mServerUserPassStaticLabel;
     std::unique_ptr<TextEditor> mServerUserPasswordEditor;
 
@@ -158,7 +162,12 @@ protected:
     std::unique_ptr<Label> mServerInfoLabel;
     std::unique_ptr<Label> mMainStatusLabel;
 
-    bool recentsIsTab() const;   
+    bool recentsIsTab() const;
+    int tabIndexOf(const Component * content) const;
+    bool stagesTabShowing() const;
+    void updateStagesActive();
+    bool mTabsReady = false;
+    std::unique_ptr<StagesView> mStagesView;
     std::unique_ptr<TabbedComponent> mConnectTab;
     std::unique_ptr<Component> mDirectConnectContainer;
     std::unique_ptr<Viewport> mServerConnectViewport;
@@ -253,6 +262,7 @@ protected:
     FlexBox servGroupBox;
     FlexBox servGroupPassBox;
     FlexBox servUserBox;
+    FlexBox servInstrumentBox;
     FlexBox servUserPassBox;
     //FlexBox inputBox;
     FlexBox servAddressBox;

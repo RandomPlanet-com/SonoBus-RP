@@ -14,4 +14,10 @@ namespace sbplus {
     constexpr float kLatE2EYellowMs    = 60.0f;   // yellow up to this, red above
     constexpr float kLatE2ERttGreenMs  = 80.0f;   // both directions (ping): green below this
     constexpr float kLatE2ERttYellowMs = 120.0f;  // yellow up to this, red above
+    // The stage list shows the ping from this computer to a stage before joining; a stage worth joining is close.
+    constexpr float kStagePingGreenMs  = 25.0f;   // green up to and including this
+    constexpr float kStagePingYellowMs = 50.0f;   // yellow up to and including this, red above
+    // The player's own Delay: network round trip + buffering + audio interface, the loop a player feels.
+    constexpr float kDelayLoopGreenMs  = 43.0f;   // green up to and including this
+    constexpr float kDelayLoopYellowMs = 68.0f;   // yellow up to and including this, red above
 }

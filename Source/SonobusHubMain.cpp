@@ -24,6 +24,7 @@
 #include "SonobusHubUpdater.h"
 #include "SonobusHubGeo.h"
 #include "SonobusHubWeb.h"   // Status page
+#include "SonobusHubDirectory.h"   // Stage directory listing
 #include <juce_core/system/juce_TargetPlatform.h>  // defines JUCE_MAC for the header below
 #include "SonobusHubMacUtils.h"  // hubDisableAppNap; the upstream GPL CrossPlatformUtilsMac.mm is not compiled into the hub
 #include "aoo/aoo.h"
@@ -103,7 +104,14 @@ static void printUsage(const char* progname) {
               << "                          (default: 18080 on Linux, 0 on a Mac)\n"
               << "  --web-password <pw>     Password for the web page. Settings and the log are\n"
               << "                          on the web page only when a password is set.\n"
-              << "  --location <text>       Place name shown on the web page, for example \"Atlanta, GA\"\n\n"
+              << "  --location <text>       The stage's city, shown on the web page and in the stage directory\n"
+              << "  --max-players <n>       Most players on this stage (0 = no limit, default 20)\n"
+              << "  --max-channels <n>      Most channels one player may send (0 = no limit, default 12)\n"
+              << "  --list-stage            List this stage at stages.randomplanet.com (needs --location)\n"
+              << "  --stage-genre <text>    Genre for the listing, for example \"Jazz/Blues\"\n"
+              << "  --stage-description <text>  One line for the listing\n"
+              << "  --stage-country <code>  Two-letter country code for the listing, for example US\n"
+              << "  --stage-names <mode>    Player names in the listing: Automatic, Show or Hide\n\n"
               << "Logging [S]:\n"
               << "  --log-file <path>       Write the log to this file. Default:\n"
               << "                          Mac:    ~/Library/Logs/SonoBus RP Hub/hub.log\n"
@@ -166,6 +174,15 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
         else if (arg == "--web-port" && i + 1 < argc) { a.webPort = std::atoi(argv[++i]); pin("web_port"); }          
         else if (arg == "--web-password" && i + 1 < argc) { a.webPassword = argv[++i]; pin("web_password"); }
         else if (arg == "--location" && i + 1 < argc) { a.location = argv[++i]; pin("location"); }   
+        else if (arg == "--max-players" && i + 1 < argc) { a.maxPlayers = std::atoi(argv[++i]); pin("max_players"); }
+        else if (arg == "--max-channels" && i + 1 < argc) { a.maxChannels = std::atoi(argv[++i]); pin("max_channels"); }
+        else if (arg == "--list-stage") { a.listStage = true; pin("list_stage"); }
+        else if (arg == "--no-list-stage") { a.listStage = false; pin("list_stage"); }
+        else if (arg == "--stage-genre" && i + 1 < argc) { a.stageGenre = argv[++i]; pin("stage_genre"); }
+        else if (arg == "--stage-description" && i + 1 < argc) { a.stageDescription = argv[++i]; pin("stage_description"); }
+        else if (arg == "--stage-country" && i + 1 < argc) { a.stageCountry = argv[++i]; pin("stage_country"); }
+        else if (arg == "--stage-names" && i + 1 < argc) { a.stageNames = argv[++i]; pin("stage_names"); }
+        else if (arg == "--stage-directory" && i + 1 < argc) { a.stageDirectory = argv[++i]; pin("stage_directory"); }
         // AOO sink knobs (were launchd env only)
         else if (arg == "--aoo-drain" && i + 1 < argc) { a.aooDrain = std::atoi(argv[++i]); pin("aoo_drain"); }
         else if (arg == "--aoo-arm-blocks" && i + 1 < argc) { a.aooGovArmBlocks = std::atoi(argv[++i]); pin("aoo_gov_arm_blocks"); }
@@ -280,6 +297,8 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     web.setUpdateCheck(&updateCheck);
     updateCheck.startThread();
     web.start();
+    HubStageDirectory stageDirectory(hub, a.stageDirectory, a.stageHubId, a.stageHubKey, hs::dataDir());   // listing, when the operator turns it on
+    stageDirectory.startThread();
 
 
     // Only log when the peer count changes.
@@ -299,6 +318,7 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
         }
     }
 
+    stageDirectory.stopThread(20000);   // removes the listing before the hub goes
     web.stop();
     hub.stop();
     return 0;
@@ -397,6 +417,12 @@ int main(int argc, char* argv[]) {
     // Redirect logging to a file when asked. Critical for GUI mode: `open`-launched apps have no tty,
     // so [HUB-JIT]/[HUB-ABUF] telemetry would vanish. Line-buffered so tail -f works live.
     if (!a.logFile.empty()) hs::redirectLogFile(a.logFile);
+
+    // This hub's identity at the stage directory: created once, kept in the settings file.
+    if (hs::ensureStageIdentity(a) && meta.loadedFromFile) {
+        std::string err;
+        if (!hs::save(meta.file, a, err)) std::cerr << "[HUB-SETTINGS] could not save the stage identity: " << err << "\n";
+    }
 
     if (noSettings) {
         std::cout << "[HUB-SETTINGS] settings file disabled (--no-settings)\n";

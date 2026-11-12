@@ -16,12 +16,12 @@ SuggestNewGroupView::SuggestNewGroupView(SonobusAudioProcessor& proc) :  smallLN
     mViewport->setViewedComponent(mRowsContainer.get(), false);
 
 
-    mTitleLabel = std::make_unique<Label>("title", TRANS("Suggest New Group"));
+    mTitleLabel = std::make_unique<Label>("title", TRANS("Suggest New Stage"));
     mTitleLabel->setJustificationType(Justification::centred);
     mTitleLabel->setFont(Font(16, Font::bold));
     mTitleLabel->setColour(Label::textColourId, Colour(0xeeffffff));
 
-    mGroupStaticLabel = std::make_unique<Label>("title", TRANS("Group"));
+    mGroupStaticLabel = std::make_unique<Label>("title", TRANS("Stage"));
     mGroupStaticLabel->setJustificationType(Justification::centred);
     mGroupStaticLabel->setFont(Font(14, Font::plain));
     mGroupStaticLabel->setColour(Label::textColourId, Colour(0xeeffffff));
@@ -90,7 +90,7 @@ SuggestNewGroupView::SuggestNewGroupView(SonobusAudioProcessor& proc) :  smallLN
 
 
     mRequestButton = std::make_unique<TextButton>("x");
-    mRequestButton->setButtonText(TRANS("Suggest and Connect to Group"));
+    mRequestButton->setButtonText(TRANS("Suggest and Connect to Stage"));
     mRequestButton->setColour(TextButton::buttonColourId, Colour::fromFloatRGBA(0.1, 0.4, 0.6, 0.6));
 
     mRequestButton->onClick = [this]() {

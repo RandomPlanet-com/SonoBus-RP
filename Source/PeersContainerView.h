@@ -423,6 +423,7 @@ protected:
     float mHubRateSent = -1.0f, mHubRateRecv = -1.0f;
     int64_t mHubBytesSentLast = -1, mHubBytesRecvLast = -1; uint32 mHubRateStampMs = 0;   // Our own link's rates were never computed
     uint32 mHubDropsT[12] = {}; int64_t mHubDropsC[12] = {}; int mHubDropsN = 0;   // Drops-from-hub last-minute window
+    uint32 mLinkJoinMs = 0; int64_t mLinkBase = -1;   // Link light: join time, and the drop count when its first 10 s ended
     
     Colour mutedBySoloColor;
     Colour mutedTextColor;

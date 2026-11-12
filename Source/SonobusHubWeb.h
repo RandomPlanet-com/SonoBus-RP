@@ -68,6 +68,7 @@ private:
     mutable std::mutex mUpdateLock;
     std::string mUpdateState;
     std::string chatRequest(const std::string& body, bool& ok);
+    std::string kickRequest(const std::string& body, bool& ok);   // POST /api/kick
     std::string licensesText() const;
     bool updateReady() const;
     std::string updateLine() const;

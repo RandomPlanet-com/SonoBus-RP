@@ -507,22 +507,22 @@ public:
         ArgumentList arglist(getApplicationName(), params);
 
         app.addCommand ({ groupSpec, groupSpecDesc,
-            TRANS("Specify the group name to immediately connect to upon launch"), {},
+            TRANS("Specify the stage name to immediately connect to upon launch"), {},
             nullptr
         });
 
         app.addCommand ({ userNameSpec, userNameSpecDesc,
-            TRANS("Specify the displayed username for yourself when connecting to a group"), {},
+            TRANS("Specify the displayed username for yourself when connecting to a stage"), {},
             nullptr
         });
 
         app.addCommand ({ groupPassSpec, groupPassSpecDesc,
-            TRANS("Specify the password to use for the group name to connect to (optional)"), {},
+            TRANS("Specify the password to use for the stage name to connect to (optional)"), {},
             nullptr
         });
 
         app.addCommand ({ serverSpec, serverSpecDesc,
-            TRANS("Specify connection server to use when connecting to a group (optional)"), {},
+            TRANS("Specify connection server to use when connecting to a stage (optional)"), {},
             nullptr
         });
 
@@ -534,7 +534,7 @@ public:
 
         app.addCommand ({ headlessSpec, headlessSpecDesc,
             TRANS("If specified, no GUI will be used and the application will be run headless."),
-            TRANS("You'll need to use other command-line options to connect to a group... eventually there will be an OSC remote control interface."),
+            TRANS("You'll need to use other command-line options to connect to a stage... eventually there will be an OSC remote control interface."),
             nullptr
         });
 
@@ -601,7 +601,7 @@ public:
             doHeadless = true;
 
             if (!doInitialConnect) {
-                std::cout << TRANS("Error: you need to specify a group to connect to for headless operation right now... eventually there will be an OSC interface.") << std::endl;
+                std::cout << TRANS("Error: you need to specify a stage to connect to for headless operation right now... eventually there will be an OSC interface.") << std::endl;
                 doImmediateQuit = true;
             }
         }

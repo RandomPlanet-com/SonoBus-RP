@@ -809,6 +809,24 @@ void SonobusHubServer::handlePortProbeRequest(const struct sockaddr_storage* src
 
 // Entry 2: request on the signaling server's UDP port (server_port is forwarded on every working hub; some routers forward only the signaling port, the hub's audio port is reached by hole punching). Called on the server thread.
 extern "C" void aoo_sb_set_fwprobe_req_handler(void (*fn)(const char*, int, const struct sockaddr*, int, int));
+extern "C" void aoo_sb_set_join_gate(int (*fn)(const char*, const char*, int, char*, int));
+extern "C" void aoo_sb_set_stage_max_players(int n);
+extern "C" void aoo_sb_kick_user(const char* name);
+
+// The built-in server asks the hub before admitting a new member (stage full, recently removed).
+static std::atomic<SonobusHubServer*> g_hubForJoinGate{nullptr};
+static int hub_join_gate(const char* ip, const char* user, int others, char* why, int whylen) {
+    SonobusHubServer* hub = g_hubForJoinGate.load(std::memory_order_acquire);
+    if (!hub) return 1;
+    const std::string r = hub->stageJoinRefusal(ip ? ip : "", user ? user : "", others);
+    if (r.empty()) return 1;
+    std::snprintf(why, (size_t)whylen, "%s", r.c_str());
+    return 0;
+}
+static std::string hub_plain_ip(std::string ip) {   // "::ffff:1.2.3.4" and "1.2.3.4" are the same player
+    if (ip.rfind("::ffff:", 0) == 0) ip = ip.substr(7);
+    return ip;
+}
 // Connection/security log (see SonobusHubServer::connLog)
 extern "C" void aoo_sb_set_conn_event_handler(void (*fn)(const char*, const char*, const char*, const char*, const char*));
 static void hub_conn_event_from_server(const char* kind, const char* addr, const char* user, const char* group, const char* detail) {
@@ -1587,6 +1605,9 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     mStatsThread = std::make_unique<std::thread>([this]() { statsWriterThread(); });
     mPortCheckThread = std::make_unique<std::thread>([this]() { portCheckThreadMain(); });   
     if (mRunLocalServer) aoo_sb_set_fwprobe_req_handler(&hub_fwprobe_req_from_server);   // answer other hubs' port checks on server_port
+    g_hubForJoinGate.store(this, std::memory_order_release);
+    aoo_sb_set_join_gate(&hub_join_gate);
+    aoo_sb_set_stage_max_players(stageSettings().maxPlayers);
     aoo_sb_set_conn_event_handler(&hub_conn_event_from_server);   // Connection log
 
     sessionBegin(mGroupName, mGroupPassword);   // Recent sessions — the hub now serves this group
@@ -1620,6 +1641,8 @@ void SonobusHubServer::stop() {
     if (mPortCheckThread && mPortCheckThread->joinable()) mPortCheckThread->join();   
     aoo_sb_set_fwprobe_req_handler(nullptr);
     aoo_sb_set_conn_event_handler(nullptr);
+    aoo_sb_set_join_gate(nullptr);
+    { SonobusHubServer* self = this; g_hubForJoinGate.compare_exchange_strong(self, nullptr); }
     if (mSendThread && mSendThread->joinable()) mSendThread->join();
     // (mLevelSendThread removed)
     // Wake + join the pacer (its wait predicate checks mRunning).
@@ -1726,31 +1749,36 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
     s.holdMode = mHoldMode.load(std::memory_order_relaxed);   
     { std::lock_guard<std::mutex> lk(mPortCheckMutex); s.portCheckText = mPortCheckText; s.portCheckState = mPortCheckState; s.portLocalText = mPortLocalText; s.portCheckVerifiedAtMs = mPortCheckVerifiedAtMs; }
 
-    // CPU sample. getrusage(RUSAGE_SELF) on macOS returns user+sys time
-    // for the whole process. We diff against the previous snapshot to get
-    // a percentage-of-one-core figure. snapshotForUI is only called from
-    // the JUCE message thread (5Hz) so no locking on the mLastCpu* fields.
+    // CPU sample: process user+sys time over at least 0.9 s, so callers on several threads (window, web page,
+    // internals) all read the same steady figure instead of a burst over a few milliseconds.
     {
+        std::lock_guard<std::mutex> cl(mCpuMutex);
         struct rusage ru{};
         if (getrusage(RUSAGE_SELF, &ru) == 0) {
             uint64_t userUs = (uint64_t)ru.ru_utime.tv_sec * 1000000ULL + ru.ru_utime.tv_usec;
             uint64_t sysUs  = (uint64_t)ru.ru_stime.tv_sec * 1000000ULL + ru.ru_stime.tv_usec;
             int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
-            if (mLastCpuSampleMs > 0) {
-                int64_t dtMs = nowMs - mLastCpuSampleMs;
-                if (dtMs > 0) {
-                    uint64_t dCpuUs = (userUs + sysUs) - (mLastCpuUserUs + mLastCpuSysUs);
-                    // % of one core = (cpu_us / 1000) / dt_ms * 100
-                    mLastCpuPct = (float)((double)dCpuUs / 1000.0 / (double)dtMs * 100.0);
+            if (mLastCpuSampleMs == 0 || nowMs - mLastCpuSampleMs >= 900) {   // too soon: keep the last figure
+                if (mLastCpuSampleMs > 0) {
+                    const int64_t dtMs = nowMs - mLastCpuSampleMs;
+                    const uint64_t dCpuUs = (userUs + sysUs) - (mLastCpuUserUs + mLastCpuSysUs);
+                    mLastCpuPct = (float)((double)dCpuUs / 1000.0 / (double)dtMs * 100.0);   // % of one core
                 }
+                mLastCpuSampleMs = nowMs;
+                mLastCpuUserUs = userUs;
+                mLastCpuSysUs = sysUs;
             }
-            mLastCpuSampleMs = nowMs;
-            mLastCpuUserUs = userUs;
-            mLastCpuSysUs = sysUs;
         }
     }
     s.hubCpuPct = mLastCpuPct;
+    {
+        std::lock_guard<std::mutex> sl(mStageMutex);
+        s.stageMaxPlayers = mStage.maxPlayers;
+        s.stageMaxChannels = mStage.maxChannels;
+        s.stageListingState = mStage.list ? mStageListingState : 0;
+        s.stageListingText = mStage.list ? mStageListingText : std::string();
+    }
 
     // Pull peer shared_ptrs out under the lock, then format/copy after release
     // to keep the critical section short. (mPeerMutex is const-accessible
@@ -1818,7 +1846,7 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
             up.clientRxUnderruns10s = p->clientRxUnderruns10s.load(std::memory_order_relaxed);   
             up.isRecording = p->isRecording.load(std::memory_order_relaxed) != 0;                   
             up.isSendMuted = p->isSendMuted.load(std::memory_order_relaxed) != 0;                   
-            { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; }
+            { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; up.clientInstrument = p->clientInstrument; }
             up.clientDevBuf = p->clientDevBuf.load(std::memory_order_relaxed);
             up.clientDevSr = p->clientDevSr.load(std::memory_order_relaxed);
             up.clientRxPops10s = p->clientRxPops10s.load(std::memory_order_relaxed);
@@ -2405,6 +2433,7 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     auto peer = std::make_shared<HubPeer>();
     peer->id = peerId;
     peer->userName = userName;
+    mStageMembersGen.fetch_add(1, std::memory_order_relaxed);
     peer->recvChannels = mChannels;
     peer->uiRecvChannels.store(mChannels, std::memory_order_relaxed);
     peer->sendChannels = mChannels;
@@ -2672,6 +2701,7 @@ void SonobusHubServer::removePeer(int32_t peerId) {
             for (auto i = removed.begin(); i != removed.end(); ++i) {
                 if (!*i) continue;
                 std::cout << "[HUB] Removed peer '" << (*i)->userName << "' (id=" << (*i)->id << ")\n";
+                mStageMembersGen.fetch_add(1, std::memory_order_relaxed);
                 connLog("peer-removed", "", (*i)->userName, mGroupName, "");   
                 recentNoteLeave((*i)->userName);   // Recent-players list
 
@@ -3048,7 +3078,8 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
         } catch (const osc::Exception&) {}
         return;
     }
-    // A player reports its version and system (/sb/hxver s:version s:os, re-sent with its 10-s report). Control path only.
+    // A player reports its version, system and instrument (/sb/hxver s:version s:os [s:instrument], re-sent with its
+    // 10-s report). Control path only.
     if (n >= SB_HXMSG_DOMAIN_LEN + 6 && std::memcmp(tail, "/hxver", 6) == 0) {
         if (srcAddr->ss_family != AF_INET) return;
         const auto* sa_in = (const struct sockaddr_in*)srcAddr;
@@ -3067,13 +3098,17 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             osc::ReceivedMessage rm(pkt);
             auto it = rm.ArgumentsBegin();
             std::string ver = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
-            std::string os  = (it != rm.ArgumentsEnd()) ? std::string(it->AsString()) : std::string();
+            std::string os  = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
+            std::string inst = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string(it->AsString()) : std::string();
             if (ver.size() > 60) ver.resize(60);
             if (os.size() > 16) os.resize(16);
+            if (inst.size() > 24) inst.resize(24);
             auto clean = [](std::string& t){ for (auto& c : t) if ((unsigned char) c < 32 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&') c = ' '; };
-            clean(ver); clean(os);
-            bool changed = false;
-            { std::lock_guard<std::mutex> vl(who->verLock); changed = (who->clientVersion != ver || who->clientOs != os); who->clientVersion = ver; who->clientOs = os; }
+            clean(ver); clean(os); clean(inst);
+            bool changed = false, instChanged = false;
+            { std::lock_guard<std::mutex> vl(who->verLock); changed = (who->clientVersion != ver || who->clientOs != os); who->clientVersion = ver; who->clientOs = os;
+              instChanged = who->clientInstrument != inst; who->clientInstrument = inst; }
+            if (instChanged) mStageGen.fetch_add(1, std::memory_order_relaxed);   // the listing shows it: check in again
             if (changed) std::cout << "[HUB-VER] '" << who->userName << "' runs " << ver << " on " << os << "\n";
         } catch (const osc::Exception&) {}
         return;
@@ -3838,6 +3873,14 @@ int32_t SonobusHubServer::hub_sink_event_handler(void* user, const aoo_event** e
             std::cerr << "[HUB-FMT] peer='" << peerPtr->userName << "' source format declares "
                       << newCh << " channels, capping at " << HUB_MAX_CHANNELS_PER_PEER << "\n";
             newCh = HUB_MAX_CHANNELS_PER_PEER;
+        }
+        {   // The stage's channel limit: only the first channels are received and passed on
+            const int cap = ctx->hub->mStageMaxChannels.load(std::memory_order_relaxed);
+            if (cap > 0 && newCh > cap) {
+                std::cout << "[HUB-FMT] peer='" << peerPtr->userName << "' sends " << newCh
+                          << " channels, stage limit " << cap << ": passing on the first " << cap << "\n";
+                newCh = cap;
+            }
         }
 
         if (newCh == peerPtr->recvChannels) {
@@ -5516,9 +5559,11 @@ void SonobusHubServer::statsWriterThread() {
                         }
                         // Follow a rising target. The rules above grow only when gaps are longer than the hold itself; a hold
                         // that sits on its target has no slack for that, so three samples in a row (30 s) with the target a
-                        // block or more above the hold raise it to the target.
+                        // block or more above the hold raise it to the target. Only while the hold still covers the gaps:
+                        // gaps longer than the hold are late blocks or a burst, and the grow rules above own those.
                         if (hub_hold_follow()) {
-                            if (target > p->abufCurrentMs + blockMs - 0.01) p->holdFollowWindows++; else p->holdFollowWindows = 0;
+                            const bool covered = needMs > 0.0 && needMs <= p->abufCurrentMs + 0.01;
+                            if (covered && target > p->abufCurrentMs + blockMs - 0.01) p->holdFollowWindows++; else p->holdFollowWindows = 0;
                             if (!decided && p->holdFollowWindows >= 3 && p->abufCurrentMs < kHoldCeilMs - 0.5) {
                                 abufApply.push_back({p, target, 8});
                                 p->holdFollowWindows = 0;
@@ -5546,7 +5591,7 @@ void SonobusHubServer::statsWriterThread() {
                                 p->holdFastWindows = 3; p->holdFastAtMs = 0;
                             }
                             if (!decided && decayTarget > 0.0 && p->abufCurrentMs - decayTarget >= 2.0 && p->holdDecayWindows >= p->holdFastWindows
-                                && nowMs - p->holdLastChangeMs >= 30000 && nowMs >= p->holdNoDecayUntilMs) {
+                                && nowMs - p->holdLastChangeMs >= 30000) {   // the stay after a follow holds off the slow decay only
                                 abufApply.push_back({p, decayTarget, 9});
                                 p->holdDecayWindows = 0; p->holdFastAtMs = nowMs; p->holdFastToMs = decayTarget;
                                 decided = true;
@@ -6397,5 +6442,72 @@ void SonobusHubServer::pacerThread() {
     }
 
     std::cout << "[HUB] Pacer thread stopped.\n";
+}
+
+// ─── Stage limits, kick and the listing status (control path only) ───────────────────────
+void SonobusHubServer::applyStageSettings(const StageSettings& st) {
+    {
+        std::lock_guard<std::mutex> l(mStageMutex);
+        const bool wasListed = mStage.list;
+        mStage = st;
+        if (mStage.list && !wasListed) { mStageListingState = 4; mStageListingText = "Checking with the stage directory..."; }
+    }
+    mStageMaxChannels.store(st.maxChannels, std::memory_order_relaxed);
+    aoo_sb_set_stage_max_players(st.maxPlayers);
+    mStageGen.fetch_add(1, std::memory_order_relaxed);
+}
+
+SonobusHubServer::StageSettings SonobusHubServer::stageSettings() const {
+    std::lock_guard<std::mutex> l(mStageMutex);
+    return mStage;
+}
+
+void SonobusHubServer::setStageListingStatus(int state, const std::string& text) {
+    std::lock_guard<std::mutex> l(mStageMutex);
+    mStageListingState = state;
+    mStageListingText = text;
+}
+
+bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes) {
+    if (userName.empty()) return false;
+    std::string ip;
+    bool found = false;
+    {
+        std::shared_lock<std::shared_mutex> lk(mPeerMutex);
+        for (auto& p : mPeers) {
+            if (!p || p->userName != userName) continue;
+            found = true;
+            char ipBuf[INET6_ADDRSTRLEN] = {0};
+            if (p->addr.ss_family == AF_INET) inet_ntop(AF_INET, &((const struct sockaddr_in*)&p->addr)->sin_addr, ipBuf, sizeof(ipBuf));
+            else if (p->addr.ss_family == AF_INET6) inet_ntop(AF_INET6, &((const struct sockaddr_in6*)&p->addr)->sin6_addr, ipBuf, sizeof(ipBuf));
+            ip = hub_plain_ip(ipBuf);
+            break;
+        }
+    }
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    {
+        std::lock_guard<std::mutex> l(mStageMutex);
+        mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const StageBlock& b) { return b.untilMs <= now; }), mStageBlocks.end());
+        if (blockMinutes > 0) mStageBlocks.push_back({ ip, userName, now + (int64_t) blockMinutes * 60000 });
+    }
+    connLog("kick", ip, userName, mGroupName, "removed by the host, kept out " + std::to_string(blockMinutes) + " min");
+    aoo_sb_kick_user(userName.c_str());
+    return found;
+}
+
+std::string SonobusHubServer::stageJoinRefusal(const std::string& ipRaw, const std::string& user, int othersInStage) {
+    const std::string ip = hub_plain_ip(ipRaw);
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> l(mStageMutex);
+    mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const StageBlock& b) { return b.untilMs <= now; }), mStageBlocks.end());
+    for (const auto& b : mStageBlocks) {
+        if (b.user == user || (!b.ip.empty() && b.ip == ip)) {
+            const int64_t mins = std::max<int64_t>(1, (b.untilMs - now + 59999) / 60000);
+            return "The host removed you from this stage. You can rejoin in " + std::to_string(mins) + (mins == 1 ? " minute." : " minutes.");
+        }
+    }
+    if (mStage.maxPlayers > 0 && othersInStage >= mStage.maxPlayers)
+        return "This stage is full (" + std::to_string(othersInStage) + " of " + std::to_string(mStage.maxPlayers) + " players).";
+    return {};
 }
 

@@ -48,9 +48,9 @@ public:
         autoModeChoice.addItem(TRANS("Round-trip"), 1);
         autoModeChoice.setSelectedItemIndex(0);
 
-        autoButton.setButtonText(TRANS("Set From Peers"));
+        autoButton.setButtonText(TRANS("Set From Stage"));
         autoButton.addListener(this);
-        autoButton.setTooltip(TRANS("Pressing this will calculate an average latency for all connected peers and set the monitoring delay time accordingly, based on one-way or round-trip choice selection"));
+        autoButton.setTooltip(TRANS("Sets the delay to how late the other players on the stage hear you, averaged over them. Fine-tune with the slider from there."));
 
         linkButton.setButtonText(TRANS("Link Delay Time with other inputs"));
         linkButton.onClick = [this]() {
@@ -68,7 +68,6 @@ public:
 
         addAndMakeVisible(timeLabel);
         addAndMakeVisible(timeSlider);
-        addAndMakeVisible(autoModeChoice);
         addAndMakeVisible(autoButton);
         addAndMakeVisible(linkButton);
 
@@ -122,8 +121,7 @@ public:
         autoBox.flexDirection = FlexBox::Direction::row;
         autoBox.items.add(FlexItem(12, 4).withMargin(0));
         autoBox.items.add(FlexItem(autobuttwidth, minitemheight, autoButton).withMargin(0).withFlex(1));
-        autoBox.items.add(FlexItem(8, 4).withMargin(0));
-        autoBox.items.add(FlexItem(buttwidth, minitemheight, autoModeChoice).withMargin(0).withFlex(0.5));
+        autoBox.items.add(FlexItem(12, 4).withMargin(0));
 
         optionBox.items.clear();
         optionBox.flexDirection = FlexBox::Direction::row;
@@ -191,9 +189,9 @@ public:
             headerComponent.repaint();
         }
         else if (buttonThatWasClicked == &autoButton) {
-            auto autoScalar = autoModeChoice.getSelectedItemIndex() == 1 ? 2.0f : 1.0f;
-
-            mParams.delayTimeMs = processor.getMonitoringDelayTimeFromAvgPeerLatency(autoScalar);
+            // How late the others on the stage hear you, averaged; fine-tune with the slider from there.
+            const double fromStage = processor.getMonitoringDelayTimeFromStage();
+            if (fromStage >= 0.0) mParams.delayTimeMs = (float) fromStage;
 
             updateParams(mParams);
         }

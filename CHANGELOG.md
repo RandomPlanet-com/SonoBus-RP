@@ -2,6 +2,35 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-12
+
+### SonoBus RP Hub 1.3.0
+
+- Stage directory: a new option in the hub's Settings lets you list your stage, so players can find it in the
+  STAGES tab of the player. Listing is off until you turn it on. You set the city, country, genre and a one-line
+  description; a stage with a password is shown as locked. Player names are shown for an open stage and hidden for
+  a locked one unless you choose otherwise.
+- Stage limits: the most players and the most channels one player may send (20 and 12 unless you change them).
+- Remove a player: the player is kept out for one hour.
+- The Players table has an Instrument column.
+- The hub's buffer for a player on the local network returns to normal within seconds after a stumble.
+- "Group" is now called "stage" everywhere.
+- Fewer lines in the log after lost packets.
+
+### SonoBus RP 1.3.0
+
+- New STAGES tab in Connect: the public stages with your ping to each one. Sort by any column, open a stage to
+  see who is playing, and join from the list.
+- The top line shows Ping, Delay and a Link light. Delay is the whole loop: network, buffering and your audio
+  interface. Point at the line for the details.
+- After a rough patch on the line the receive buffer returns to normal within seconds instead of minutes.
+- Recents has its own tab. "Group" is now called "stage" everywhere, and invite links with "stage=" are understood.
+- You can set your instrument next to your name. It is shown in the stage list and to the stage's host.
+- Monitor delay: "Set From Stage" sets the time from how late the other players hear you.
+- Names are limited to 30 characters.
+- Windows: the player can install an update itself.
+- Fixed: squeezed text in the update window, the cut-off version line in About, and updates that failed to download.
+
 ## 2026-11-11
 
 ### SonoBus RP Hub 1.2.9

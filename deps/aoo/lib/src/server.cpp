@@ -57,6 +57,11 @@ namespace net {
 
 char * copy_string(const char * s);
 
+// Hub hooks, defined further down.
+extern std::atomic<server*> g_sbServer;
+extern std::mutex g_sbKickMutex;
+extern std::vector<std::string> g_sbKickNames;
+static void sb_conn_event(const char* kind, const ip_address& a, const std::string& user, const std::string& group, const std::string& detail);
 } // net
 } // aoo
 
@@ -164,6 +169,7 @@ aoonet_server * aoonet_server_new(int port, int32_t *err) {
 aoo::net::server::server(int tcpsocket, int udpsocket)
     : tcpsocket_(tcpsocket), udpsocket_(udpsocket)
 {
+    g_sbServer.store(this, std::memory_order_release);
 #ifdef _WIN32
     waitevent_ = CreateEvent(NULL, FALSE, FALSE, NULL);
     tcpevent_ = WSACreateEvent();
@@ -186,6 +192,8 @@ void aoonet_server_free(aoonet_server *server){
 }
 
 aoo::net::server::~server() {
+    server* self = this;
+    g_sbServer.compare_exchange_strong(self, nullptr);
 #ifdef _WIN32
     CloseHandle(waitevent_);
     WSACloseEvent(tcpevent_);
@@ -217,6 +225,20 @@ int32_t aoo::net::server::run(){
             std::unique_ptr<icommand> cmd;
             commands_.read(cmd);
             cmd->perform(*this);
+        }
+
+        std::vector<std::string> kicks;
+        {
+            std::lock_guard<std::mutex> lk(g_sbKickMutex);
+            kicks.swap(g_sbKickNames);
+        }
+        for (auto& name : kicks){
+            for (auto& c : clients_){
+                if (c->is_active() && c->sb_user_name() == name){
+                    sb_conn_event("kicked", c->source_addr(), name, "", "removed by the host");
+                    c->close(true);
+                }
+            }
         }
     }
 
@@ -353,6 +375,14 @@ std::mutex g_sbGroupPolicyMutex;
 bool g_sbGroupPolicyOn = false;
 bool g_sbGroupPolicyOpen = true;   // hub has no password: anyone with the group name gets in, whatever password they send
 std::string g_sbGroupPolicyName, g_sbGroupPolicyPwd;
+// Stage limits and kicks, decided by the hub. The gate returns 1 to admit; 0 with a reason for the player.
+typedef int (*sb_join_gate_fn)(const char* ip, const char* user, int others, char* why, int whylen);
+std::atomic<sb_join_gate_fn> g_sbJoinGate{nullptr};
+std::mutex g_sbKickMutex;
+std::vector<std::string> g_sbKickNames;   // closed by the run loop, which owns the client list
+std::atomic<server*> g_sbServer{nullptr};
+std::atomic<int> g_sbStageMaxPlayers{0};
+static const char* const kSbHubUser = "SonoBus-Hub";   // the hub's own member of its group
 // Connection/security events (tcp connect, login, join/refusals, leave, disconnect, bad
 // messages) -> SonobusHubServer::connLog (timestamped [HUB-CONN] lines in hub.log + the web page's Log tab).
 typedef void (*sb_conn_event_fn)(const char* kind, const char* addr, const char* user, const char* group, const char* detail);
@@ -869,6 +899,31 @@ void server::receive_udp(){
                 if (fn) fn(buf, result, (const struct sockaddr *)&addr.address, (int)addr.length, udpsocket_);
                 continue;
             }
+            // Stage ping: "/sb/stage/ping" h:token -> "/sb/stage/pong" h:token i:players i:maxPlayers.
+            // No login needed; the reply is about the size of the request.
+            if (result >= 14 && result <= 64 && memcmp(buf, "/sb/stage/ping", 14) == 0){
+                try {
+                    osc::ReceivedPacket packet(buf, result);
+                    osc::ReceivedMessage msg(packet);
+                    auto it = msg.ArgumentsBegin();
+                    const osc::int64 token = (it != msg.ArgumentsEnd() && it->IsInt64()) ? it->AsInt64() : 0;
+                    int players = 0;
+                    {
+                        std::lock_guard<std::mutex> lk(g_sbGroupPolicyMutex);
+                        for (auto& g : groups_){
+                            if (g_sbGroupPolicyOn && g->name != g_sbGroupPolicyName) continue;
+                            for (auto& u : g->users()) if (u && u->name != kSbHubUser) ++players;
+                        }
+                    }
+                    char out[64];
+                    osc::OutboundPacketStream pong(out, sizeof(out));
+                    pong << osc::BeginMessage("/sb/stage/pong") << token << (int32_t)players
+                         << (int32_t)g_sbStageMaxPlayers.load(std::memory_order_relaxed) << osc::EndMessage;
+                    sendto(udpsocket_, pong.Data(), (int)pong.Size(), 0, (const struct sockaddr *)&addr.address, addr.length);
+                } catch (const osc::Exception&) {
+                }
+                continue;
+            }
             try {
                 osc::ReceivedPacket packet(buf, result);
                 osc::ReceivedMessage msg(packet);
@@ -1126,6 +1181,10 @@ client_endpoint::~client_endpoint(){
     WSACloseEvent(event);
 #endif
     close();
+}
+
+std::string client_endpoint::sb_user_name() const {
+    return user_ ? user_->name : std::string();
 }
 
 void client_endpoint::close(bool notify){
@@ -1393,7 +1452,27 @@ void client_endpoint::handle_group_join(const osc::ReceivedMessage& msg)
     server::error err;
     if (user_){
         auto grp = server_->get_group(name, password, is_public, err);
+        std::string refusal;
         if (grp){
+            bool member = false;
+            int others = 0;
+            for (auto& u : grp->users()){
+                if (!u) continue;
+                if (u.get() == user_.get()) member = true;
+                else if (u->name != kSbHubUser) ++others;
+            }
+            auto gate = g_sbJoinGate.load(std::memory_order_acquire);
+            if (!member && gate){
+                char why[256] = {0};
+                if (!gate(std::string(addr_.name()).c_str(), user_->name.c_str(), others, why, (int)sizeof(why))){
+                    refusal = why[0] ? why : "the host does not admit you right now";
+                }
+            }
+        }
+        if (grp && !refusal.empty()){
+            errmsg = refusal;
+            sb_conn_event("join-refused", addr_, user_->name, name, refusal);
+        } else if (grp){
             if (user_->add_group(grp)){
                 grp->add_user(user_);
                 server_->on_user_joined_group(*user_, *grp);
@@ -1553,4 +1632,19 @@ extern "C" void aoo_sb_set_conn_event_handler(aoo::net::sb_conn_event_fn fn){   
 }
 extern "C" void aoo_sb_set_fwprobe_req_handler(aoo::net::sb_fwprobe_req_fn fn){
     aoo::net::g_sbFwprobeReqHandler.store(fn, std::memory_order_release);
+}
+extern "C" void aoo_sb_set_join_gate(aoo::net::sb_join_gate_fn fn){
+    aoo::net::g_sbJoinGate.store(fn, std::memory_order_release);
+}
+extern "C" void aoo_sb_set_stage_max_players(int n){
+    aoo::net::g_sbStageMaxPlayers.store(n, std::memory_order_relaxed);
+}
+// Closes that player's connection on the server's own thread; the hub keeps them out through the join gate.
+extern "C" void aoo_sb_kick_user(const char* name){
+    if (!name || !*name) return;
+    {
+        std::lock_guard<std::mutex> lk(aoo::net::g_sbKickMutex);
+        aoo::net::g_sbKickNames.push_back(name);
+    }
+    if (auto s = aoo::net::g_sbServer.load(std::memory_order_acquire)) s->sb_wake();
 }
