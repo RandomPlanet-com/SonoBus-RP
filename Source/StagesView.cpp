@@ -22,6 +22,9 @@ enum { colOpen = 1, colLock, colStage, colCity, colCountry, colGenre, colPlayers
 const int kIndent = 22;
 const int kRowHeight = 28;
 
+// A list nobody touches slows down and stops pinging.
+const int kRefreshMs = 30000, kRetryMs = 15000, kIdleRefreshMs = 120000, kIdleAfterMs = 120000;
+
 float fontScale() { return SonoLookAndFeel::getFontScale(); }
 juce::String dot() { return juce::String::fromUTF8(" \xc2\xb7 "); }
 
@@ -101,23 +104,25 @@ public:
     }
 
     void run() override {
-        juce::int64 nextAt = 0;
+        juce::int64 lastAt = 0;
+        bool lastOk = false;
         while (! threadShouldExit()) {
             if (active.load()) {
-                if (refreshNow.exchange(false) || juce::Time::currentTimeMillis() >= nextAt) {
-                    const bool ok = fetch();
+                const int every = idle.load() ? kIdleRefreshMs : lastOk ? kRefreshMs : kRetryMs;
+                if (refreshNow.exchange(false) || juce::Time::currentTimeMillis() >= lastAt + every) {
+                    lastOk = fetch();
                     ++attempts;
-                    nextAt = juce::Time::currentTimeMillis() + (ok ? 30000 : 15000);
+                    lastAt = juce::Time::currentTimeMillis();
                     view.triggerAsyncUpdate();
-                    if (ok && pingAllowed.load() && ! threadShouldExit()) ping();
+                    if (lastOk && ! idle.load() && ! threadShouldExit()) ping();
                 }
             }
             wait(active.load() ? 500 : -1);   // asleep until the list is shown
         }
     }
 
-    std::atomic<bool> active { false }, refreshNow { false }, pingAllowed { true }, wantTest { false };
-    std::atomic<int> attempts { 0 };
+    std::atomic<bool> active { false }, refreshNow { false }, idle { false }, wantTest { false };
+    std::atomic<int> attempts { 0 }, pingsSent { 0 };
 
     void setMemory(const juce::File& file) {
         const juce::String saved = file.loadFileAsString().trim();
@@ -169,7 +174,11 @@ private:
             const juce::ScopedLock l(lock);
             from = base;
         }
-        const juce::String body = httpGet(from + "stages" + (wantTest.load() ? "?test=1" : ""), status);
+        // Test aid: SB_STAGES_FILE=<file> stands in for the directory's answer.
+        static const juce::String standIn = juce::SystemStats::getEnvironmentVariable("SB_STAGES_FILE", {});
+        juce::String body;
+        if (standIn.isNotEmpty()) { body = juce::File(standIn).loadFileAsString(); status = 200; }
+        else body = httpGet(from + "stages" + (wantTest.load() ? "?test=1" : ""), status);
         const juce::var v = status == 200 ? juce::JSON::parse(body) : juce::var();
         const auto* arr = v["stages"].getArray();
         if (arr == nullptr) {
@@ -265,6 +274,7 @@ private:
                 ++token;
                 for (int b = 0; b < 8; ++b) pkt[20 + b] = (char) ((token >> (8 * (7 - b))) & 0xff);
                 if (sock.write(t.host, t.port, pkt, (int) sizeof(pkt)) != (int) sizeof(pkt)) { silent = 2; break; }
+                ++pingsSent;
                 const double t0 = juce::Time::getMillisecondCounterHiRes();   // after the send, so a name lookup is not counted
                 float rtt = -1.0f;
                 while (! threadShouldExit()) {
@@ -291,7 +301,7 @@ private:
                 pings[t.id] = best;
             }
             view.triggerAsyncUpdate();
-            if (threadShouldExit() || ! pingAllowed.load()) break;
+            if (threadShouldExit() || idle.load() || ! active.load()) break;
         }
     }
 
@@ -378,6 +388,12 @@ public:
         text(colAbout, stage.about, kDim);
 
         const auto button = joinRect(ox, height).toFloat();
+        if (owner.isHere(stage)) {
+            g.setColour(kAccent);
+            g.setFont(juce::Font(12.5f * sc, juce::Font::bold));
+            g.drawText(TRANS("You are here"), button.toNearestInt().expanded(6, 0), juce::Justification::centred, false);
+            return;
+        }
         const bool can = ! full;
         const juce::String label = full ? TRANS("Full") : stage.locked ? TRANS("Password") : TRANS("Join");
         if (can && ! stage.locked) { g.setColour(juce::Colour(0xff1d3b3a)); g.fillRoundedRectangle(button, 4.0f); }
@@ -492,7 +508,7 @@ StagesView::StagesView()
 
     mSearch.setTextToShowWhenEmpty(TRANS("Search name, city, player"), juce::Colour(0x66ffffff));
     mSearch.setFont(juce::Font(14.0f * fontScale()));
-    mSearch.onTextChange = [this] { rebuild(); };
+    mSearch.onTextChange = [this] { touched(); rebuild(); };
     addAndMakeVisible(mSearch);
 
     mGenre.onChange = [this] { rebuild(); };
@@ -517,6 +533,7 @@ StagesView::StagesView()
 
     mRefresh.setButtonText(TRANS("Refresh"));
     mRefresh.onClick = [this] {
+        touched();
         mWorker->refreshNow = true;
         mWorker->notify();
     };
@@ -561,6 +578,8 @@ StagesView::StagesView()
     mTree.setRootItemVisible(false);
     addAndMakeVisible(mTree);
 
+    addMouseListener(this, true);   // any use of the list counts as a touch
+
     mWorker = std::make_unique<Worker>(*this);
     mWorker->startThread();
 
@@ -590,12 +609,47 @@ void StagesView::setActive(bool active)
 {
     if (mWorker->active.exchange(active) == active) return;
     if (active) {
+        mTouchedAt = juce::Time::getMillisecondCounter();
+        mIdle = false;
+        mWorker->idle = false;
         mWorker->refreshNow = true;
         mWorker->notify();
         startTimer(1000);
     } else {
         stopTimer();
     }
+}
+
+void StagesView::touched()
+{
+    mTouchedAt = juce::Time::getMillisecondCounter();
+    if (! mIdle) return;
+    mIdle = false;
+    mWorker->idle = false;
+    mWorker->refreshNow = true;
+    mWorker->notify();
+    updateStatus();
+}
+
+bool StagesView::isHere(const Stage& s) const
+{
+    const juce::String here = currentStage ? currentStage() : juce::String();
+    if (here.isEmpty() || s.name != here) return false;
+    const int port = currentPort ? currentPort() : 0;
+    return port <= 0 || port == s.port;
+}
+
+bool StagesView::joinByName(const juce::String& name)
+{
+    for (const auto& s : mStages)
+        if (s.name == name) { const Stage copy = s; touched(); requestJoin(copy); return true; }
+    return false;
+}
+
+juce::String StagesView::counters() const
+{
+    return "list requests " + juce::String(mWorker->attempts.load()) + ", pings sent " + juce::String(mWorker->pingsSent.load())
+         + (mWorker->active.load() ? (mIdle ? ", idle" : ", in use") : ", asleep");
 }
 
 juce::Rectangle<int> StagesView::columnRect(int columnId) const
@@ -696,7 +750,10 @@ void StagesView::tableSortOrderChanged(juce::TableHeaderComponent*) { rebuild();
 
 void StagesView::timerCallback()
 {
-    mWorker->pingAllowed = currentStage ? currentStage().isEmpty() : true;   // no pings while playing
+    if (! mIdle && juce::Time::getMillisecondCounter() - mTouchedAt > (juce::uint32) kIdleAfterMs) {
+        mIdle = true;
+        mWorker->idle = true;
+    }
     updateStatus();
     repaint(mFooter);
 }
@@ -839,6 +896,7 @@ void StagesView::updateStatus()
         if (mReached) {
             const juce::int64 age = juce::jmax((juce::int64) 0, (juce::Time::currentTimeMillis() - mFetchedAt) / 1000);
             t += dot() + TRANS("updated") + " " + juce::String(age) + " s " + TRANS("ago");
+            if (mIdle) t += dot() + TRANS("resting");
         } else {
             t += dot() + TRANS("the directory cannot be reached");
             c = kWarn;
@@ -850,6 +908,7 @@ void StagesView::updateStatus()
 
 void StagesView::requestJoin(const Stage& s)
 {
+    if (isHere(s)) { flash(TRANS("You are on this stage.")); return; }
     if (s.test)    { flash(TRANS("That is a made-up test stage. It cannot be joined.")); return; }
     if (isFull(s)) { flash(TRANS("That stage is full.")); return; }
     if (userName && userName().isEmpty()) { flash(TRANS("Enter your name in the Connect window first.")); return; }

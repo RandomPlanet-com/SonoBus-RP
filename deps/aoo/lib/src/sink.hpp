@@ -128,6 +128,7 @@ private:
 struct block_info {
     double sr;
     int32_t channel;
+    int32_t refill = 0;   // written by a recovery refill, not decoded from the stream
 };
 
 class sink;
@@ -168,6 +169,8 @@ public:
     int32_t get_rx_underruns() const { return (int32_t) rx_underruns_pub_.load(std::memory_order_relaxed); }   
     // Adaptive-depth decision ring for the client's universal auto log (aoo_opt_adapt_events).
     void adapt_events(aoo_adapt_events& out) const;
+    // Late arrivals of the last 60 s, measured against the stream's own schedule (aoo_opt_late_window).
+    void late_window(aoo_late_window& out);
     int32_t get_rx_pops() const { return (int32_t) rx_pops_pub_.load(std::memory_order_relaxed); }   // Current depth target (blocks), lock-free   // lock-free
 
     int32_t get_current_salt() const { return salt_; }
@@ -232,6 +235,11 @@ private:
     // skipped sequences arrive, one per block period, because the excess
     // lives in the audioqueue, which only its consumer can drain.
     void skip_ahead(int32_t n);
+    // Governor thresholds for target depth T (set-up, and when an iso depth changes in place).
+    void governor_thresholds(int32_t T);
+    // Sequence jump that counts as a break in the stream, and age at which a queued block is given up.
+    int32_t gap_limit() const;
+    bool late_can_wait(const sink& s, int32_t missing, int32_t next) const;
 
     void check_outdated_blocks();
 
@@ -300,6 +308,20 @@ private:
     // The hub's per-player hold model, in the player: a 60-s histogram of arrival gaps
     // (6 × 10-s slices, 1-ms buckets 0..64 + overflow) and a budget of late blocks per minute. "Need" = the
     // smallest gap H with at most <budget> gaps/min above it, + margin. A single burst cannot push it to the ceiling.
+    // Lateness against schedule: a block is late by its arrival time minus its due time, the due times being
+    // anchored on the earliest arrivals of the last 3 s. One rise and fall of that figure is one event, counted
+    // at its peak. Written by the network thread, read by any thread.
+    void late_track(const data_packet& d, double now);
+    static constexpr int32_t kLtSlices = 6, kLtEnv = 6;
+    double  lt_t0_ = -1, lt_block_s_ = 0, lt_env_t0_ = -1, lt_slice_t0_ = -1, lt_peak_ = 0;
+    double  lt_env_min_[kLtEnv] = {};
+    double  lt_event_ms_ = -1;           // the event closed by the newest block, ms; -1 = none
+    int32_t lt_seq0_ = 0, lt_env_idx_ = 0, lt_slice_ = 0;
+    bool    lt_in_ = false, lt_wait_ = false;
+    double  lt_last_peak_ = 0;
+    std::atomic<uint32_t> lt_hist_[kLtSlices][AOO_LATE_BUCKETS] = {};
+    std::atomic<uint32_t> lt_fine_[kLtSlices][AOO_LATE_FINE] = {};
+    std::atomic<uint32_t> lt_total_[kLtSlices] = {};
     static constexpr int32_t kAdaptHistSlices = 6, kAdaptHistBuckets = 66;   // bucket 65 = >= 65 ms
     uint16_t adapt_hist_[kAdaptHistSlices][kAdaptHistBuckets] = {};
     int32_t adapt_hist_slice_ = 0, adapt_hist_filled_ = 0;
@@ -327,6 +349,31 @@ private:
     double  drift_ewma_bps_ = 0;             // blocks/s the depth grows (+ = source faster than sink)
     double  drift_level_ewma_ = -1;          // slow depth average (blocks)
     double  drift_ppm_ = 0;                  // applied correction (ppm of source rate)
+    // Clock lock: the sender's clock against ours, from the offset between its sequence and our frame position at
+    // the moment a packet arrives. One value per second; the slope is the median over pairs a quarter window apart,
+    // so a step in the offset is not read as drift. Windows grow from 20 to 320 s and then start again.
+    static const int32_t kRegBins = 320;
+    static const int32_t kRegSmp = 128;
+    float   reg_bin_[kRegBins];
+    float   reg_smp_[kRegSmp];
+    int32_t reg_nb_ = 0, reg_ns_ = 0, reg_next_cp_ = 20, reg_y0_ = 0, reg_dirty_seen_ = 0;
+    int64_t reg_x0_ = 0, reg_xseen_ = -1;
+    double  reg_t0_ = -1, reg_last_ = -1, reg_block_until_ = -1, reg_bin_end_ = 0, reg_k_ = 0;
+    bool    reg_learned_ = false;
+    bool    drift_fast_tick(const sink& s, double now);
+    bool    reg_estimate(int32_t first, int32_t nb, double sink_sr, double block_frames, double& ppm, double& se) const;
+    double  reg_prev_ppm_ = 0, reg_prev_se_ = -1;   // the window's previous result; a result is applied only when it confirms it
+    void    reg_restart(double now);
+    void    reg_close_bin();
+    double  drift_entry_wall_ = 0;           // steady clock at the last process() entry (audio thread writes)
+    // Level trim: a few ppm that hold the depth at its target against what the clock lock cannot resolve.
+    double  lvl_sum_ = 0, lvl_ewma_ = 0, lvl_t_ = -1, drift_trim_ppm_ = 0;
+    int32_t lvl_n_ = 0, lvl_dirty_seen_ = 0, lvl_log_ = 0;
+    bool    lvl_init_ = false;
+    std::atomic<int32_t> cb_blocks_pub_{1};  // blocks one callback uses (audio thread writes when it changes)
+    int32_t cb_frames_seen_ = 0;
+    void    drift_level_tick(double now, int32_t depth, int32_t target);
+    void    drift_publish(){ drift_ratio_.store(1.0 + (drift_ppm_ + drift_trim_ppm_) * 1e-6, std::memory_order_relaxed); }
     int32_t drift_dirty_sec_ = 0;            // drains/recoveries this second -> skip the estimator
     // V2: windowed least-squares slope (one correction per window, hub-lock style)
     double  drift_win_t0_ = -1;  int32_t drift_n_ = 0;
@@ -337,6 +384,35 @@ private:
     double  adapt_strike_win_t0_ = -1e9;  int32_t adapt_strike_win_n_ = 0;   // LAN rolling 30-s strike window
     bool    refill_drained_ = true;       // The one-shot overshoot drain for the last refill has fired
     std::atomic<int32_t> refill_pending_{0};   // A silence refill just happened (network thread) → the governor drains any overshoot at once
+    // Audio thread. After a dry spell playback waits until the buffer is back at its depth; what arrived beyond
+    // that is the late part of what the line held back, and it is dropped from the front (gated_ is read by the
+    // network thread; the *_pub_ counters are its log).
+    std::atomic<bool> gated_{false};
+    bool    late_resync_ = true, dry_fade_on_ = true, gate_time_ = true;
+    int32_t gate_prev_ = 0, gate_dropped_ = 0;
+    int32_t gate_settle_ = 0;             // callbacks left in which a jump is still trimmed after the resume
+    std::atomic<int32_t> gate_refill_pub_{0};   // blocks a recovery refill wrote (network thread): not arrivals
+    std::atomic<int32_t> gate_lead_pub_{0};     // finished blocks that did not fit into the audio queue (network thread)
+    std::atomic<int64_t> gate_fast_us_{0};      // when the last packet of a held burst came in (network thread), 0 = none
+    double  gate_last_arr_ = -1;                // network thread: arrival of the last new block while holding
+    std::atomic<int32_t> percb_pub_{1};         // blocks one audio callback uses (audio thread)
+    int32_t percb_frames_ = 0;                  // callback size it was worked out for
+    int64_t gate_frames_ = 0;
+    // Concealment of a dry spell (audio thread). The last milliseconds that went to the resampler are kept; when the
+    // stream runs dry they are played backwards with a fade (the ring-out), and the first audio after the dry spell
+    // fades in across what is left of it.
+    std::vector<aoo_sample> hist_;        // ring of whole blocks, interleaved
+    int32_t hist_frames_ = 0, hist_wf_ = 0, hist_nf_ = 0;   // size, write position and fill, in frames
+    int32_t ro_total_ = 0, ro_span_ = 0, ro_left_ = 0, ro_pos_ = 0, ro_base_ = 0;   // ring-out, in frames
+    int32_t ro_total_pitch_ = 0, ro_period_ = 0;   // length when the sound has a pitch; its period (0 = none found)
+    int32_t ro_find_period(int32_t nchannels, int32_t samplerate) const;
+    int32_t fi_total_ = 0, fi_span_ = 0, fi_left_ = 0;                              // fade-in, in frames
+    bool    dry_ = false;                 // dry since the last block was fed
+    std::vector<aoo_sample> scratch_;
+    std::atomic<int32_t> gate_trim_pub_{0}, gate_wait_pub_{0}, gate_opens_pub_{0};
+    int32_t gate_opens_seen_ = 0;         // network thread
+    int32_t gov_bq_extra_ = 8;            // Blockqueue headroom the governor thresholds are derived from
+    int32_t iso_cap_blocks_ = 0;          // Iso sink: queues sized once for this depth (0 = sized for the current depth)
     double  refill_seen_t_ = -1e9;             // audio thread: when it first saw the flag
     int32_t drift_seq0_ = 0;  int64_t drift_frames0_ = 0;
     // Trace-only tallies of deliberate level moves: silence added by adaptive grows, blocks removed by
@@ -461,6 +537,7 @@ public:
 
     int32_t buffersize() const { return buffersize_; }
     int32_t iso_blocks() const { return iso_blocks_.load(std::memory_order_relaxed); }   // Per-sink (= per peer) iso depth, 0 = off
+    int32_t iso_max_blocks() const { return iso_max_blocks_.load(std::memory_order_relaxed); }
     int32_t adapt() const { return adapt_.load(std::memory_order_relaxed); }             // Per-sink adaptive depth, 0 = off, 1 = WAN profile, 2 = LAN profile
     bool dynamic_resampling_on() const { return dynamic_resampling_.load(std::memory_order_relaxed) != 0; }   // Trace
 
@@ -494,6 +571,7 @@ private:
     // options
     std::atomic<int32_t> buffersize_{ AOO_SINK_BUFSIZE };
     std::atomic<int32_t> iso_blocks_{ 0 };   // Aoo_opt_iso_blocks (set by SonoBus for LAN peers only)
+    std::atomic<int32_t> iso_max_blocks_{ 0 };   // Aoo_opt_iso_max_blocks
     std::atomic<int32_t> adapt_{ 0 };        // Aoo_opt_adapt (1 = WAN profile; 2 = LAN profile)
     std::atomic<int32_t> packetsize_{ AOO_PACKETSIZE };
     std::atomic<int32_t> resend_limit_{ AOO_RESEND_LIMIT };

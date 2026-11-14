@@ -31,12 +31,24 @@ public:
 
     std::function<void(const JoinRequest&)> onJoin;
     std::function<juce::String()> currentStage;   // the stage this player is in, empty when in none
+    std::function<int()> currentPort;             // the connection port of that stage, 0 when unknown
     std::function<juce::String()> userName;
     std::function<juce::String()> userInstrument;
 
     void setActive(bool active);   // the list refreshes only while it is showing
     void setDirectoryMemory(const juce::File& file);   // where a moved directory address is kept between runs
     void setWantTestStages(bool want);                 // also ask the directory for its made-up test stages
+    bool isHere(const Stage& s) const;                 // the stage this player is in
+    bool joinByName(const juce::String& name);         // the same as pressing Join on that row
+    juce::String counters() const;                     // list requests and pings sent so far
+    void touched();                                    // someone is using the list: full refresh rate
+
+    void mouseMove(const juce::MouseEvent&) override { touched(); }
+    void mouseDown(const juce::MouseEvent&) override { touched(); }
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override {
+        touched();
+        if (e.eventComponent == this) juce::Component::mouseWheelMove(e, w);
+    }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -75,6 +87,8 @@ private:
     juce::String mSelectedId, mNote;
     juce::uint32 mNoteUntil = 0;
     juce::int64 mFetchedAt = 0;
+    juce::uint32 mTouchedAt = 0;
+    bool mIdle = false;
     int mShown = 0, mShownPlayers = 0, mAttempts = 0;
     bool mReached = false, mEverReached = false, mTestData = false, mRebuilding = false;
 

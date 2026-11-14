@@ -7,6 +7,7 @@
 #include "SonobusPluginProcessor.h"
 #include "SonobusPlusVersion.h"
 #include "SbDataPaths.h"
+#include "SbTxHold.h"
 #include "SonobusPluginEditor.h"
 #include "SonobusHubMixControl.h"
 
@@ -865,7 +866,29 @@ struct SonobusAudioProcessor::RemotePeer {
 
 
 
+// Test aid (SbTxHold.h), off unless SB_TEST_TXHOLD is set in the launch environment or the taps file.
+static SbTxHold& sbTxHold();
+static int32_t endpoint_send_now(void *e, const char *data, int32_t size);
+
 static int32_t endpoint_send(void *e, const char *data, int32_t size)
+{
+    static const bool hold = sbTxHold().on();
+    if (hold) {
+        // A held datagram can outlive its endpoint: it carries the socket and the address.
+        SonobusAudioProcessor::EndpointState * endpoint = static_cast<SonobusAudioProcessor::EndpointState*>(e);
+        DatagramSocket * const owner = endpoint->owner;
+        const String ipaddr = endpoint->ipaddr;
+        const int port = endpoint->port;
+        const int result = sbTxHold().send(data, (int) size, [owner, ipaddr, port](const char* p, int n) {
+            return owner->write(ipaddr, port, p, n);
+        });
+        if (result > 0) endpoint->sentBytes += result + UDP_OVERHEAD_BYTES;
+        return result;
+    }
+    return endpoint_send_now(e, data, size);
+}
+
+static int32_t endpoint_send_now(void *e, const char *data, int32_t size)
 {
     SonobusAudioProcessor::EndpointState * endpoint = static_cast<SonobusAudioProcessor::EndpointState*>(e);
     int result = -1;
@@ -926,6 +949,24 @@ static inline const char* sb_taps_path() {
     return p.c_str();
 }
 static inline FILE* sb_taps_fopen() { return std::fopen(sb_taps_path(), "r"); }
+
+static SbTxHold& sbTxHold() {
+    static SbTxHold h;
+    static const bool ready = [] {
+        std::string v;
+        if (const char* e = std::getenv("SB_TEST_TXHOLD"); e && e[0]) v = e;
+        else if (FILE* f = sb_taps_fopen()) {
+            char line[256];
+            while (std::fgets(line, sizeof(line), f)) if (! std::strncmp(line, "SB_TEST_TXHOLD=", 15)) { v = line + 15; break; }
+            std::fclose(f);
+        }
+        h.configure(v.c_str());
+        if (h.on()) std::fprintf(stderr, "[SB-TEST] TX hold: %d ms (up to %d) every %d ms\n", h.holdMs, std::max(h.holdMs, h.maxMs), h.everyMs);
+        return true;
+    }();
+    (void) ready;
+    return h;
+}
 
 // SB_RECV_TIGHT tap (default ON). Same
 // mechanism as the other SB_* taps: /tmp/sb_taps.conf KEY=value lines (apps
@@ -17593,9 +17634,21 @@ struct Tap {
         if (f) return;
         const char* pth = tapConf(envPath); if (!pth || !pth[0]) return;
         f = fopen(pth, "wb"); if (!f) return;
-        setvbuf(f, nullptr, _IOFBF, 4 * 1024 * 1024);
         const char* sec = tapConf(envSecs); int secs = sec ? atoi(sec) : 30;
         if (secs <= 0) secs = 30;
+        // A short recording (up to 3 minutes) gets its whole file buffer here, every page touched, so recording
+        // itself neither allocates nor writes to disk. The buffer stays for the life of the file.
+        const size_t fallbackBytes = (size_t) (4 * 1024 * 1024);
+        char* whole = nullptr; size_t wholeBytes = 0;
+        if (secs <= 180 && sr > 0.0) {
+            wholeBytes = (size_t) ((double) secs * sr * 8.0) + 65536;
+            whole = (char*) std::malloc(wholeBytes);
+            if (whole != nullptr) std::memset(whole, 0, wholeBytes);
+        }
+        if (whole == nullptr || setvbuf(f, whole, _IOFBF, wholeBytes) != 0) {
+            std::free(whole);
+            setvbuf(f, nullptr, _IOFBF, fallbackBytes);
+        }
         framesLeft.store((long)(secs * sr));
     }
     inline void write(const float* L, const float* R, int n) {
@@ -17662,6 +17715,61 @@ struct ProbeInject {
         const int st = (int)(0.1 * sr);
         const int ns = (int)(chirp_s * sr);
         std::vector<float> t((size_t)jmax(n, 1), 0.0f);
+        // SB_PROBE_INJECT_FILE=<audio file>: the file (up to four minutes, mixed to mono, looped) in place of the
+        // click and chirp, for listening tests.
+        if (const char* fp = tapConf("SB_PROBE_INJECT_FILE"); fp && fp[0]) {
+            juce::AudioFormatManager fm;
+            fm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(juce::File(juce::String::fromUTF8(fp))));
+            if (rd != nullptr && rd->lengthInSamples > 1 && rd->sampleRate > 0 && rd->numChannels > 0) {
+                const int frames = (int) std::min<juce::int64>(rd->lengthInSamples, (juce::int64) (240.0 * rd->sampleRate));
+                juce::AudioBuffer<float> buf((int) rd->numChannels, frames);
+                rd->read(&buf, 0, frames, 0, true, true);
+                const double step = rd->sampleRate / sr;
+                const int outN = std::max(1, (int) ((double) (frames - 1) / step));
+                const int nch = buf.getNumChannels();
+                std::vector<float> m((size_t) outN, 0.0f);
+                const int fade = std::min(outN / 2, (int) (0.02 * sr));
+                for (int i = 0; i < outN; ++i) {
+                    const double x = (double) i * step;
+                    const int k = std::min(frames - 2, (int) x);
+                    const float fr = (float) (x - (double) k);
+                    float v = 0.0f;
+                    for (int c = 0; c < nch; ++c) { const float* d = buf.getReadPointer(c); v += d[k] + (d[k + 1] - d[k]) * fr; }
+                    float g = (float) (amp * 2.0) / (float) nch;   // the default gain plays the file as it is
+                    if (i < fade) g *= (float) i / (float) fade;
+                    if (i >= outN - fade) g *= (float) (outN - 1 - i) / (float) fade;
+                    m[(size_t) i] = g * v;
+                }
+                framesLeft = -1;
+                tab.swap(m); len = outN; tabRate = sr; pos = 0; blockPos = 0;
+                return;
+            }
+        }
+        // SB_PROBE_INJECT_TONE=<Hz>: a steady sine in place of the click and chirp (whole cycles per period), so
+        // every hole and splice on the way shows in a recording.
+        if (const char* tn = tapConf("SB_PROBE_INJECT_TONE"); tn && atoi(tn) > 0) {
+            const double f = (double) atoi(tn);
+            // SB_PROBE_INJECT_BEAT=1: the tone drops to a third and a short knock sounds every half second (120 a
+            // minute), so timing jumps are heard as well as gaps.
+            const char* bt = tapConf("SB_PROBE_INJECT_BEAT");
+            const bool beat = bt && atoi(bt) > 0;
+            const double tamp = beat ? amp / 3.0 : amp;
+            for (int i = 0; i < n; ++i) t[(size_t)i] = (float)(tamp * std::sin(2.0 * pi * f * (double)i / sr));
+            if (beat) {
+                const int step = (int)(0.5 * sr), len = (int)(0.012 * sr);
+                for (int b0 = 0; b0 + len < n; b0 += step)
+                    for (int i = 0; i < len; ++i) {
+                        const double env = std::exp(-(double)i / (0.003 * sr));
+                        t[(size_t)(b0 + i)] += (float)(amp * env * std::sin(2.0 * pi * 1500.0 * (double)i / sr));
+                    }
+            }
+            const char* sec0 = tapConf("SB_PROBE_INJECT_SECS");
+            const long secs0 = sec0 && *sec0 ? atol(sec0) : 0;
+            framesLeft = secs0 > 0 ? (long)((double)secs0 * sr) : -1;
+            tab.swap(t); len = n; tabRate = sr; pos = 0; blockPos = 0;
+            return;
+        }
         // click: 1 ms raised-cosine burst at t=0 = 2nd half of hanning(2*nc) x sign(3 kHz sine)
         const double kclick = 2.0 * pi * 3000.0;
         const double Mc = (double)(2 * nc);

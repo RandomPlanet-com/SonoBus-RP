@@ -6,6 +6,7 @@
 #include "SonobusHubMixControl.h"
 #include "SonobusHubLayout.h"   
 #include "SonobusHubSettings.h"
+#include "SbTxHold.h"
 #include "aoo/aoo_pcm.h"
 #include "aoo/aoo_opus.h"
 #include "oscpack/osc/OscReceivedElements.h"
@@ -189,7 +190,31 @@ static std::atomic<uint64_t> gHubSendErrors{0};
 // see HubEndpoint::dest); the error path adds two relaxed RMWs and a relaxed store, with no log,
 // lock or allocation, so ECONNREFUSED storms from a vanished peer cost only the failed syscall
 // until peer-timeout removes the peer.
+// Test aid (SbTxHold.h), off unless SB_TEST_TXHOLD is set in the environment or the hub's taps file.
+static std::string hub_tap_str(const char* name, const char* def);
+static SbTxHold& hub_txhold() {
+    static SbTxHold h;
+    static const bool ready = (h.configure(hub_tap_str("SB_TEST_TXHOLD", "").c_str()), true);
+    (void) ready;
+    return h;
+}
+static inline int32_t hub_send_bare_now(HubEndpoint* ep, const char* data, int32_t size);
 static inline int32_t hub_send_bare(HubEndpoint* ep, const char* data, int32_t size) {
+    static const bool hold = hub_txhold().on();
+    if (hold) {
+        // A held datagram can outlive its peer: it carries the address and goes out on the shared socket.
+        const HubDest* d = ep->dest.load(std::memory_order_acquire);
+        const int fd = ep->socketFd;
+        const struct sockaddr_storage addr = d->addr;
+        const socklen_t len = d->addrlen;
+        ep->sentBytes += size;
+        return (int32_t) hub_txhold().send(data, (int) size, [fd, addr, len](const char* p, int n) {
+            return (int) ::sendto(fd, p, (size_t) n, 0, (const struct sockaddr*) &addr, len);
+        });
+    }
+    return hub_send_bare_now(ep, data, size);
+}
+static inline int32_t hub_send_bare_now(HubEndpoint* ep, const char* data, int32_t size) {
     const HubDest* d = ep->dest.load(std::memory_order_acquire);
     ssize_t result = d->connFd >= 0
         ? ::send(d->connFd, data, (size_t)size, 0)
@@ -270,6 +295,7 @@ static int32_t hub_endpoint_send_impl(void* user, const char* data, int32_t size
     return hub_send_bare(ep, data, size);
 }
 
+// The control client's datagrams are not held by the test aid.
 static int32_t hub_client_send_impl(void* user, const char* data, int32_t size, void* raddr) {
     auto* ep = static_cast<HubEndpoint*>(user);
     if (ep->socketFd < 0) return -1;
@@ -281,6 +307,7 @@ static int32_t hub_client_send_impl(void* user, const char* data, int32_t size, 
 }
 
 SonobusHubServer::SonobusHubServer() {
+    (void) hub_txhold();   // read the switch here, not on a send thread
     // The pacer's raw handle starts on the
     // initial (empty, gen 0) snapshot owned by mPeerSnapshot.
     mPacerSnapPtr.store(mPeerSnapshot.get(), std::memory_order_release);
@@ -2050,6 +2077,31 @@ static bool hub_hold_fine(){
     static const bool v = (hub_tap_int("SB_HUB_HOLD_FINE", 0) == 1);
     return v;
 }
+// SB_HOLD_LATENESS=1: the hold is sized from late events against the stream's own schedule (measured in the sink),
+// not from the gaps between arrivals.
+static bool hub_hold_lateness(){
+    static const bool v = (hub_tap_int("SB_HOLD_LATENESS", 0) == 1);
+    return v;
+}
+static bool hub_hold_lateness_log(){   // 1 or 2: the sink measures, the 10-s pass logs what it saw
+    static const bool v = (hub_tap_int("SB_HOLD_LATENESS", 0) >= 1);
+    return v;
+}
+// After a join the hold grows at the first dry spells, keeps growing for cause until the commit, and quick
+// jump and commit come at fixed times after the join. SB_HOLD_EARLY_REACT=0 = former behaviour.
+static bool hub_hold_early(){
+    static const bool v = (hub_tap_int("SB_HOLD_EARLY_REACT", 1) == 1);
+    return v;
+}
+// SB_HOLD_ALLOW_PER_MIN=<n>: late events a minute the hold does not cover. Unset = the rules in force.
+static bool hub_hold_allow_set(){
+    static const bool v = hub_tap_double("SB_HOLD_ALLOW_PER_MIN", -1.0) >= 0.0;
+    return v;
+}
+static double hub_hold_allow(double def){
+    static const double v = hub_tap_double("SB_HOLD_ALLOW_PER_MIN", -1.0);
+    return v >= 0.0 ? v : def;
+}
 // SB_HUB_HOLD_FOLLOW=1: the hold also grows when the measured target stays a block or more above it for 30 s.
 static bool hub_hold_follow(){
     static const bool v = (hub_tap_int("SB_HUB_HOLD_FOLLOW", 0) == 1);
@@ -2061,6 +2113,12 @@ static bool hub_hold_fast_decay(){
     return v;
 }
 static int32_t hub_hold_to_blocks(double ms, double blockMs){ return std::max<int32_t>(2, (int32_t) std::ceil(ms / blockMs - 1e-6)); }
+// The hold comes down only when the last minute had no more gaps above the lower level than the allowance, counting
+// the stalls longer than the ceiling too. SB_HUB_HOLD_DECAY_GATE=0 leaves those stalls out (the former rule).
+static bool hub_hold_decay_gate(){
+    static const bool v = (hub_tap_int("SB_HUB_HOLD_DECAY_GATE", 1) == 1);
+    return v;
+}
 // SB_HUB_RX_RT=1: the receive thread asks for real-time scheduling (macOS).
 static bool hub_rx_rt(){
     static const bool v = hub_tap_int("SB_HUB_RX_RT", 0) == 1;
@@ -2508,6 +2566,12 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
             int32_t two = 2;
             peer->sink->set_option(aoo_opt_adapt, &two, sizeof(int32_t));
             std::cout << "[HUB-ADAPT] peer='" << userName << "' LAN sink adaptive, zero tolerance (starts at " << initialMs << " ms)\n";
+        }
+        if (!peer->isLan && hub_hold_blocks()){
+            // The hold moves between the floor and the ceiling: tell the sink the ceiling so every change is in place.
+            const double blockMsC = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
+            int32_t mx = hub_hold_to_blocks(kHoldCeilMs, blockMsC);
+            peer->sink->set_option(aoo_opt_iso_max_blocks, &mx, sizeof(int32_t));
         }
         peer->sink->set_buffersize((int32_t)initialMs);
         if (!peer->isLan && hub_hold_blocks()){
@@ -3845,6 +3909,7 @@ int32_t SonobusHubServer::hub_sink_event_handler(void* user, const aoo_event** e
         // against removePeer.
         HubPeer* peerPtr = ctx->peer;
         if (!peerPtr || !peerPtr->sink) continue;
+        peerPtr->fmtEvents.fetch_add(1, std::memory_order_relaxed);
 
         // Pull the new format from the sink. Returns >0 on success.
         aoo_format_storage f{};
@@ -4174,8 +4239,12 @@ void SonobusHubServer::audioProcessThread() {
     // The deadline is kept in fractional ticks (double accumulator, rounded only at the wait), since
     // truncating the block period to whole mach ticks is itself a 62.5 ppm error (32/48000 s at 24 MHz is
     // 16000 ticks, 15999 after truncating blockNs), and so the clock lock can trim the period continuously.
+    // Test aid, off unless set: SB_TEST_HUB_CLOCK_PPM runs this hub's block clock that many ppm fast, to give
+    // every player a known clock difference to correct. Use with SB_HUB_CLOCK_LOCK=0.
+    static const double testClockPpm = hub_tap_double("SB_TEST_HUB_CLOCK_PPM", 0.0);
     const double blockTicksF0 = ((double)mBlockSize / (double)std::max(1, mSampleRate)) * 1e9
-                                * (double)tb.denom / (double)tb.numer;
+                                * (double)tb.denom / (double)tb.numer * (1.0 - testClockPpm * 1e-6);
+    if (testClockPpm != 0.0) std::cout << "[HUB-CLOCK] TEST: block clock runs " << testClockPpm << " ppm fast\n";
     double blockTicksF = blockTicksF0;
     double deadlineF = 0.0;
     const uint64_t blockTicksNominal = (uint64_t) llround(blockTicksF0);
@@ -5189,6 +5258,114 @@ void SonobusHubServer::statsWriterThread() {
     // scan, once a second (a dead socket = a deaf listener until healed).
     auto nextHealScan = clock::now() + std::chrono::seconds(1);
 
+    // Apply hold changes outside mPeerMutex. In whole-block mode the sink takes the new depth in place
+    // (a deeper hold is topped up, a shallower one is one splice); a set_buffersize resets its queue.
+    auto applyHolds = [&](std::vector<std::tuple<std::shared_ptr<HubPeer>, double, int>>& list) {
+        for (auto& a : list) {
+            auto& pp = std::get<0>(a);
+            double ms = std::get<1>(a);
+            const int kind = std::get<2>(a);
+            if (hub_hold_blocks()) {
+                const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
+                int32_t nb = hub_hold_to_blocks(ms, blockMs);
+                ms = nb * blockMs;
+                std::lock_guard<std::mutex> sl(pp->sinkLock);
+                if (pp->sink) pp->sink->set_option(aoo_opt_iso_blocks, &nb, sizeof(int32_t));
+            } else {
+                std::lock_guard<std::mutex> sl(pp->sinkLock);
+                if (pp->sink) pp->sink->set_buffersize((int32_t) std::lround(ms));
+            }
+            double prev = pp->abufCurrentMs;
+            pp->abufCurrentMs = ms;
+            if (kind != 6 && kind != 10) pp->abufCommitted = true;   // QUICK and EARLY keep measuring until the COMMIT
+            pp->holdLastChangeMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::cout << "[HUB-HOLD] peer='" << pp->userName << "' "
+                      << (kind == 0 ? "COMMIT" : kind == 1 ? "GROW" : kind == 2 ? "MODE" :  kind == 4 ? "GROW-EMERGENCY" : kind == 5 ? "DECAY" : kind == 7 ? "GROW-STALL" : kind == 8 ? "FOLLOW" : kind == 9 ? "DECAY-FAST" : kind == 10 ? "EARLY" : "QUICK") << " hold "
+                      << std::fixed << std::setprecision(1) << prev << " -> " << ms << " ms\n";
+        }
+    };
+    // The 60-s window the hold reads: with lateness sizing it comes from the player's sink (late events against
+    // the stream's schedule) and replaces the arrival-gap window. clear = drop what was collected so far.
+    auto holdLateWindow = [&](HubPeer* p, HubPeer::JitterStats::GapWindow* w, bool clear) {
+        if (!hub_hold_lateness() || !p || !p->sink || !p->persistentEndpoint) return;
+        aoo_late_window lw; lw.clear = clear ? 1 : 0;
+        if (p->sink->get_sourceoption(p->persistentEndpoint, 1 /* kSbClientOurId */, aoo_opt_late_window, &lw, (int32_t) sizeof(lw)) <= 0) return;
+        if (!w) return;
+        w->total = lw.total; w->maxMs = lw.max_ms;
+        for (int b = 0; b < HubPeer::JitterStats::kGapBuckets; ++b) w->above[b] = lw.above[b];
+        for (int b = 0; b < HubPeer::JitterStats::kFineBuckets; ++b) w->aboveFine[b] = lw.above_fine[b];
+    };
+    // Early reaction, five times a second for WAN players that have not committed yet. Before the commit one
+    // event is not evidence: a step up needs dry spells at more separate moments than a minute's allowance
+    // (a burst of them inside one moment is one event), and the largest gap sets the hold only when a second
+    // one reaches at least half of it. The join transient is dropped at 5 s, the quick jump comes 9 s later,
+    // the commit at its fixed time. The 10-s pass owns the hold after that.
+    auto holdEarlyTick = [&]() {
+        std::vector<std::tuple<std::shared_ptr<HubPeer>, double, int>> early;
+        const int64_t nowMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
+        const double marginMs = hub_hold_margin_ms() + blockMs;
+        const double floorMs = hub_hold_floor_ms(kHoldFloorMs);
+        const bool holdBlocks = hub_hold_blocks();
+        auto holdQuant = [&](double ms) { return holdBlocks ? hub_hold_to_blocks(ms, blockMs) * blockMs : ms; };
+        const double allowPerMin = (mHoldMode.load(std::memory_order_relaxed) == 1) ? 0.0 : hub_hold_allow(kHoldJamPerMin);
+        const uint32_t dryNeeded = (uint32_t) std::floor(allowPerMin) + 1;
+        {
+            std::shared_lock<std::shared_mutex> lock(mPeerMutex);
+            for (auto& p : mPeers) {
+                if (!p || !p->active || p->isLan || p->abufCommitted || p->abufCurrentMs <= 0.0 || !p->sink || !p->persistentEndpoint) continue;
+                const int64_t age = nowMs - p->joinedAtMs;
+                if (!p->holdGapsCleared && age >= 5000) {   // Drop the join transient
+                    p->jstats.clearGaps(); holdLateWindow(p.get(), nullptr, true); p->holdGapsCleared = true; p->holdClearedAtMs = nowMs;
+                    continue;
+                }
+                auto gw = p->jstats.gapWindow();
+                holdLateWindow(p.get(), &gw, false);
+                const uint32_t uncoverable = gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int) kHoldCeilMs)];
+                auto level = [&](uint32_t allowed) {   // smallest whole ms that leaves at most `allowed` events above it
+                    int H = 1;
+                    for (H = 1; H < HubPeer::JitterStats::kGapBuckets - 1; ++H) if (gw.above[H] - std::min(gw.above[H], uncoverable) <= allowed) break;
+                    return H;
+                };
+                auto holdFor = [&](int H) { return holdQuant(std::min(kHoldCeilMs, std::max(floorMs, (double) H + marginMs))); };
+                auto cover = [&](uint32_t allowed) {   // the hold for what the window shows; a lone largest event is left out
+                    const int h0 = level(allowed);
+                    if (allowed > 0) return holdFor(h0);
+                    const int h1 = level(1);
+                    return holdFor(2 * h1 >= h0 ? h0 : h1);
+                };
+                // Dry spells of the sink, without the restarts a format message causes (a stream start has several).
+                int32_t dryRaw = 0; int32_t sz = (int32_t) sizeof(dryRaw);
+                const bool haveDry = p->sink->get_sourceoption(p->persistentEndpoint, 1 /* kSbClientOurId */, aoo_opt_rx_underruns, &dryRaw, sz) > 0;
+                const uint32_t fmtSeen = p->fmtEvents.load(std::memory_order_relaxed);
+                const uint32_t dryNow = (uint32_t) dryRaw > fmtSeen ? (uint32_t) dryRaw - fmtSeen : 0u;
+                if (haveDry && dryNow > p->holdEarlyDry) { p->holdEarlyDry = dryNow; ++p->holdEarlyDryTicks; }
+                const double windowSec = p->holdGapsCleared ? (double)(nowMs - p->holdClearedAtMs) / 1000.0 : 0.0;
+                if (p->holdGapsCleared && !p->holdQuickDone && windowSec >= 9.0 && gw.total >= 100) {
+                    // Quick jump: up to what the window shows. Down only when the window shows at most a third of
+                    // what the early steps answered (they answered the join, not the line); the commit decides the rest.
+                    const double quick = cover(0);
+                    const bool up = quick >= p->abufCurrentMs + 0.5;
+                    const bool down = quick <= p->abufCurrentMs - 0.5 && 3.0 * (quick - floorMs) <= (p->abufCurrentMs - floorMs);
+                    if (up || down) { early.push_back({p, quick, 6}); p->holdEarlyDryTicks = 0; }
+                    p->holdQuickDone = true;
+                } else if (nowMs >= p->holdMeasureUntilMs && windowSec >= 55.0 && gw.total >= 1000) {
+                    // COMMIT. The window counts as the full minute here, as it does in the 10-second pass.
+                    early.push_back({p, holdFor(level((uint32_t) std::floor(allowPerMin))), 0});
+                } else if (gw.total >= 100 && p->holdEarlyDryTicks >= dryNeeded) {
+                    // Before the commit: repeated dry spells are the cause to grow, to what the window shows.
+                    p->holdEarlyDryTicks = 0;
+                    const uint32_t allowed = p->holdQuickDone ? (uint32_t) std::floor(allowPerMin * std::min(60.0, windowSec) / 60.0) : 0u;
+                    const double need = cover(allowed);
+                    if (need >= p->abufCurrentMs + blockMs - 0.01) early.push_back({p, need, 10});
+                }
+            }
+        }
+        applyHolds(early);
+    };
+
     while (mRunning.load()) {
         // Sleep in 200ms chunks so shutdown isn't blocked by a full 5s sleep.
         auto now = clock::now();
@@ -5196,6 +5373,7 @@ void SonobusHubServer::statsWriterThread() {
             auto remain = nextTick - now;
             auto step = std::min<std::chrono::nanoseconds>(remain, std::chrono::milliseconds(200));
             std::this_thread::sleep_for(step);
+            if (hub_hold_early()) holdEarlyTick();
             // Drain the audio thread's log ring on
             // every 200ms step, not just the 5s tick — keeps [HUB-CHIRP]/
             // [HUB-RESAMP]/[HUB-AUDIO] near-real-time for live tailing and
@@ -5440,10 +5618,18 @@ void SonobusHubServer::statsWriterThread() {
                     auto holdQuant = [&](double ms) { return holdBlocks ? hub_hold_to_blocks(ms, blockMs) * blockMs : ms; };
                     const int mode = mHoldMode.load(std::memory_order_relaxed);   // 0 Jam, 1 Print
                     if (!p->holdGapsCleared && nowMs - p->joinedAtMs >= 5000) {   // Drop the join transient
-                        p->jstats.clearGaps(); p->holdGapsCleared = true; p->holdClearedAtMs = nowMs;
+                        p->jstats.clearGaps(); holdLateWindow(p.get(), nullptr, true); p->holdGapsCleared = true; p->holdClearedAtMs = nowMs;
                     }
                     auto gw = p->jstats.gapWindow();
                     p->jstats.rotateGapSlice();
+                    holdLateWindow(p.get(), &gw, false);
+                    if (hub_hold_lateness_log() && p->sink && p->persistentEndpoint) {
+                        aoo_late_window lw; lw.clear = 0;
+                        if (p->sink->get_sourceoption(p->persistentEndpoint, 1 /* kSbClientOurId */, aoo_opt_late_window, &lw, (int32_t) sizeof(lw)) > 0)
+                            std::cout << "[HUB-LATE] peer='" << p->userName << "' late events in 60 s: >1ms=" << lw.above[1] << " >2ms=" << lw.above[2] << " >4ms=" << lw.above[4]
+                                      << " >8ms=" << lw.above[8] << " >16ms=" << lw.above[16] << " max=" << std::fixed << std::setprecision(0) << lw.max_ms << " ms blocks=" << lw.total << "\n";
+                    }
+                    const double allowPerMin = hub_hold_allow(kHoldJamPerMin);
                     // Target hold for THIS link from the last 60 s: smallest integer H (ms) such that the
                     // number of gaps longer than H stays within the mode's allowance, scaled to the window.
                     double target = -1.0;
@@ -5454,7 +5640,7 @@ void SonobusHubServer::statsWriterThread() {
                     const double windowSec = p->holdGapsCleared ? std::min(60.0, (double)(nowMs - p->holdClearedAtMs) / 1000.0) : 0.0;
                     if (gw.total >= 1000 && windowSec >= 55.0) {
                         const double windowMin = windowSec / 60.0;
-                        const uint32_t allowed = (mode == 1) ? 0u : (uint32_t) std::floor(kHoldJamPerMin * windowMin);
+                        const uint32_t allowed = (mode == 1) ? 0u : (uint32_t) std::floor(allowPerMin * windowMin);
                         const uint32_t uncoverable = gw.above[std::min(HubPeer::JitterStats::kGapBuckets - 1, (int) kHoldCeilMs)];   // Stalls > ceiling never set the target
                         int H = 1;
                         for (H = 1; H < HubPeer::JitterStats::kGapBuckets - 1; ++H) if (gw.above[H] - std::min(gw.above[H], uncoverable) <= allowed) break;
@@ -5475,7 +5661,7 @@ void SonobusHubServer::statsWriterThread() {
                     const uint32_t lostNow = p->blkLostTotal.load(std::memory_order_relaxed);
                     static thread_local std::unordered_map<int32_t, uint32_t> lastLost;   // per peer id, stats thread only
                     const uint32_t lost = lostNow - lastLost[p->id]; lastLost[p->id] = lostNow;
-                    const double limitPerMin = (mode == 1) ? 0.0 : kHoldJamPerMin;
+                    const double limitPerMin = (mode == 1) ? 0.0 : allowPerMin;
                     if (!p->abufCommitted) {
                         // QUICK — after ~10 s of clean measurement jump straight to the hold that covers
                         // every gap seen so far (no allowance yet); a clean link stays at the floor, a rough one jumps once.
@@ -5524,9 +5710,15 @@ void SonobusHubServer::statsWriterThread() {
                         const uint32_t newLate = (lateNow > p->holdLatePrev) ? (lateNow - p->holdLatePrev) : 0u;
                         p->holdLatePrev = lateNow;
                         bool decided = false;   // ONE hold decision per peer per sample — emergency > grow > decay
-                        if (newLate >= kHoldEmergencyLate && p->abufCurrentMs < kHoldCeilMs - 0.5
+                        // With an explicit allowance, events within it are not a cause to grow.
+                        const uint32_t allowedNow = (uint32_t) std::floor(allowPerMin * std::max(0.0, windowSec) / 60.0);
+                        const bool overAllowance = !hub_hold_allow_set() || allLate > allowedNow;
+                        const double stallGrowPerMin = hub_hold_allow_set() ? allowPerMin : kHoldStallGrowPerMin;
+                        if (overAllowance && newLate >= kHoldEmergencyLate && p->abufCurrentMs < kHoldCeilMs - 0.5
                             && nowMs - p->holdLastChangeMs >= kHoldEmergencyGapMs) {
-                            abufApply.push_back({p, std::min(kHoldCeilMs, p->abufCurrentMs * 1.33), 4});   // GROW now
+                            // With lateness sizing the measured target is what the line needs: one step to it.
+                            const double growTo = (hub_hold_lateness() && target > p->abufCurrentMs + 0.5) ? target : std::min(kHoldCeilMs, p->abufCurrentMs * 1.33);
+                            abufApply.push_back({p, growTo, 4});   // GROW now
                             for (int k = 0; k < 12; ++k) p->holdLateRing[k] = 0;
                             decided = true;
                         }
@@ -5535,7 +5727,7 @@ void SonobusHubServer::statsWriterThread() {
                         // still use the 2-min rule below; decay is untouched.
                         const uint32_t newStalls = (stallsNow > p->holdStallPrev) ? (stallsNow - p->holdStallPrev) : 0u;
                         p->holdStallPrev = stallsNow;
-                        if (!decided && newStalls > 0 && p->abufCurrentMs < kHoldCeilMs - 0.5
+                        if (!decided && overAllowance && newStalls > 0 && p->abufCurrentMs < kHoldCeilMs - 0.5
                             && nowMs - p->holdLastChangeMs >= kHoldStallStepGapMs) {
                             const double measuredGap = std::min(gw.maxMs, kHoldCeilMs);                     // the stall we just saw (60-s window max)
                             const double need = std::min(kHoldCeilMs, measuredGap + marginMs);
@@ -5551,10 +5743,18 @@ void SonobusHubServer::statsWriterThread() {
                         uint64_t lateSum = 0; for (int k = 0; k < 12; ++k) lateSum += p->holdLateRing[k];
                         // gw.above is a 60-s count sampled every 10 s → the 12-entry ring sums ~6 overlapping minutes; divide back to per-minute
                         const double late2minPerMin = (double) lateSum / 6.0 / 2.0;
-                        if (!decided && (late2minPerMin > limitPerMin || stall2minPerMin > kHoldStallGrowPerMin) && p->abufCurrentMs < kHoldCeilMs - 0.5
+                        if (!decided && (late2minPerMin > limitPerMin || stall2minPerMin > stallGrowPerMin) && p->abufCurrentMs < kHoldCeilMs - 0.5
                             && nowMs - p->holdLastChangeMs >= 120000) {
                             abufApply.push_back({p, std::min(kHoldCeilMs, p->abufCurrentMs * 1.33), 1});   // GROW one step
                             for (int k = 0; k < 12; ++k) { p->holdLateRing[k] = 0; p->holdStallRing[k] = 0; }
+                            decided = true;
+                        }
+                        // With lateness sizing the measured target is what the line needs beyond the allowance: a target a
+                        // block or more above the hold is followed at the next sample. Decay is as before.
+                        if (!decided && hub_hold_lateness() && target > p->abufCurrentMs + blockMs - 0.01 && p->abufCurrentMs < kHoldCeilMs - 0.5
+                            && nowMs - p->holdLastChangeMs >= 10000) {
+                            abufApply.push_back({p, target, 8});
+                            for (int k = 0; k < 12; ++k) p->holdLateRing[k] = 0;
                             decided = true;
                         }
                         // Follow a rising target. The rules above grow only when gaps are longer than the hold itself; a hold
@@ -5579,7 +5779,11 @@ void SonobusHubServer::statsWriterThread() {
                         // otherwise a need that sits on a grid edge moves the hold up and down by a block all session.
                         const double decayTarget = (hub_hold_fine() && needMs > 0.0 && target > 0.0)
                             ? std::max(target, holdQuant(std::min(kHoldCeilMs, std::max(floorMs, needMs + HubPeer::JitterStats::kFineStepMs + marginMs)))) : target;
-                        if (decayTarget > 0.0 && decayTarget < p->abufCurrentMs - 0.5 && newStalls == 0) p->holdDecayWindows++; else p->holdDecayWindows = 0;
+                        // Not quiet while gaps above the lower level keep coming, stalls beyond the ceiling included.
+                        const uint32_t allowedDecay = (mode == 1) ? 0u : (uint32_t) std::floor(allowPerMin * std::max(0.0, windowSec) / 60.0);
+                        const bool quietForDecay = !hub_hold_decay_gate() || decayTarget <= 0.0
+                            || (gw.total > 0 && gw.above[bucketOf(std::max(0.0, decayTarget - marginMs))] <= allowedDecay);
+                        if (decayTarget > 0.0 && decayTarget < p->abufCurrentMs - 0.5 && newStalls == 0 && quietForDecay) p->holdDecayWindows++; else p->holdDecayWindows = 0;
                         // Fast way back after a stall: a hold 2 ms or more above its target for holdFastWindows samples in a row
                         // (30 s) with no new stall goes to the target in ONE step, one queue reset instead of one every two
                         // minutes. A hold that has to grow again within two minutes of that doubles the wait (up to 4 min);
@@ -5614,31 +5818,7 @@ void SonobusHubServer::statsWriterThread() {
             }
         }
 
-        // Apply adaptive resizes outside mPeerMutex. Each set_buffersize is an AOO queue reset (one brief
-        // blip on that peer's inbound feed), so resizes must stay rare.
-        for (auto& a : abufApply) {
-            auto& pp = std::get<0>(a);
-            double ms = std::get<1>(a);
-            const int kind = std::get<2>(a);
-            if (hub_hold_blocks()) {
-                const double blockMs = 1000.0 * (double)mBlockSize / (double)std::max(1, mSampleRate);
-                int32_t nb = hub_hold_to_blocks(ms, blockMs);
-                ms = nb * blockMs;
-                std::lock_guard<std::mutex> sl(pp->sinkLock);
-                if (pp->sink) pp->sink->set_option(aoo_opt_iso_blocks, &nb, sizeof(int32_t));
-            } else {
-                std::lock_guard<std::mutex> sl(pp->sinkLock);
-                if (pp->sink) pp->sink->set_buffersize((int32_t) std::lround(ms));
-            }
-            double prev = pp->abufCurrentMs;
-            pp->abufCurrentMs = ms;
-            if (kind != 6) pp->abufCommitted = true;   // QUICK keeps measuring until the 75-s COMMIT
-            pp->holdLastChangeMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            std::cout << "[HUB-HOLD] peer='" << pp->userName << "' "
-                      << (kind == 0 ? "COMMIT" : kind == 1 ? "GROW" : kind == 2 ? "MODE" :  kind == 4 ? "GROW-EMERGENCY" : kind == 5 ? "DECAY" : kind == 7 ? "GROW-STALL" : kind == 8 ? "FOLLOW" : kind == 9 ? "DECAY-FAST" : "QUICK") << " hold "
-                      << std::fixed << std::setprecision(1) << prev << " -> " << ms << " ms\n";
-        }
+        applyHolds(abufApply);
         if (!abufApply.empty() || mHoldResizeAll.load(std::memory_order_relaxed)) mHoldResizeAll.store(false, std::memory_order_relaxed);
         abufApply.clear();
 
@@ -5706,7 +5886,8 @@ void SonobusHubServer::networkRecvThread() {
     hub_set_fifo(10, "recv thread");
 #endif
     std::cout << "[HUB] WAN hold switches: floor " << hub_hold_floor_ms(kHoldFloorMs) << " ms, margin " << hub_hold_margin_ms()
-              << " ms, whole blocks " << (hub_hold_blocks() ? 1 : 0) << ", fine grid " << (hub_hold_fine() ? 1 : 0) << ", follow " << (hub_hold_follow() ? 1 : 0) << "\n";
+              << " ms, whole blocks " << (hub_hold_blocks() ? 1 : 0) << ", fine grid " << (hub_hold_fine() ? 1 : 0) << ", follow " << (hub_hold_follow() ? 1 : 0)
+              << ", lateness " << (hub_hold_lateness() ? 1 : 0) << ", early " << (hub_hold_early() ? 1 : 0) << ", allowance " << hub_hold_allow(kHoldJamPerMin) << "/min\n";
 
     char buf[AOO_MAXPACKETSIZE];
     struct sockaddr_storage srcAddr;

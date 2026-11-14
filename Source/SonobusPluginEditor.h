@@ -278,6 +278,9 @@ private:
 
     std::unique_ptr<SonoTextButton> mConnectButton;
     std::unique_ptr<SonoDrawableButton> mAltConnectButton;
+    std::unique_ptr<SonoTextButton> mStagesButton;   // in a stage: opens the stage list
+    File mUiCmdDir;                                  // test aid, unset in normal use
+    void runUiCommand();
     std::unique_ptr<SonoDrawableButton> mVideoButton;
 
     std::unique_ptr<Label> mMainGroupLabel;

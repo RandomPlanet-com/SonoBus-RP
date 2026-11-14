@@ -409,8 +409,25 @@ typedef enum aoo_option
     // READ-ONLY per-source sink option — the adaptive receive buffer's DECISION
     // ring (aoo_adapt_events*): quick/commit/grow/emergency/decay with the depth in blocks. The caller sets `since`
     // (last seq it saw); the sink returns the newer ones (up to AOO_ADAPT_EVENTS_MAX) and the latest seq. Appended at the END.
-    aoo_opt_adapt_events
+    aoo_opt_adapt_events,
+    // SINK option — the largest depth (blocks) an iso sink will be asked for (int32_t; 0 = unknown). With it the
+    // queues are sized once and later aoo_opt_iso_blocks changes apply in place. Set before aoo_opt_iso_blocks.
+    // Appended at the END.
+    aoo_opt_iso_max_blocks,
+    // READ-ONLY per-source sink option: the last 60 s of late arrivals against the stream's own schedule
+    // (aoo_late_window*). Appended at the END.
+    aoo_opt_late_window
 } aoo_option;
+
+#define AOO_LATE_BUCKETS 66
+#define AOO_LATE_FINE 34
+typedef struct aoo_late_window {
+    int32_t  clear;                      /* in: 1 = empty the window after this read */
+    uint32_t total;                      /* out: blocks seen */
+    uint32_t above[AOO_LATE_BUCKETS];    /* out: late events longer than b ms */
+    uint32_t above_fine[AOO_LATE_FINE];  /* out: the same in 0.25 ms steps (last = longer) */
+    float    max_ms;                     /* out: longest event in the window */
+} aoo_late_window;
 
 #define AOO_ADAPT_EVENTS_MAX 8
 typedef struct aoo_adapt_event {

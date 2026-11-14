@@ -2,6 +2,38 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-14
+
+### SonoBus RP Hub 1.3.1
+
+- A lost packet from a player no longer makes a click. The hub fills the gap with the sound just before it and
+  blends back into the real audio.
+- When a player's stream arrives late, the late part is no longer played and then thrown away a moment later.
+  The others hear one short gap with soft edges instead of two gaps with clicks.
+- The hub measures the difference between each player's audio clock and its own and corrects it within about a
+  minute. Before, a player with a slightly fast or slow audio interface could be cut by a block every few seconds.
+- A player's buffer at the hub settles about a second after the player joins when the line needs more than the
+  minimum. Before, this took 15 to 20 seconds, with dropouts for the others until then. The buffer still starts at
+  the minimum.
+- When the hub changes a player's buffer it no longer restarts that player's stream.
+- A player's buffer no longer swings back and forth on a line with long stalls.
+- The log no longer prints "decode failed" for a filled gap.
+
+### SonoBus RP 1.3.1
+
+- A lost packet no longer makes a click. The gap is filled with the sound just before it and blended back into
+  the real audio.
+- After a late patch on the line you hear one short gap with soft edges: the last sound rings out and the audio
+  fades back in. Before, the late audio was played and then thrown away, which gave two gaps with clicks.
+- Clock differences between players are measured and corrected within about a minute. Before, a small
+  difference between two audio interfaces could cause a cut every few seconds.
+- The receive buffer keeps its level more steadily, with fewer small corrections on a quiet line.
+- With a larger audio buffer size the sound comes back a few milliseconds sooner after a late patch.
+- New Stages button next to Disconnect: open the stage list while you stay connected and keep playing. Your own
+  stage is marked "You are here". Joining another stage asks first.
+- The stage list rests when you are not looking at it: no refreshing while it is closed, and a slower refresh
+  when it has been left open and untouched for two minutes.
+
 ## 2026-11-12
 
 ### SonoBus RP Hub 1.3.0

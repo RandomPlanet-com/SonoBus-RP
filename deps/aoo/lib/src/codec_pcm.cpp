@@ -11,6 +11,7 @@
 #include <vector>
 #include <atomic>
 #include <cstdlib>
+#include <cmath>
 
 namespace {
 
@@ -158,6 +159,17 @@ struct codec {
     static constexpr int kFullFrames  = 96;    // full-gain conceal (~2ms)
     static constexpr int kRampFrames  = 384;   // then fade to 0 by ~8ms total
     static constexpr int kXfadeFrames = 32;    // recovery de-click fade-in (~0.7ms)
+
+    // Loss fill: a lost block is filled with the sound just before it, continued period by period, eased at its
+    // start, and crossfaded into the real audio when that is back.
+    std::vector<aoo_sample> lfStep;     // per channel: mismatch where the fill joins
+    int lfPhase = 0;                    // frames of the join already eased
+    int lfEase = 0;                     // frames the mismatch is eased over
+    int lfXfLeft = 0;                   // frames left of the crossfade into real audio
+    static constexpr int kLfFull   = 192;   // full level for 4 ms
+    static constexpr int kLfRamp   = 768;   // then down to silence by 20 ms
+    static constexpr int kLfXfade  = 64;    // crossfade into real audio (1.3 ms)
+    static constexpr int kLfMinLag = 96;    // 2 ms: not shorter than the crossfade
 };
 
 static bool plc_disabled();
@@ -236,9 +248,159 @@ extern "C" void aoo_pcm_plc_stats(uint64_t* events, uint64_t* frames){
     if (frames) *frames = g_plcConcealFrames.load(std::memory_order_relaxed);
 }
 
+// SB_AOO_LOSS_FILL=0: a lost block is concealed the former way.
+extern "C" int32_t aoo_sb_loss_fill_on();
+
+// The lag (frames) at which the last sound repeats best: every fourth frame over 2 to 25 ms, then full rate around
+// the best one. Paid once at the start of a loss.
+static int lf_find_lag(const codec *c, int ch, int srate)
+{
+    const int stride = 4;
+    const int minLag = codec::kLfMinLag / stride;
+    int maxLag = (srate * 25 / 1000) / stride;
+    int win = (srate * 20 / 1000) / stride;
+    const int have = c->plcFilled / stride - 1;
+    if (have < minLag * 3) return 0;
+    if (win + maxLag > have){ maxLag = std::min(maxLag, have / 2); win = have - maxLag; }
+    if (maxLag <= minLag || win < 24) return 0;
+    const int N = win + maxLag;
+    float mono[1024];
+    if (N > 1024) return 0;
+    for (int i = 0; i < N; ++i){
+        const aoo_sample *fr = plc_frame_ago(c, (N - i) * stride, ch);
+        float v = 0; for (int k = 0; k < ch; ++k) v += (float)fr[k];
+        mono[i] = v;
+    }
+    float sc[512]; float best = -2.f; int bestLag = 0;
+    for (int lag = minLag; lag <= maxLag && lag < 512; ++lag){
+        float num = 0, den = 0;
+        for (int i = N - 1; i >= N - win; --i){
+            num += mono[i] * mono[i - lag];
+            den += mono[i] * mono[i] + mono[i - lag] * mono[i - lag];
+        }
+        sc[lag] = den > 1e-12f ? 2.f * num / den : 0.f;
+        if (sc[lag] > best){ best = sc[lag]; bestLag = lag; }
+    }
+    if (bestLag == 0) return 0;
+    // the shortest lag that fits nearly as well
+    if (best > 0.5f){
+        for (int lag = minLag + 1; lag < bestLag; ++lag){
+            if (sc[lag] >= 0.92f * best && sc[lag] >= sc[lag - 1] && sc[lag] >= sc[lag + 1]){ bestLag = lag; break; }
+        }
+    }
+    int P = bestLag * stride; float pbest = -2.f;
+    const int fwin = std::min(srate * 8 / 1000, c->plcFilled - (P + stride + 1));
+    if (fwin < 32) return P <= c->plcFilled - 1 ? P : 0;
+    for (int cand = bestLag * stride - (stride - 1); cand <= bestLag * stride + (stride - 1); ++cand){
+        if (cand < codec::kLfMinLag) continue;
+        float num = 0, den = 0;
+        for (int i = 1; i <= fwin; ++i){
+            const aoo_sample *a = plc_frame_ago(c, i, ch);
+            const aoo_sample *b = plc_frame_ago(c, i + cand, ch);
+            float va = 0, vb = 0; for (int k = 0; k < ch; ++k){ va += (float)a[k]; vb += (float)b[k]; }
+            num += va * vb; den += va * va + vb * vb;
+        }
+        const float s2 = den > 1e-12f ? 2.f * num / den : 0.f;
+        if (s2 > pbest){ pbest = s2; P = cand; }
+    }
+    return P;
+}
+
+// One frame of the continued sound at full level. It joins the history as it is given out, so the next period
+// reads the eased join back and turns without a step.
+static inline void lf_next(codec *c, aoo_sample *out, int ch)
+{
+    const aoo_sample *src = plc_frame_ago(c, c->plcPeriod, ch);
+    float w = 0.f;
+    if (c->lfPhase < c->lfEase){
+        w = 0.5f + 0.5f * std::cos(3.14159265f * (float)(c->lfPhase + 1) / (float)(c->lfEase + 1));
+        c->lfPhase++;
+    }
+    aoo_sample *dst = c->plcHist.data() + (size_t)c->plcWrite * ch;
+    for (int k = 0; k < ch; ++k) out[k] = dst[k] = src[k] + c->lfStep[k] * w;
+    c->plcWrite = (c->plcWrite + 1) % codec::kHistFrames;
+    if (c->plcFilled < codec::kHistFrames) c->plcFilled++;
+}
+
+static inline float lf_gain(int concealed)
+{
+    if (concealed <= codec::kLfFull) return 1.f;
+    const int r = concealed - codec::kLfFull;
+    if (r >= codec::kLfRamp) return 0.f;
+    return 0.5f + 0.5f * std::cos(3.14159265f * (float)r / (float)codec::kLfRamp);
+}
+
+// Fill `frames` lost frames. False: not enough history, the caller writes silence.
+static bool lf_fill(codec *c, aoo_sample *s, int frames, int ch, int srate)
+{
+    if (c->plcHist.empty() || c->plcFilled < codec::kMinHistory || (int)c->lfStep.size() < ch) return false;
+    if (c->plcConcealed == 0 || c->lfXfLeft > 0){
+        // (a loss inside the hand-over starts again from what was last given out)
+        const int P = lf_find_lag(c, ch, srate);
+        if (P < codec::kLfMinLag || P + 2 > c->plcFilled) return false;
+        g_plcConcealEvents.fetch_add(1, std::memory_order_relaxed);
+        c->plcPeriod = P;
+        const aoo_sample *last = plc_frame_ago(c, 1, ch);
+        const aoo_sample *prev = plc_frame_ago(c, P + 1, ch);
+        for (int k = 0; k < ch; ++k) c->lfStep[k] = last[k] - prev[k];
+        c->lfEase = std::min(P / 2, srate / 500);   // 2 ms at most
+        c->lfPhase = 0;
+        c->plcConcealed = 0;
+        c->lfXfLeft = 0;
+    }
+    for (int f = 0; f < frames; ++f){
+        aoo_sample *o = s + (size_t)f * ch;
+        lf_next(c, o, ch);
+        const float g = lf_gain(c->plcConcealed);
+        if (g < 1.f) for (int k = 0; k < ch; ++k) o[k] *= g;
+        c->plcConcealed++;
+    }
+    g_plcConcealFrames.fetch_add((uint64_t)frames, std::memory_order_relaxed);
+    return true;
+}
+
+// Real audio is back: the fill goes on underneath for a moment and hands over. The history takes what is given out.
+static void lf_resume(codec *c, aoo_sample *s, int frames, int ch)
+{
+    const int total = std::min<int>(codec::kLfXfade, c->plcPeriod);
+    if (c->plcConcealed > 0){
+        c->lfXfLeft = total;
+        c->plcConcealed = -c->plcConcealed;   // level of the fill at the hand-over, kept while it fades
+    }
+    const float g = lf_gain(-c->plcConcealed);
+    for (int f = 0; f < frames; ++f){
+        aoo_sample *o = s + (size_t)f * ch;
+        aoo_sample *dst = c->plcHist.data() + (size_t)c->plcWrite * ch;
+        if (c->lfXfLeft > 0){
+            const aoo_sample *src = plc_frame_ago(c, c->plcPeriod, ch);
+            float we = 0.f;
+            if (c->lfPhase < c->lfEase){
+                we = 0.5f + 0.5f * std::cos(3.14159265f * (float)(c->lfPhase + 1) / (float)(c->lfEase + 1));
+                c->lfPhase++;
+            }
+            const float w = 0.5f - 0.5f * std::cos(3.14159265f * (float)(total - c->lfXfLeft + 1) / (float)(total + 1));
+            for (int k = 0; k < ch; ++k) o[k] = dst[k] = (src[k] + c->lfStep[k] * we) * g * (1.f - w) + o[k] * w;
+            if (--c->lfXfLeft == 0) c->plcConcealed = 0;
+        } else {
+            for (int k = 0; k < ch; ++k) dst[k] = o[k];
+        }
+        c->plcWrite = (c->plcWrite + 1) % codec::kHistFrames;
+        if (c->plcFilled < codec::kHistFrames) c->plcFilled++;
+    }
+    if (c->lfXfLeft == 0) c->plcConcealed = 0;
+}
+
 // Synthesize `frames` frames of concealment into `s` (interleaved).
 static void plc_conceal(codec *c, aoo_sample *s, int frames, int ch, int srate)
 {
+    if (!plc_disabled() && aoo_sb_loss_fill_on()){
+        if (c->plcConcealed < 0) c->plcConcealed = -c->plcConcealed;   // lost again inside the hand-over
+        if (!lf_fill(c, s, frames, ch, srate)){
+            for (int i = 0; i < frames * ch; ++i) s[i] = 0;
+            c->plcConcealed = 0;
+        }
+        return;
+    }
     if (plc_disabled() || c->plcHist.empty() || c->plcFilled < codec::kMinHistory){
         for (int i = 0; i < frames * ch; ++i) s[i] = 0;   // stock behavior
         return;
@@ -319,6 +481,7 @@ int32_t codec_setformat(void *enc, aoo_format *f)
         c->plcHist.assign((size_t)codec::kHistFrames * ch, 0);
         c->plcWrite = 0; c->plcFilled = 0;
         c->plcConcealed = 0; c->plcAgo = 0; c->plcPeriod = 0;
+        c->lfStep.assign((size_t)ch, 0); c->lfPhase = 0; c->lfEase = 0; c->lfXfLeft = 0;
     }
 
     return 1;
@@ -520,6 +683,11 @@ int32_t decoder_decode(void *dec,
 
     // First good block after a loss: de-click the transition from concealment to the real signal.
     const int frames = n / ch;
+    if (!plc_disabled() && aoo_sb_loss_fill_on() && !c->plcHist.empty() && (int)c->lfStep.size() >= ch
+        && (c->plcConcealed != 0 || c->lfXfLeft > 0) && c->plcPeriod >= codec::kLfMinLag){
+        lf_resume(c, s, frames, ch);
+        return size / samplesize;
+    }
     if (c->plcConcealed > 0){
         // Fade in the real signal. A crossfade against the loop continuation would be phase-mismatched
         // and sound like chorus on frequent small conceals.
@@ -558,6 +726,7 @@ int32_t decoder_readformat(void *dec, aoo_format *fmt,
                 c->plcHist.assign((size_t)codec::kHistFrames * ch, 0);
                 c->plcWrite = 0; c->plcFilled = 0;
                 c->plcConcealed = 0; c->plcAgo = 0; c->plcPeriod = 0;
+                c->lfStep.assign((size_t)ch, 0); c->lfPhase = 0; c->lfEase = 0; c->lfXfLeft = 0;
             }
 
             return 4;

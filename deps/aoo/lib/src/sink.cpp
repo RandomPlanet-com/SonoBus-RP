@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -195,6 +196,48 @@ static int32_t sink_tap_int(const char* name, int32_t def, bool* set){
         fclose(cf);
     }
     return def;
+}
+
+// SB_AOO_LATE_RESYNC=0: after the buffer ran dry, refill with silence up to the target at once (the former rule).
+static int32_t late_resync_on(){
+    static const int32_t v = sink_tap_int("SB_AOO_LATE_RESYNC", 1, nullptr);
+    return v;
+}
+// SB_AOO_GATE_TIME=0: the resume after a dry spell waits for one callback without a jump in arrivals, whatever the
+// length of a callback (the former rule).
+static int32_t gate_time_on(){
+    static const int32_t v = sink_tap_int("SB_AOO_GATE_TIME", 1, nullptr);
+    return v;
+}
+// SB_AOO_LOSS_FILL=0: a lost block is concealed the former way, and a block is given up as soon as a newer one
+// is here.
+extern "C" int32_t aoo_sb_loss_fill_on(){
+    static const int32_t v = sink_tap_int("SB_AOO_LOSS_FILL", 1, nullptr);
+    return v;
+}
+// SB_HOLD_LATENESS=1: the depth is sized from how late blocks arrive against their schedule, not from the gaps
+// between arrivals. 2 = measure and log only.
+static int32_t hold_lateness_mode(){
+    static const int32_t v = sink_tap_int("SB_HOLD_LATENESS", 0, nullptr);
+    return v;
+}
+static bool hold_lateness_on(){ return hold_lateness_mode() == 1; }
+// SB_AOO_ISO_INPLACE=0: every change of an iso sink's depth rebuilds its queues (the former rule).
+static int32_t iso_inplace_on(){
+    static const int32_t v = sink_tap_int("SB_AOO_ISO_INPLACE", 1, nullptr);
+    return v;
+}
+// SB_AOO_GOV_ARM_BLOCKS=<n> overrides the governor's arm band (-1 = not set).
+static int32_t gov_arm_override(){
+    static const int32_t v = sink_tap_int("SB_AOO_GOV_ARM_BLOCKS", -1, nullptr);
+    return v;
+}
+// Arm band for target depth T.
+static int32_t gov_arm_for(int32_t T, bool v4, bool adaptive){
+    int32_t arm = v4 ? std::max<int32_t>(2, (T + 1) / 2) : 2;
+    if (adaptive) arm = 2;   // the adaptive sink owns its depth; the skew bleeder stays tight
+    if (gov_arm_override() >= 1) arm = std::min<int32_t>(gov_arm_override(), std::max<int32_t>(1, T));
+    return arm;
 }
 
 // Fast recovery after a rough patch (default on). Read once per process, first from the network thread.
@@ -396,7 +439,20 @@ int32_t aoo::sink::set_option(int32_t opt, void *ptr, int32_t size)
         CHECKARG(int32_t);
         auto n = std::max<int32_t>(0, as<int32_t>(ptr));
         if (n != iso_blocks_.load(std::memory_order_relaxed)){
-            iso_blocks_.store(n, std::memory_order_relaxed);
+            const int32_t old = iso_blocks_.exchange(n, std::memory_order_relaxed);
+            // A running iso sink whose queues were sized for the new depth takes it in place: each source picks it
+            // up on its next packet. Anything else rebuilds the queues.
+            if (!(iso_inplace_on() && old > 0 && n > 0 && n <= iso_max_blocks_.load(std::memory_order_relaxed))){
+                update_sources();
+            }
+        }
+        break;
+    }
+    case aoo_opt_iso_max_blocks:
+    {
+        CHECKARG(int32_t);
+        auto n = std::max<int32_t>(0, as<int32_t>(ptr));
+        if (n != iso_max_blocks_.exchange(n, std::memory_order_relaxed) && iso_blocks_.load(std::memory_order_relaxed) > 0){
             update_sources();
         }
         break;
@@ -602,6 +658,10 @@ int32_t aoo::sink::get_sourceoption(void *endpoint, int32_t id,
         case aoo_opt_rx_pops:        // (read-only)
             CHECKARG(int32_t);
             as<int32_t>(p) = src->get_rx_pops();
+            return 1;
+        case aoo_opt_late_window:    // (read-only)
+            CHECKARG(aoo_late_window);
+            src->late_window(as<aoo_late_window>(p));
             return 1;
         // unsupported
         default:
@@ -1221,8 +1281,12 @@ void source_desc::do_update(const sink &s){
             drift_on_ = drift_tap > 0;
             { static const int32_t nd = sink_tap_int("SB_AOO_DRIFT_NO_DRAIN", 0, nullptr); drift_no_drain_ = nd > 0; }   // default 0: the governor owns the level, the ASRC owns the rate
             resampler_.set_hq(hq_tap > 0 || drift_on_);   // drift correction always uses the HQ path
-            drift_last_t_ = -1; drift_ewma_bps_ = 0; drift_level_ewma_ = -1; drift_ppm_ = 0; drift_dirty_sec_ = 0;
-            drift_ratio_.store(1.0, std::memory_order_relaxed);
+            // The sender's clock does not change with a rebuild of its stream: what has been learned is kept.
+            drift_last_t_ = -1; drift_ewma_bps_ = 0; drift_level_ewma_ = -1; drift_dirty_sec_ = 0;
+            if (!reg_learned_) drift_ppm_ = 0;
+            drift_trim_ppm_ = 0; lvl_init_ = false; lvl_t_ = -1; lvl_sum_ = 0; lvl_n_ = 0; lvl_dirty_seen_ = 0;
+            drift_publish();
+            reg_t0_ = -1; reg_last_ = -1; reg_block_until_ = -1; reg_dirty_seen_ = 0; reg_nb_ = 0; reg_ns_ = 0; reg_next_cp_ = 20;
             if (drift_on_ || hq_tap > 0){
                 static bool logged = false;
                 if (!logged){ logged = true; fprintf(stderr, "aoo_sink: DRIFT ASRC = %d, HQ resampler = %d\n", (int) drift_on_, (int) resampler_.hq()); aoo::dynamic_resampler::warm_sinc(); }
@@ -1277,22 +1341,42 @@ void source_desc::do_update(const sink &s){
         //                                        mass-clear overflow path would
         //                                        fire before the governor arms)
         // Fixed thresholds (SB_AOO_GOV_V4=0): H = 2, E = 5 (lead > 4), bq_extra untouched.
-        governor_arm_blocks_ = governor_v4_ ? std::max<int32_t>(2, (nbuffers + 1) / 2) : 2;
-        if (adapt_on_) governor_arm_blocks_ = 2;   // The adaptive sink owns its depth; the skew bleeder stays tight
-        // SB_AOO_GOV_ARM_BLOCKS=<n> overrides the arm band (env/taps, read once per process).
-        // Hub LAN sinks see little arrival jitter, so a 1-block band keeps their operating depth
-        // at target instead of riding up to target+H.
-        {
-            static const int32_t armOverride = sink_tap_int("SB_AOO_GOV_ARM_BLOCKS", -1, nullptr);
-            if (armOverride >= 1) governor_arm_blocks_ = std::min<int32_t>(armOverride, std::max<int32_t>(1, nbuffers));
-        }
+        // Hub LAN sinks see little arrival jitter, so a 1-block band (SB_AOO_GOV_ARM_BLOCKS) keeps their
+        // operating depth at target instead of riding up to target+H.
+        governor_arm_blocks_ = gov_arm_for(nbuffers, governor_v4_, adapt_on_);
+        gov_bq_extra_ = bq_extra;
+        // An iso sink that knows its largest depth is sized for it once, so a depth change never rebuilds the queues.
+        iso_cap_blocks_ = (!adapt_on_ && iso_blocks_ > 0 && iso_inplace_on() && s.iso_max_blocks() > 0)
+            ? std::max<int32_t>(nbuffers, s.iso_max_blocks()) : 0;
         if (governor_v4_){
             bq_extra = std::max<int32_t>(bq_extra, governor_arm_blocks_ + 3);
+            if (iso_cap_blocks_ > 0) bq_extra = std::max<int32_t>(bq_extra, gov_arm_for(iso_cap_blocks_, true, false) + 3);   // room for the arm band of the largest depth
         }
-        blockqueue_.resize((adapt_on_ ? adapt_max_blocks_ : nbuffers) + bq_extra);   // Adapt = sized once for the max depth
-        governor_emerg_lead_ = governor_v4_
-            ? std::max<int32_t>(governor_arm_blocks_ + 1, (adapt_on_ ? (int32_t) blockqueue_.capacity() : nbuffers + bq_extra) - 2)
-            : 5;
+        const int32_t cap_blocks = adapt_on_ ? adapt_max_blocks_ : (iso_cap_blocks_ > 0 ? iso_cap_blocks_ : nbuffers);
+        blockqueue_.resize(cap_blocks + bq_extra);   // Sized once for the largest depth
+        governor_thresholds(nbuffers);
+        // SB_AOO_LATE_RESYNC=0: no hold after a dry spell. SB_AOO_DRY_FADE=0: a stream that runs dry stops at once.
+        late_resync_ = late_resync_on() != 0;
+        gate_time_ = gate_time_on() != 0;
+        { static const int32_t df = sink_tap_int("SB_AOO_DRY_FADE", 1, nullptr); dry_fade_on_ = df != 0; }
+        {
+            // ring-out about 16 ms (about 24 ms when the sound has a pitch), fade-in about 5 ms, in whole blocks;
+            // the history holds about 70 ms for the pitch search, plus the fade-in and a margin
+            const int32_t bs = std::max<int32_t>(1, decoder_->blocksize());
+            const size_t nblk = (size_t) bs * (size_t) std::max<int32_t>(1, decoder_->nchannels());
+            const int32_t ro_blocks = dry_fade_on_ ? std::max<int32_t>(1, (int32_t) std::ceil(0.016 * decoder_->samplerate() / bs)) : 0;
+            const int32_t rop_blocks = dry_fade_on_ ? std::max<int32_t>(1, (int32_t) std::ceil(0.024 * decoder_->samplerate() / bs)) : 0;
+            const int32_t fi_blocks = dry_fade_on_ ? std::max<int32_t>(1, (int32_t) std::ceil(0.005 * decoder_->samplerate() / bs)) : 1;
+            const int32_t hist_blocks = std::max<int32_t>(rop_blocks, (int32_t) std::ceil(0.070 * decoder_->samplerate() / bs));
+            ro_total_ = ro_blocks * bs; ro_total_pitch_ = rop_blocks * bs; fi_total_ = fi_blocks * bs;
+            hist_frames_ = dry_fade_on_ ? (hist_blocks + fi_blocks + 2) * bs : 0;
+            hist_.assign((size_t) hist_frames_ * (size_t) std::max<int32_t>(1, decoder_->nchannels()), 0);
+            scratch_.assign(nblk, 0);
+        }
+        hist_wf_ = 0; hist_nf_ = 0; ro_span_ = 0; ro_left_ = 0; ro_pos_ = 0; ro_base_ = 0; ro_period_ = 0; fi_span_ = 0; fi_left_ = 0; dry_ = false;
+        gated_.store(false, std::memory_order_relaxed); gate_prev_ = 0; gate_dropped_ = 0; gate_frames_ = 0; gate_settle_ = 0;
+        gate_refill_pub_.store(0, std::memory_order_relaxed); gate_lead_pub_.store(0, std::memory_order_relaxed);
+        gate_fast_us_.store(0, std::memory_order_relaxed);
         // Remember the committed target depth
         // in blocks for the depth governor's hysteresis band.
         governor_target_blocks_ = nbuffers;
@@ -1311,7 +1395,7 @@ void source_desc::do_update(const sink &s){
         // Ownership: network thread writes, audio thread reads.
         // SB_AOO_HANDOFF=0 sizes the audioqueue to the target only. Default on.
         static const int32_t handoffOn = sink_tap_int("SB_AOO_HANDOFF", 1, nullptr);
-        const int32_t aq_blocks = (adapt_on_ ? adapt_max_blocks_ : nbuffers) + (handoffOn ? (int32_t) blockqueue_.capacity() : 0);   // Adapt = max depth + bqcap
+        const int32_t aq_blocks = cap_blocks + (handoffOn ? (int32_t) blockqueue_.capacity() : 0);   // largest depth + bqcap
         audioqueue_.resize(aq_blocks * nsamples, nsamples);
         infoqueue_.resize(aq_blocks, 1);
         audioqueue_target_samples_.store(nbuffers * nsamples, std::memory_order_relaxed);
@@ -1476,14 +1560,48 @@ int32_t source_desc::handle_data(const sink& s, int32_t salt, const aoo::data_pa
         nextneedsfadein_ = next_;
     }
 
+    // An iso depth change that fits the queues is applied here, in place: a deeper target is topped up, a
+    // shallower one is one splice. No rebuild.
+    if (iso_cap_blocks_ > 0){
+        const int32_t want = s.iso_blocks();
+        if (want > 0 && want != governor_target_blocks_ && want <= iso_cap_blocks_){
+            sink_evlog("iso_retarget", want);
+            iso_blocks_ = want;
+            governor_thresholds(want);
+            adapt_apply_target(want);
+        }
+    }
+    {   // what the audio side dropped and how long it waited at its last resume
+        const int32_t opens = gate_opens_pub_.load(std::memory_order_relaxed);
+        if (opens != gate_opens_seen_){
+            gate_opens_seen_ = opens;
+            // the audio side has set the depth: nothing is left over from the refill or from a depth change
+            refill_pending_.store(0, std::memory_order_relaxed); refill_drained_ = true; adapt_shrink_pending_ = false;
+            sink_evlog("resync_trim", gate_trim_pub_.exchange(0, std::memory_order_relaxed));
+            sink_evlog("resync_ms10", (int32_t) ((int64_t) gate_wait_pub_.exchange(0, std::memory_order_relaxed) * 10000 / std::max<int32_t>(1, s.samplerate())));   // wait in tenths of a ms
+        }
+    }
+
     // WAN adaptive depth — arrival tracker (fresh = first time we see a sequence)
     const bool adapt_fresh = adapt_on_ && d.sequence > newest_;
+    const bool lt_fresh = hold_lateness_mode() > 0 && d.sequence > newest_ && d.framenum == 0 && d.totalsize != 0;
+    const bool gate_fresh = d.sequence > newest_ && gated_.load(std::memory_order_relaxed);
 
     // check data packet
     if (!check_packet(d)){
         return 0;
     }
 
+    if (gate_fresh && decoder_){
+        // While playback holds after a dry spell: a packet that comes in faster than the stream runs is part of
+        // the held burst, still landing.
+        const double now = sb_wall_seconds();
+        const double period = (double) decoder_->blocksize() / (double) std::max<int32_t>(1, decoder_->samplerate());
+        if (gate_last_arr_ >= 0 && now - gate_last_arr_ < 0.5 * period)
+            gate_fast_us_.store((int64_t) (now * 1e6), std::memory_order_relaxed);
+        gate_last_arr_ = now;
+    }
+    if (lt_fresh) late_track(d, sb_wall_seconds());
     if (adapt_on_) adapt_track(s, d, adapt_fresh);
 
     // add data packet
@@ -1562,7 +1680,14 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     // the mutex should be uncontended most of the time.
     // NOTE: We could use try_lock() and skip the block if we couldn't aquire the lock.
     shared_lock lock(mutex_);
+    if (drift_on_) drift_entry_wall_ = sb_wall_seconds();   // when this callback began, for the clock lock
     drift_frames_entry_ += numsampleframes;   // The sink's callback clock, regardless of data availability
+    if (numsampleframes != cb_frames_seen_ && decoder_){   // blocks one callback uses, for the level trim
+        cb_frames_seen_ = numsampleframes;
+        cb_blocks_pub_.store(std::max<int32_t>(1, (int32_t) std::ceil((double) numsampleframes * (double) decoder_->samplerate()
+                             / ((double) std::max<int32_t>(1, s.samplerate()) * (double) std::max<int32_t>(1, decoder_->blocksize())))),
+                             std::memory_order_relaxed);
+    }
 
     if (kSinkDebug) {
         static std::atomic<uint64_t> sd_n{0};
@@ -1644,15 +1769,129 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     // because it may be less than the sink blocksize
     auto readsamples = numsampleframes * nchannels;
 
+    if (numsampleframes != percb_frames_){
+        // blocks one callback uses, for the network side
+        percb_frames_ = numsampleframes;
+        percb_pub_.store(std::max<int32_t>(1, (int32_t) std::ceil((double) numsampleframes * (double) decoder_->samplerate()
+                             / ((double) std::max<int32_t>(1, s.samplerate()) * (double) std::max<int32_t>(1, decoder_->blocksize())))),
+                         std::memory_order_relaxed);
+    }
+
+    // After a dry spell playback waits here until the buffer is back at its depth and the arrivals are calm again.
+    // What sits in the queue beyond that depth is older than it should be by now (the refill, then the late part of
+    // what the line held back): it is dropped from the front, so the stream goes on in time. For a short while after
+    // the resume a jump in the queue is still trimmed the same way (the held packets were still landing).
+    bool holding = false;
+    const int bframes0 = nchannels > 0 ? nsamples / nchannels : 0;
+    if (gated_.load(std::memory_order_relaxed)){
+        const int32_t T0 = std::max<int32_t>(1, audioqueue_target_samples_.load(std::memory_order_relaxed) / std::max<int32_t>(1, nsamples));
+        // blocks one callback uses
+        const int32_t per_cb = std::max<int32_t>(1, (int32_t) std::ceil((double) numsampleframes * (double) decoder_->samplerate()
+                                                   / ((double) std::max<int32_t>(1, s.samplerate()) * (double) std::max<int32_t>(1, decoder_->blocksize()))));
+        const int32_t cap = std::max<int32_t>(1, (int32_t) audioqueue_.capacity() / std::max<int32_t>(1, nsamples));
+        // Resume level: one block short of the depth is left after this callback's read. A tiny buffer resumes
+        // one block above its depth, or it runs dry again at once.
+        const int32_t topen = std::min<int32_t>(cap, std::max<int32_t>(T0 <= 2 ? T0 + 1 : T0, T0 + per_cb - 1));
+        const int32_t before = (int32_t) audioqueue_.read_available();
+        // arrivals since the last callback; what a recovery refill wrote is not an arrival
+        const int32_t grew = before - gate_prev_ - gate_refill_pub_.exchange(0, std::memory_order_relaxed);
+        const bool settling = gate_settle_ > 0;
+        int32_t avail = before;
+        if (avail > (settling ? topen + per_cb + 2 : topen)){
+            while (avail > topen && infoqueue_.read_available()){
+                block_info late;
+                infoqueue_.read(late);
+                audioqueue_.read_commit();
+                --avail;
+            }
+            if (settling && bframes0 > 0 && hist_frames_ > 0){
+                // a cut in running audio: what was playing rings out (backwards) under the fade-in of what follows
+                ro_period_ = 0; ro_base_ = hist_wf_; ro_pos_ = 0;
+                ro_span_ = ro_left_ = std::min<int32_t>(fi_total_, hist_nf_ - (hist_nf_ % bframes0));
+                fi_left_ = 0; dry_ = true;
+            }
+        }
+        gate_dropped_ += before - avail;
+        if (!settling){
+            gate_prev_ = avail; gate_frames_ += numsampleframes;
+            // More arrivals than a callback uses plus a little: the held packets are still landing. A callback
+            // longer than a block sees the whole burst as one jump, so the burst also counts as over once its
+            // last packet came in a block period ago.
+            bool landing = grew > per_cb + 2;
+            if (landing && gate_time_){
+                const int64_t fast = gate_fast_us_.load(std::memory_order_relaxed);
+                const int64_t block_us = (int64_t) (1e6 * (double) decoder_->blocksize() / (double) std::max<int32_t>(1, decoder_->samplerate()));
+                if (fast > 0 && (int64_t) (sb_wall_seconds() * 1e6) - fast >= block_us) landing = false;
+            }
+            // not full yet, or still landing, or finished blocks are waiting for room in the queue
+            if (avail < topen || landing || gate_lead_pub_.load(std::memory_order_relaxed) > 0){
+                holding = true;
+            } else {
+                gate_settle_ = std::max<int32_t>(2, (int32_t) std::ceil(0.010 * (double) std::max<int32_t>(1, s.samplerate()) / (double) std::max<int32_t>(1, numsampleframes)));
+            }
+        } else if (--gate_settle_ == 0){
+            gate_trim_pub_.fetch_add(gate_dropped_, std::memory_order_relaxed);
+            gate_wait_pub_.store((int32_t) std::min<int64_t>(gate_frames_, 0x7fffffff), std::memory_order_relaxed);
+            gate_opens_pub_.fetch_add(1, std::memory_order_relaxed);
+            gate_prev_ = 0; gate_dropped_ = 0; gate_frames_ = 0;
+            gated_.store(false, std::memory_order_relaxed);
+        }
+    }
+
 #if 0
     auto capacity = audioqueue_.capacity() / audioqueue_.blocksize();
     DO_LOG("audioqueue: " << audioqueue_.read_available() << " / " << capacity);
 #endif
 
+    const int bframes = nchannels > 0 ? nsamples / nchannels : 0;
+    // one frame of the history, counted back from where the ring-out started
+    auto ro_frame = [&](int32_t back) -> const aoo_sample* {
+        int32_t idx = (ro_base_ - 1 - back) % hist_frames_;
+        if (idx < 0) idx += hist_frames_;
+        return hist_.data() + (size_t) idx * nchannels;
+    };
+    // One frame of the ring-out into dst, with gain g. A sound with a pitch goes on period by period (the last
+    // period again, eased into the one before it at each turn); anything else is the history played backwards.
+    auto ro_put = [&](aoo_sample* dst, float g, bool add){
+        if (ro_period_ > 0){
+            const int32_t q = ro_pos_ % ro_period_;
+            const aoo_sample* h = ro_frame(ro_period_ - 1 - q);
+            const int32_t ease = std::min<int32_t>(32, ro_period_ / 4);
+            if (q >= ro_period_ - ease){
+                const float w = (float)(q - (ro_period_ - ease) + 1) / (float)(ease + 1);
+                const aoo_sample* h2 = ro_frame(2 * ro_period_ - 1 - q);
+                for (int c = 0; c < nchannels; ++c){ const float v = (h[c] * (1.0f - w) + h2[c] * w) * g; dst[c] = add ? dst[c] + v : v; }
+            } else {
+                for (int c = 0; c < nchannels; ++c){ const float v = h[c] * g; dst[c] = add ? dst[c] + v : v; }
+            }
+        } else {
+            const aoo_sample* h = ro_frame(ro_pos_);
+            for (int c = 0; c < nchannels; ++c){ const float v = h[c] * g; dst[c] = add ? dst[c] + v : v; }
+        }
+        ++ro_pos_; --ro_left_;
+    };
+    // gain of the ring-out: a raised cosine that reaches nothing a few frames before the end, so the resampler's
+    // look-ahead holds silence when it stops
+    auto ro_gain = [&]() -> float {
+        const int32_t span = ro_span_ > 16 ? ro_span_ - 8 : ro_span_;
+        return ro_pos_ < span ? 0.5f + 0.5f * std::cos(3.14159265f * (float) ro_pos_ / (float) span) : 0.0f;
+    };
+    // the next block of the ring-out
+    auto ro_block = [&](aoo_sample* dst){
+        for (int j = 0; j < bframes; ++j){
+            if (ro_left_ > 0){
+                const float g = ro_gain();
+                ro_put(dst + (size_t) j * nchannels, g, false);
+            } else {
+                for (int c = 0; c < nchannels; ++c) dst[(size_t) j * nchannels + c] = 0;
+            }
+        }
+    };
+
     // Feed, set the ratio, then feed once more if the new ratio left the read short. The ratio moves after the
     // feed, so at a drift step a resampler holding exactly one block could not be read in that callback.
     for (int feed_pass = 0; feed_pass < 2; ++feed_pass){
-    while (audioqueue_.read_available() && infoqueue_.read_available()
+    while (!holding && audioqueue_.read_available() && infoqueue_.read_available()
            && readsamples > resampler_.read_available() && resampler_.write_available() >= nsamples){
 
         // get block info and set current channel + samplerate
@@ -1682,7 +1921,56 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
         }
 
         // write audio into resampler
-        resampler_.write(audioqueue_.read_data(), nsamples);
+        const aoo_sample *blk = audioqueue_.read_data();
+        if (info.refill && dry_fade_on_ && bframes > 0 && (size_t) nsamples <= scratch_.size()){
+            // A refill block is time without sound from the stream. In a dry spell the ring-out goes on through
+            // it; when depth is added while playing, the ring-out starts here. Either way the fade-in waits for
+            // the first real block.
+            if (!dry_){
+                ro_base_ = hist_wf_; ro_pos_ = 0; fi_left_ = 0;
+                ro_period_ = ro_find_period(nchannels, decoder_->samplerate());
+                ro_span_ = ro_period_ > 0 ? ro_total_pitch_ : std::min<int32_t>(ro_total_, hist_nf_ - (hist_nf_ % bframes));
+                ro_left_ = ro_span_;
+                dry_ = true;
+            }
+            ro_block(scratch_.data());
+            resampler_.write(scratch_.data(), nsamples);
+        } else {
+            const aoo_sample *played = blk;
+            if (dry_ && fi_left_ == 0){   // the first block after a dry spell (or after a cut) starts the fade-in
+                fi_span_ = fi_left_ = std::max<int32_t>(1, fi_total_);
+                hist_nf_ = 0;             // a later ring-out must not reach back across the gap
+            }
+            dry_ = false;
+            if (fi_left_ > 0 && bframes > 0 && (size_t) nsamples <= scratch_.size()){
+                // the stream fades in, across what is left of the ring-out
+                for (int j = 0; j < bframes; ++j){
+                    float gin = 1.0f;
+                    if (fi_left_ > 0){
+                        gin = 0.5f - 0.5f * std::cos(3.14159265f * (float)(fi_span_ - fi_left_ + 1) / (float) fi_span_);
+                        --fi_left_;
+                    }
+                    for (int c = 0; c < nchannels; ++c) scratch_[(size_t) j * nchannels + c] = blk[j * nchannels + c] * gin;
+                    if (ro_left_ > 0){
+                        const float gro = ro_gain() * (1.0f - gin);
+                        ro_put(scratch_.data() + (size_t) j * nchannels, gro, true);
+                    }
+                }
+                if (fi_left_ == 0) ro_left_ = 0;   // the ring-out ends with the fade-in
+                played = scratch_.data();
+            } else {
+                ro_left_ = 0;
+            }
+            resampler_.write(played, nsamples);
+            // keep what was played, for a ring-out
+            if (hist_frames_ >= bframes && bframes > 0){
+                const int32_t first = std::min<int32_t>(bframes, hist_frames_ - hist_wf_);
+                std::copy(played, played + (size_t) first * nchannels, hist_.begin() + (size_t) hist_wf_ * nchannels);
+                if (first < bframes) std::copy(played + (size_t) first * nchannels, played + nsamples, hist_.begin());
+                hist_wf_ = (hist_wf_ + bframes) % hist_frames_;
+                hist_nf_ = std::min<int32_t>(hist_frames_, hist_nf_ + bframes);
+            }
+        }
 
         audioqueue_.read_commit();
         trace_moves_.fetch_add(1, std::memory_order_relaxed);   // Trace
@@ -1712,14 +2000,56 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     }
     if (resampler_.read_available() >= readsamples) break;
     }
+    // Running dry (only on the change from playing to dry): the ring-out starts, the dry spell is counted now, and
+    // playback holds until the buffer is back at its depth (see the top of this function).
+    if (!holding && resampler_.read_available() < readsamples){
+        if (streamstate_.update_state(AOO_SOURCE_STATE_STOP)){
+            dry_ = true; fi_left_ = 0;
+            ro_base_ = hist_wf_; ro_pos_ = 0;
+            ro_period_ = (dry_fade_on_ && bframes > 0) ? ro_find_period(nchannels, decoder_->samplerate()) : 0;
+            ro_span_ = (dry_fade_on_ && bframes > 0)
+                ? (ro_period_ > 0 ? ro_total_pitch_ : std::min<int32_t>(ro_total_, hist_nf_ - (hist_nf_ % bframes))) : 0;
+            ro_left_ = ro_span_;
+            // push "stop" event
+            event e;
+            e.type = AOO_SOURCE_STATE_EVENT;
+            e.source_state.endpoint = endpoint_;
+            e.source_state.id = id_;
+            e.source_state.state = AOO_SOURCE_STATE_STOP;
+            push_event(e);
+            trace_dry_.fetch_add(1, std::memory_order_relaxed);   // Trace (state-change only)
+            // this doesn't do anything if the stream simply stopped
+            streamstate_.set_underrun();
+            if (late_resync_){
+                gate_prev_ = 0; gate_dropped_ = 0; gate_frames_ = 0; gate_settle_ = 0;
+                gate_refill_pub_.store(0, std::memory_order_relaxed);
+                gate_fast_us_.store(0, std::memory_order_relaxed);
+                gated_.store(true, std::memory_order_relaxed);
+            }
+        }
+    }
+    // While dry, the ring-out plays on: as many blocks as this callback needs.
+    if (dry_ && ro_left_ > 0 && (size_t) nsamples <= scratch_.size()){
+        while (ro_left_ > 0 && resampler_.read_available() < readsamples && resampler_.write_available() >= nsamples){
+            ro_block(scratch_.data());
+            resampler_.write(scratch_.data(), nsamples);
+        }
+    }
     // read samples from resampler
     
     //LOG_VERBOSE("s.blocksize: " << s.blocksize() << "  size: " << numsampleframes << "  stride: " << stride << " readsamp: " << readsamples << " ravail: " << resampler_.read_available() << " wavail: " << resampler_.write_available());
     
-    if (resampler_.read_available() >= readsamples){
+    const int32_t ready = (int32_t) resampler_.read_available();
+    // While dry, what is there (the ring-out) is played now and padded with silence, so nothing stale comes out
+    // after the gap. Any other short callback waits, as before.
+    const int32_t take = ready >= readsamples ? readsamples
+                         : (dry_ && dry_fade_on_ && nchannels > 0) ? ready - (ready % nchannels) : 0;
+    if (take > 0){
         auto buf = (aoo_sample *)alloca(readsamples * sizeof(aoo_sample));
-        resampler_.read(buf, readsamples);
+        if (take < readsamples) std::fill(buf + take, buf + readsamples, 0);
+        resampler_.read(buf, take);
         trace_reads_.fetch_add(1, std::memory_order_relaxed);   // Trace
+
         drift_frames_ += numsampleframes;   // Counted only when frames are really delivered, not on early returns
 
         // sum source into sink (interleaved -> non-interleaved),
@@ -1739,7 +2069,7 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
 
         // LOG_DEBUG("read samples from source " << id_);
 
-        if (streamstate_.update_state(AOO_SOURCE_STATE_PLAY)){
+        if (!dry_ && streamstate_.update_state(AOO_SOURCE_STATE_PLAY)){
             // push "start" event
             event e;
             e.type = AOO_SOURCE_STATE_EVENT;
@@ -1750,25 +2080,8 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
         }
 
         return true;
-    } else {
-        // buffer ran out -> push "stop" event
-        if (streamstate_.update_state(AOO_SOURCE_STATE_STOP)){
-            event e;
-            e.type = AOO_SOURCE_STATE_EVENT;
-            e.source_state.endpoint = endpoint_;
-            e.source_state.id = id_;
-            e.source_state.state = AOO_SOURCE_STATE_STOP;
-            push_event(e);
-
-            LOG_VERBOSE("UNDERRUN resampler avail " << resampler_.read_available() << "  readsamp: " << readsamples);
-            trace_dry_.fetch_add(1, std::memory_order_relaxed);   // Trace (state-change only)
-
-            // this doesn't do anything if the stream simply stopped
-            streamstate_.set_underrun();
-        }
-
-        return false;
     }
+    return false;
 }
 
 int32_t source_desc::handle_events(aoo_eventhandler fn, void *user){
@@ -1801,7 +2114,7 @@ int32_t source_desc::refill_silence_to_target(int32_t headroom_blocks){
     while ((int32_t) audioqueue_.read_available() < want
            && audioqueue_.write_available() && infoqueue_.write_available()){
         auto ptr = audioqueue_.write_data();
-        if (!decoder_->decode(nullptr, 0, ptr, nsamples)) {
+        if (decoder_->decode(nullptr, 0, ptr, nsamples) < 0) {
             int n = decfail_log_n.fetch_add(1);
             if (n < 30 || (n % 200) == 0) {
                 LOG_WARNING("decode failed nsamples: " << nsamples << " audioqavail: " << audioqueue_.write_available() << " (#" << n << ")");
@@ -1812,6 +2125,7 @@ int32_t source_desc::refill_silence_to_target(int32_t headroom_blocks){
         block_info i;
         i.sr = decoder_->samplerate();
         i.channel = channel_;
+        i.refill = 1;
         infoqueue_.write(i);
         count++;
     }
@@ -1837,13 +2151,15 @@ bool source_desc::check_packet(const data_packet &d){
     if (d.sequence < next_){
         // block too old, discard!
         LOG_VERBOSE("discarded old block " << d.sequence);
+        // out of order and too late for its place: how late, in blocks
+        if (d.sequence < newest_ && d.framenum == 0) sink_evlog("late_discard", newest_ - d.sequence);
         return false;
     }
     auto diff = d.sequence - newest_;
 
     // check for large gap between incoming block and most recent block
     // (either network problem or stream has temporarily stopped.)
-    bool large_gap = newest_ > 0 && diff > blockqueue_.capacity();
+    bool large_gap = newest_ > 0 && diff > gap_limit();
 
     // check if we need to recover
     bool recover = streamstate_.need_recover();
@@ -1940,6 +2256,8 @@ bool source_desc::check_packet(const data_packet &d){
         // empty and re-dry at once; incoming blocks are absorbed by the blockqueue. Normal buffers keep
         // one slot of headroom so the next real block enters immediately.
         const int count = refill_silence_to_target((governor_target_blocks_ <= 2) ? 0 : 1);
+        gate_refill_pub_.fetch_add(count, std::memory_order_relaxed);   // the audio side does not take these for arrivals
+        sink_evlog("recovery_fill", count);
         if (count > 0) refill_pending_.store(1, std::memory_order_relaxed);   // Overshoot after this refill is drained at once
 
         if (count > 0){
@@ -1966,6 +2284,15 @@ bool source_desc::check_packet(const data_packet &d){
 bool source_desc::add_packet(const data_packet& d){
     auto block = blockqueue_.find(d.sequence);
     if (!block){
+        if (blockqueue_.full() && gated_.load(std::memory_order_relaxed)){
+            // The audio side is holding after a dry spell and the held burst is longer than both queues: the
+            // oldest queued block is late anyway.
+            const auto old = blockqueue_.front().sequence;
+            ack_list_.remove(old);
+            blockqueue_.pop_front();
+            if (next_ <= old) next_ = old + 1;
+            nextneedsfadein_ = next_;
+        }
         if (blockqueue_.full()){
             // if the queue is full, we have to drop a block;
             // in this case we send a block of zeros to the audio buffer.
@@ -2090,11 +2417,98 @@ static bool sb_newer_block_complete_impl(It from, It end, int32_t next){
     return false;
 }
 
+// Audio thread, once at the start of a dry spell: the period of the sound just played, in frames, or 0 when it has
+// no clear pitch. Autocorrelation of the last 40 ms (mono, every fourth frame) over periods of 2 to 25 ms, then one
+// pass at full rate around the best one.
+int32_t source_desc::ro_find_period(int32_t nchannels, int32_t samplerate) const {
+    if (hist_frames_ <= 0 || nchannels <= 0 || samplerate <= 0) return 0;
+    const int stride = 4;
+    const int N = std::min<int>(800, std::min<int>(hist_nf_, samplerate * 65 / 1000) / stride);
+    if (N < 240) return 0;
+    auto frame = [&](int32_t back) -> const aoo_sample* {
+        int32_t idx = (ro_base_ - 1 - back) % hist_frames_;
+        if (idx < 0) idx += hist_frames_;
+        return hist_.data() + (size_t) idx * nchannels;
+    };
+    float mono[800];
+    for (int i = 0; i < N; ++i){
+        const aoo_sample* f = frame((N - 1 - i) * stride);
+        float v = 0; for (int c = 0; c < nchannels; ++c) v += (float) f[c];
+        mono[i] = v;
+    }
+    const int minLag = std::max<int>(4, samplerate * 2 / 1000 / stride);
+    const int maxLag = std::min<int>(N / 2, samplerate * 25 / 1000 / stride);
+    const int win = std::min<int>(N - maxLag, samplerate * 40 / 1000 / stride);
+    if (maxLag <= minLag || win < 60) return 0;
+    float best = 0; int bestLag = 0;
+    float sc[512];
+    for (int lag = minLag; lag <= maxLag && lag < 512; ++lag){
+        float num = 0, den = 0;
+        for (int i = N - 1; i >= N - win; --i){
+            num += mono[i] * mono[i - lag];
+            den += mono[i] * mono[i] + mono[i - lag] * mono[i - lag];
+        }
+        sc[lag] = den > 1e-9f ? 2.0f * num / den : 0.0f;   // 1 = the same shape one period back
+        if (sc[lag] > best){ best = sc[lag]; bestLag = lag; }
+    }
+    if (best < 0.6f || bestLag == 0) return 0;
+    // the shortest period that fits nearly as well (a note, not two or three of its periods)
+    for (int lag = minLag; lag < bestLag; ++lag){
+        if (sc[lag] >= 0.92f * best && sc[lag] >= sc[lag - 1] && sc[lag] >= sc[lag + 1]){ bestLag = lag; break; }
+    }
+    // full rate around it
+    int P = bestLag * stride; float pbest = -1;
+    const int fwin = std::min<int>(samplerate * 20 / 1000, hist_nf_ - (bestLag * stride + stride + 1));
+    if (fwin < 64) return 0;
+    for (int cand = bestLag * stride - (stride - 1); cand <= bestLag * stride + (stride - 1); ++cand){
+        float num = 0, den = 0;
+        for (int i = 0; i < fwin; ++i){
+            const aoo_sample* a = frame(i); const aoo_sample* b = frame(i + cand);
+            float va = 0, vb = 0; for (int c = 0; c < nchannels; ++c){ va += (float) a[c]; vb += (float) b[c]; }
+            num += va * vb; den += va * va + vb * vb;
+        }
+        const float sc2 = den > 1e-9f ? 2.0f * num / den : 0.0f;
+        if (sc2 > pbest){ pbest = sc2; P = cand; }
+    }
+    // needs two periods of history behind the start for the ease at each turn
+    if (P < 16 || hist_nf_ < 2 * P + 8) return 0;
+    return P;
+}
+
+void source_desc::governor_thresholds(int32_t T){
+    governor_arm_blocks_ = gov_arm_for(T, governor_v4_, adapt_on_);
+    const int32_t room = adapt_on_ ? (int32_t) blockqueue_.capacity() : T + std::max<int32_t>(gov_bq_extra_, governor_arm_blocks_ + 3);
+    governor_emerg_lead_ = governor_v4_ ? std::max<int32_t>(governor_arm_blocks_ + 1, room - 2) : 5;
+}
+
+// An iso sink's queue is sized for its largest depth; the limits follow the depth in use, as they did when the
+// queue was sized for it.
+int32_t source_desc::gap_limit() const {
+    return iso_cap_blocks_ > 0 ? governor_target_blocks_ + std::max<int32_t>(gov_bq_extra_, governor_arm_blocks_ + 3)
+                               : (int32_t) blockqueue_.capacity();
+}
+
+// A block that is missing while newer ones are here may only be out of order. SB_AOO_LATE_WAIT_BLOCKS=<n> waits for
+// it while fewer than n newer blocks have come and its place in the audio queue is not needed yet. Off by default:
+// the blocks held behind it are only handed on at the next arrival, so while the wait lasts the buffer is that much
+// shallower against a gap in the arrivals.
+bool source_desc::late_can_wait(const sink& s, int32_t missing, int32_t next) const {
+    if (!aoo_sb_loss_fill_on() || s.resend_limit() > 0 || missing < 1) return false;
+    if (gated_.load(std::memory_order_relaxed)) return false;
+    static const int32_t cap = std::max<int32_t>(0, sink_tap_int("SB_AOO_LATE_WAIT_BLOCKS", 0, nullptr));
+    const int32_t floor = percb_pub_.load(std::memory_order_relaxed) + 1;
+    const int32_t room = std::min<int32_t>(cap, governor_target_blocks_ - floor);
+    if (room < 1) return false;
+    if ((int32_t) audioqueue_.read_available() <= floor) return false;
+    return newest_ - next < room;
+}
+
 void source_desc::process_blocks(const sink& s){
     g_sbEvSink = s.id(); g_sbEvSrc = id_;   // Evlog stream identity
     // Transfer all consecutive complete blocks as long as
     // no previous (expected) blocks are missing.
     if (blockqueue_.empty()){
+        gate_lead_pub_.store(0, std::memory_order_relaxed);
         return;
     }
 
@@ -2117,7 +2531,8 @@ void source_desc::process_blocks(const sink& s){
 
             b++;
         } else if (!ack_list_.get(next).remaining()
-                   && (s.resend_limit() > 0 || sb_newer_block_complete_impl(b, blockqueue_.end(), next))){
+                   && (s.resend_limit() > 0 || sb_newer_block_complete_impl(b, blockqueue_.end(), next))
+                   && !late_can_wait(s, b->sequence - next, next)){
             // block won't be resent, just drop it
             // With resend off, remaining is 0 from the start, so the first frame of a multi-frame block would
             // make the still-incomplete head block "unresent". Instead, with resend off, an incomplete head
@@ -2190,6 +2605,8 @@ void source_desc::process_blocks(const sink& s){
         blockqueue_.pop_front();
     }
     LOG_DEBUG("next: " << next_);
+    // finished blocks the audio queue had no room for: the audio side keeps holding while there are any
+    gate_lead_pub_.store((!audioqueue_.write_available() && !blockqueue_.empty()) ? (int32_t) blockqueue_.size() : 0, std::memory_order_relaxed);
 
     // ─── DEPTH GOVERNOR (SB_AOO_DRAIN, default on) ───
     // ~44 ppm producer/consumer clock skew deposits one complete block per minute behind a full
@@ -2258,6 +2675,14 @@ void source_desc::process_blocks(const sink& s){
         static const int32_t depth_trace_tap = sink_tap_int("SB_AOO_DEPTH_TRACE", 0, nullptr);   // Trace/ASRC run with the governor off too
         if (drain_enabled || depth_trace_tap > 0 || drift_on_){
             int32_t lead = 0;
+            if (!blockqueue_.empty() && blockqueue_.front().sequence > next_ && late_can_wait(s, blockqueue_.front().sequence - next_, next_)){
+                // held behind a block that is waited for: they are depth all the same
+                lead = blockqueue_.front().sequence - next_;
+                int32_t seq = blockqueue_.front().sequence;
+                for (auto it = blockqueue_.begin();
+                     it != blockqueue_.end() && it->sequence == seq && it->complete();
+                     ++it, ++seq) ++lead;
+            } else
             if (!blockqueue_.empty() && blockqueue_.front().sequence == next_){
                 int32_t seq = next_;
                 for (auto it = blockqueue_.begin();
@@ -2302,7 +2727,17 @@ void source_desc::process_blocks(const sink& s){
             if (adapt_shrink_pending_ && excess <= 0) adapt_shrink_pending_ = false;   // Nothing to drain
             if (excess <= 0 && adapt_glide_active_.load(std::memory_order_relaxed)){ adapt_glide_active_.store(false, std::memory_order_relaxed); sink_evlog("adapt_glide_done", depth); }
             if (drift_on_) drift_tick(s, s.elapsed_time(), depth, target);   
-            if (drain_enabled && excess > 0){
+            // While the audio side holds after a dry spell it trims the queue itself, from the front.
+            const bool gated = gated_.load(std::memory_order_relaxed);
+            if (gated) governor_armed_ = false;
+            // Back at or under the target: what armed the governor was a clump of arrivals, not surplus. Without
+            // this a clump stays armed through the dip and is drained at the next clump.
+            // SB_AOO_GOV_DISARM=0: the armed state survives the dip (the former behaviour).
+            {
+                static const int32_t disarm = sink_tap_int("SB_AOO_GOV_DISARM", 1, nullptr);
+                if (disarm && excess <= 0) governor_armed_ = false;
+            }
+            if (drain_enabled && excess > 0 && !gated){
                 const bool v4 = governor_v4_;
                 // Fixed thresholds (+2 band, emergency at excess > 4) unless v4, which uses the
                 // target-scaled thresholds computed once per rebuild in do_update().
@@ -2440,8 +2875,181 @@ void source_desc::process_blocks(const sink& s){
 //   SB_AOO_DRIFT_GAIN_PCT (60) to the ratio. A step is limited by SB_AOO_DRIFT_SLEW_PPM_S (5 ppm/s)
 //   and SB_AOO_DRIFT_STEP_MAX_PPM (15); the ratio clamps at +/-SB_AOO_DRIFT_MAX_PPM (500).
 //   ppm > 0 = we consume the source faster.
+static const float kRegNone = 1e30f;   // a second without a value
+
+static float reg_median(float* v, int32_t n){ std::nth_element(v, v + n / 2, v + n); return v[n / 2]; }
+
+// Slope of the per-second offsets [first, first + nb) in ppm: the median over pairs a quarter window apart.
+// Where the level changes for good (the path changed, callbacks of ours never ran, the sender skipped blocks) the
+// median of the five seconds after a boundary differs from the five before it: that is a break, and a pair that
+// straddles one is left out. A second or two of late arrivals moves neither median and is one stray pair among
+// many. Nothing is taken out of the data. The uncertainty is the spread of the pairs, counted as the few
+// independent ones they are; it is never below an eighth of a block over the window, nor below what a path that
+// wanders by a quarter block in 40 s leaves. No result when too much of the window is missing or broken up.
+bool source_desc::reg_estimate(int32_t first, int32_t nb, double sink_sr, double block_frames, double& ppm, double& se) const {
+    if (nb < 20 || first < 0 || first + nb > reg_nb_) return false;
+    const float* raw = reg_bin_ + first;
+    float d[kRegBins], sl[kRegBins];
+    int16_t seg[kRegBins];
+    int32_t nd = 0, last = -1;
+    for (int32_t i = 0; i < nb; ++i){
+        if (raw[i] >= kRegNone) continue;
+        if (last >= 0) d[nd++] = (raw[i] - raw[last]) / (float) (i - last);
+        last = i;
+    }
+    if (nd < nb * 6 / 10) return false;
+    const float md = reg_median(d, nd);
+    for (int32_t i = 0; i < nd; ++i) d[i] = std::fabs(d[i] - md);
+    const float thr = std::max(0.25f * (float) block_frames, 6.0f * 1.4826f * reg_median(d, nd));
+    int32_t breaks = 0; int16_t cum = 0; bool in_run = false, run_up = false;
+    seg[0] = 0;
+    for (int32_t i = 1; i < nb; ++i){
+        float bv[5], av[5]; int32_t nbv = 0, nav = 0; double bi = 0, ai = 0;
+        for (int32_t j = i - 1; j >= 0 && nbv < 5; --j) if (raw[j] < kRegNone){ bv[nbv++] = raw[j]; bi += j; }
+        for (int32_t j = i; j < nb && nav < 5; ++j) if (raw[j] < kRegNone){ av[nav++] = raw[j]; ai += j; }
+        bool hit = false, up = false;
+        if (nbv >= 3 && nav >= 3){
+            const float jump = reg_median(av, nav) - reg_median(bv, nbv) - md * (float) (ai / nav - bi / nbv);
+            hit = std::fabs(jump) > thr; up = jump > 0;
+        }
+        if (hit){ if (!in_run || up != run_up) breaks++; cum++; }   // the change lies somewhere in the run
+        in_run = hit; run_up = up;
+        seg[i] = cum;
+    }
+    if (breaks > nb / 4) return false;
+    const int32_t L = std::max<int32_t>(5, nb / 4);
+    int32_t n = 0;
+    for (int32_t i = 0; i + L < nb; ++i)
+        if (raw[i] < kRegNone && raw[i + L] < kRegNone && seg[i + L] == seg[i]) sl[n++] = (raw[i + L] - raw[i]) / (float) L;
+    if (n < 8 || (breaks == 0 && n < (nb - L) * 6 / 10)) return false;
+    const double med = reg_median(sl, n);
+    for (int32_t i = 0; i < n; ++i) sl[i] = std::fabs(sl[i] - (float) med);
+    const double mad = reg_median(sl, n);
+    const double k = 1e6 / sink_sr;                            // frames per second -> ppm
+    const double groups = std::max(1.0, (double) n / (double) L);
+    ppm = med * k;
+    se = std::max(1.4826 * mad / std::sqrt(groups) * k, 0.125 * block_frames / (double) nb * k);
+    se = std::max(se, 25.0 / std::sqrt((double) nb));
+    return true;
+}
+
+void source_desc::reg_restart(double now){
+    reg_t0_ = now; reg_last_ = now; reg_bin_end_ = now + 1.0; reg_nb_ = 0; reg_ns_ = 0; reg_next_cp_ = 20;
+    reg_x0_ = drift_frames_entry_; reg_xseen_ = reg_x0_; reg_y0_ = newest_pub_.load(std::memory_order_relaxed);
+    reg_prev_se_ = -1;
+}
+
+// One value for the second that just ended: the median of its points. Test tap SB_AOO_DRIFT_BIN_PCT=<50..99>
+// takes a higher point of the second instead (toward the packets that came with the least delay).
+void source_desc::reg_close_bin(){
+    float v = kRegNone;
+    if (reg_ns_ >= 20){
+        static const int32_t pct = std::max<int32_t>(50, std::min<int32_t>(99, sink_tap_int("SB_AOO_DRIFT_BIN_PCT", 50, nullptr)));
+        const int32_t k = std::min<int32_t>(reg_ns_ - 1, reg_ns_ * pct / 100);
+        std::nth_element(reg_smp_, reg_smp_ + k, reg_smp_ + reg_ns_);
+        v = reg_smp_[k];
+        static const int32_t trace = sink_tap_int("SB_AOO_DEPTH_TRACE", 0, nullptr);
+        if (trace > 0) sink_evlog("asrc_off10", (int32_t) std::lround(std::max(-1e8f, std::min(1e8f, v)) * 10.0f));
+    }
+    if (reg_nb_ < kRegBins) reg_bin_[reg_nb_++] = v;
+    reg_ns_ = 0; reg_bin_end_ += 1.0;
+}
+
+// Network thread, per packet (SB_AOO_DRIFT_FAST=0 turns it off and leaves the 180-s windows below). One point per
+// callback of ours: how far the sender's sequence is ahead of our position at that moment. Neither moves with the
+// buffer level, so dry spells, cuts and refills do not enter. It runs for the life of the stream.
+// Windows grow from 20 to 320 s and start again; a result is applied when it differs from the correction in force
+// by clearly more than its own uncertainty AND confirms the window's previous result, so nothing is applied before
+// 40 s and a single disturbed window applies nothing. A short stretch never overrules a longer one by itself.
+// Returns true while it owns the rate.
+bool source_desc::drift_fast_tick(const sink& s, double now){
+    static const int32_t on = sink_tap_int("SB_AOO_DRIFT_FAST", 1, nullptr);
+    if (!on) return false;
+    const double sink_sr = (double) std::max<int32_t>(1, s.samplerate());
+    const double block_frames = (double) decoder_->blocksize() * sink_sr / (double) std::max<int32_t>(1, decoder_->samplerate());
+    if (reg_t0_ < 0){
+        // start 3 s after the stream (re)started: the join is not the clock
+        if (reg_last_ < 0){ reg_last_ = now; return true; }
+        if (now - reg_last_ < 3.0) return true;
+        reg_restart(now);
+        reg_k_ = block_frames; reg_dirty_seen_ = drift_dirty_sec_; reg_block_until_ = -1;
+        return true;
+    }
+    // One point per callback of ours, at most 100 a second: the sender's position minus ours, ours carried forward
+    // from the start of the callback to this moment, so the offset is fine-grained and not in whole blocks.
+    const int64_t x = drift_frames_entry_;
+    if (x != reg_xseen_ && now - reg_last_ >= 0.01){
+        reg_xseen_ = x; reg_last_ = now;
+        // a recovery brings a clump of arrivals: leave half a second out
+        if (drift_dirty_sec_ != reg_dirty_seen_){ reg_dirty_seen_ = drift_dirty_sec_; reg_block_until_ = now + 0.5; }
+        const double te = drift_entry_wall_;
+        const double since = sb_wall_seconds() - te;
+        if (now >= reg_block_until_ && !gated_.load(std::memory_order_relaxed) && reg_ns_ < kRegSmp
+            && drift_frames_entry_ == x && since >= 0 && since < 0.1){
+            const double o = (double) (newest_pub_.load(std::memory_order_relaxed) - reg_y0_) * reg_k_
+                           - ((double) (x - reg_x0_) + since * sink_sr);
+            reg_smp_[reg_ns_++] = (float) std::max(-1e9, std::min(1e9, o));
+        }
+    }
+    if (now < reg_bin_end_) return true;
+    while (now >= reg_bin_end_ && reg_nb_ < kRegBins) reg_close_bin();
+    static const int32_t max_ppm = std::max<int32_t>(10, sink_tap_int("SB_AOO_DRIFT_MAX_PPM", 500, nullptr));
+    auto apply = [&](double ppm){
+        drift_ppm_ = std::max(-(double) max_ppm, std::min((double) max_ppm, ppm));
+        reg_learned_ = true;
+        drift_publish();
+        sink_evlog("asrc_ppm10", (int32_t) std::lround(drift_ppm_ * 10.0));
+    };
+    double ppm = 0, se = 0;
+    if (reg_nb_ >= reg_next_cp_){
+        if (reg_estimate(0, reg_nb_, sink_sr, block_frames, ppm, se) && std::fabs(ppm) < 2000.0){
+            sink_evlog("asrc_lock_s", reg_nb_);
+            sink_evlog("asrc_lock_ppm10", (int32_t) std::lround(ppm * 10.0));
+            sink_evlog("asrc_lock_se10", (int32_t) std::lround(se * 10.0));
+            // short windows need a wider margin: a slow move of the path looks like drift for a few seconds
+            const double margin = reg_nb_ < 80 ? 3.0 : 2.0;
+            const bool confirmed = reg_prev_se_ >= 0 && std::fabs(ppm - reg_prev_ppm_) <= 3.0 * (se + reg_prev_se_);
+            if (confirmed && std::fabs(ppm - drift_ppm_) > margin * se) apply(ppm);
+            reg_prev_ppm_ = ppm; reg_prev_se_ = se;
+        }
+        reg_next_cp_ *= 2;
+        if (reg_nb_ >= kRegBins){ reg_restart(now); return true; }   // the window is full: the next one starts here, the correction stays
+    }
+    return true;
+}
+
+// Network thread, per packet, with the clock lock. The lock leaves a remainder it cannot resolve, and any remainder
+// walks the buffer empty or full in time. A few ppm (SB_AOO_DRIFT_LEVEL_PPM, 0 = off) hold the level where the
+// buffer is worth its depth in time: the depth read on arrival half a block above the target on average, which is
+// where the next block may be late by exactly the depth. Lower and the buffer is shallower than its depth; a whole
+// block higher and the governor sees a surplus. A callback of several blocks reads higher by half of the extra
+// blocks. The clock lock does not see the trim, its inputs do not move with the ratio.
+void source_desc::drift_level_tick(double now, int32_t depth, int32_t target){
+    static const double max_ppm = std::max(0.0, std::min(20.0, (double) sink_tap_int("SB_AOO_DRIFT_LEVEL_PPM", 5, nullptr)));
+    if (max_ppm <= 0) return;
+    if (lvl_t_ < 0){ lvl_t_ = now; lvl_sum_ = 0; lvl_n_ = 0; lvl_dirty_seen_ = drift_dirty_sec_; return; }
+    lvl_sum_ += (double) (depth - target); lvl_n_++;
+    if (now - lvl_t_ < 1.0) return;
+    const bool clean = lvl_dirty_seen_ == drift_dirty_sec_ && !gated_.load(std::memory_order_relaxed) && lvl_n_ >= 20;
+    if (clean){
+        const double err = lvl_sum_ / lvl_n_;                  // depth on arrival against the target, as the governor reads it
+        if (!lvl_init_){ lvl_ewma_ = err; lvl_init_ = true; }
+        else lvl_ewma_ += (err - lvl_ewma_) / 20.0;           // about 20 s
+        // test taps: the band's edges in tenths of a block, and the pull beyond them in tenths of a ppm per block
+        static const double lo = 0.1 * sink_tap_int("SB_AOO_DRIFT_LEVEL_LO10", 3, nullptr);
+        static const double hi = std::max(lo, 0.1 * sink_tap_int("SB_AOO_DRIFT_LEVEL_HI10", 7, nullptr));
+        static const double gain = std::max(0.0, 0.1 * sink_tap_int("SB_AOO_DRIFT_LEVEL_GAIN10", 100, nullptr));
+        const double lvl = lvl_ewma_ - 0.5 * (cb_blocks_pub_.load(std::memory_order_relaxed) - 1);
+        const double over = lvl > hi ? lvl - hi : (lvl < lo ? lvl - lo : 0.0);
+        const double trim = std::max(-max_ppm, std::min(max_ppm, gain * over));
+        if (std::fabs(trim - drift_trim_ppm_) >= 0.05){ drift_trim_ppm_ = trim; drift_publish(); }
+        static const int32_t trace = sink_tap_int("SB_AOO_DEPTH_TRACE", 0, nullptr);
+        if (trace > 0 && ++lvl_log_ >= 10){ lvl_log_ = 0; sink_evlog("asrc_trim_ppm10", (int32_t) std::lround(drift_trim_ppm_ * 10.0)); sink_evlog("asrc_lvl10", (int32_t) std::lround(lvl * 10.0)); }
+    }
+    lvl_t_ = now; lvl_sum_ = 0; lvl_n_ = 0; lvl_dirty_seen_ = drift_dirty_sec_;
+}
+
 void source_desc::drift_tick(const sink& s, double now, int32_t depth, int32_t target){
-    (void) depth; (void) target;
     // Same method as the hub clock lock:
     //   source audio-time delivered (newest sequence advance × source block period)
     //   vs sink audio-time consumed (frames consumed / sink rate), over a WIN_S window, under the CURRENT ratio.
@@ -2453,6 +3061,7 @@ void source_desc::drift_tick(const sink& s, double now, int32_t depth, int32_t t
     static const int32_t max_ppm  = std::max<int32_t>(10, sink_tap_int("SB_AOO_DRIFT_MAX_PPM", 500, nullptr));
     static const int32_t trace    = sink_tap_int("SB_AOO_DEPTH_TRACE", 0, nullptr);
     if (!decoder_) return;
+    if (drift_fast_tick(s, now)){ drift_last_t_ = -1; drift_level_tick(now, depth, target); return; }   // the clock lock owns the rate
     const double src_block_s = (double) decoder_->blocksize() / (double) std::max<int32_t>(1, decoder_->samplerate());
     const double sink_sr = (double) std::max<int32_t>(1, s.samplerate());
     auto reset_win = [&](){ drift_win_t0_ = now; drift_seq0_ = newest_pub_.load(std::memory_order_relaxed); drift_frames0_ = drift_frames_; drift_fentry0_ = drift_frames_entry_; drift_silence0_ = drift_silence_frames_; drift_skipped0_ = drift_skipped_blocks_; drift_win_drained_ = 0; drift_dirty_sec_ = 0; };
@@ -2494,6 +3103,84 @@ void source_desc::drift_tick(const sink& s, double now, int32_t depth, int32_t t
         }
     }
     reset_win();
+}
+
+// ─── Lateness against schedule ───
+// Network thread. A block is due at anchor + sequence x block period; the anchor follows the earliest arrivals of
+// the last 3 s, so a clock difference or a lasting change of the path delay moves the schedule and is not read
+// as lateness. One rise and fall is one event, counted at its peak when it has fallen to half.
+void source_desc::late_track(const data_packet& d, double now){
+    lt_event_ms_ = -1;
+    if (lt_block_s_ <= 0){
+        if (!decoder_ || decoder_->blocksize() <= 0 || decoder_->samplerate() <= 0) return;
+        lt_block_s_ = (double) decoder_->blocksize() / (double) decoder_->samplerate();
+    }
+    if (lt_slice_t0_ < 0) lt_slice_t0_ = now;
+    if (now - lt_slice_t0_ >= 10.0){
+        const int32_t n = (lt_slice_ + 1) % kLtSlices;
+        for (auto& a : lt_hist_[n]) a.store(0, std::memory_order_relaxed);
+        for (auto& a : lt_fine_[n]) a.store(0, std::memory_order_relaxed);
+        lt_total_[n].store(0, std::memory_order_relaxed);
+        lt_slice_ = n; lt_slice_t0_ = now;
+    }
+    auto anchor = [&](){
+        lt_t0_ = now; lt_seq0_ = d.sequence; lt_env_t0_ = now; lt_env_idx_ = 0;
+        for (auto& m : lt_env_min_) m = 1e9;
+        lt_env_min_[0] = 0; lt_in_ = false; lt_wait_ = false; lt_peak_ = 0;
+    };
+    if (lt_t0_ < 0) anchor();
+    double raw = (now - lt_t0_) - (double) (d.sequence - lt_seq0_) * lt_block_s_;
+    if (now - lt_env_t0_ > 0.5 * kLtEnv){ for (auto& m : lt_env_min_) m = 1e9; lt_env_t0_ = now; }   // a pause: a new schedule
+    while (now - lt_env_t0_ >= 0.5){
+        lt_env_idx_ = (lt_env_idx_ + 1) % kLtEnv; lt_env_min_[lt_env_idx_] = 1e9; lt_env_t0_ += 0.5;
+    }
+    double env = raw;
+    for (double m : lt_env_min_) if (m < env) env = m;
+    if (raw - env > 1.0){ anchor(); raw = 0; env = 0; }   // a second late is a new stream, not lateness
+    if (raw < lt_env_min_[lt_env_idx_]) lt_env_min_[lt_env_idx_] = raw;
+    const double ms = (raw - env) * 1e3;
+    lt_total_[lt_slice_].fetch_add(1, std::memory_order_relaxed);
+    if (lt_wait_){
+        // the tail of a counted event is not a new one: wait until the stream is back on schedule
+        if (ms <= 0.5) lt_wait_ = false;
+        else if (ms > lt_last_peak_){ lt_wait_ = false; lt_in_ = true; lt_peak_ = ms; }
+    } else if (!lt_in_){
+        if (ms > 0.5){ lt_in_ = true; lt_peak_ = ms; }
+    } else if (ms > lt_peak_){
+        lt_peak_ = ms;
+    } else if (ms <= std::max(0.5, 0.5 * lt_peak_)){
+        const int32_t b = std::min<int32_t>(AOO_LATE_BUCKETS - 1, std::max<int32_t>(0, (int32_t) std::ceil(lt_peak_)));
+        const int32_t f = std::min<int32_t>(AOO_LATE_FINE - 1, std::max<int32_t>(0, (int32_t) std::ceil(lt_peak_ * 4.0)));
+        lt_hist_[lt_slice_][b].fetch_add(1, std::memory_order_relaxed);
+        lt_fine_[lt_slice_][f].fetch_add(1, std::memory_order_relaxed);
+        lt_event_ms_ = lt_peak_;
+        if (lt_peak_ > 3.0) sink_evlog("late_ev_ms10", (int32_t) (lt_peak_ * 10.0));
+        lt_last_peak_ = lt_peak_; lt_wait_ = ms > 0.5;
+        lt_in_ = false; lt_peak_ = 0;
+    }
+}
+
+// Any thread: counts of late events longer than b ms over the window, as the gap window of the hub reads.
+void source_desc::late_window(aoo_late_window& out){
+    uint32_t cum = 0; out.max_ms = 0; out.total = 0;
+    for (int32_t b = AOO_LATE_BUCKETS - 1; b >= 0; --b){
+        uint32_t c = 0; for (int32_t sl = 0; sl < kLtSlices; ++sl) c += lt_hist_[sl][b].load(std::memory_order_relaxed);
+        if (c && out.max_ms == 0) out.max_ms = (float) b;
+        out.above[b] = cum; cum += c;
+    }
+    uint32_t cumf = 0;
+    for (int32_t b = AOO_LATE_FINE - 1; b >= 0; --b){
+        uint32_t c = 0; for (int32_t sl = 0; sl < kLtSlices; ++sl) c += lt_fine_[sl][b].load(std::memory_order_relaxed);
+        out.above_fine[b] = cumf; cumf += c;
+    }
+    for (int32_t sl = 0; sl < kLtSlices; ++sl) out.total += lt_total_[sl].load(std::memory_order_relaxed);
+    if (out.clear){
+        for (int32_t sl = 0; sl < kLtSlices; ++sl){
+            for (auto& a : lt_hist_[sl]) a.store(0, std::memory_order_relaxed);
+            for (auto& a : lt_fine_[sl]) a.store(0, std::memory_order_relaxed);
+            lt_total_[sl].store(0, std::memory_order_relaxed);
+        }
+    }
 }
 
 // ─── WAN ADAPTIVE receive depth ───
@@ -2547,6 +3234,10 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
                 sink_evlog("adapt_gap_lan10", (int32_t) (gap_ms * 10.0));
                 sink_evlog("adapt_gap_lan_seqjump", adapt_last_seq_ >= 0 ? (int32_t) (d.sequence - adapt_last_seq_) : -1);
             }
+            // With lateness sizing the histogram takes late events (their peak), not arrival gaps.
+            const bool lt_on = hold_lateness_on();
+            if (lt_on && lt_event_ms_ >= 0){ gap_ms = lt_event_ms_; sink_evlog("adapt_late_ev10", (int32_t) (gap_ms * 10.0)); }
+            if (!lt_on || lt_event_ms_ >= 0){
             const int32_t b = gap_ms < 0 ? 0 : std::min<int32_t>(kAdaptHistBuckets - 1, (int32_t) gap_ms);
             // A gap longer than max(2 x hold, hold + 10 ms) is a STALL, not lateness (the hub's rule). Stalls
             // stay OUT of the need histogram unless they RECUR (> 2/min averaged over 2 min = more than 4 in the
@@ -2573,7 +3264,7 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
             }
             if (!adapt_lan_profile_ && adapt_block_s_ > 0 && adapt_warm_){
                 static const double stall_extra_ms = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_STALL_EXTRA_MS", 10, nullptr) * 1.0);
-                static const double stall_recur_per_min = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_STALL_RECUR_PER_MIN", 2, nullptr) * 1.0);
+                static const double stall_recur_per_min = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_STALL_RECUR_PER_MIN", sink_tap_int("SB_HOLD_ALLOW_PER_MIN", 2, nullptr), nullptr) * 1.0);
                 static const int32_t quick_s2 = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_QUICK_S", 10, nullptr));
                 const double depth_ms = governor_target_blocks_ * adapt_block_s_ * 1e3;
                 const double stall_ms = std::max(2.0 * depth_ms, depth_ms + stall_extra_ms);
@@ -2598,6 +3289,7 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
             if (adapt_block_s_ > 0){
                 const double depth_ms = governor_target_blocks_ * adapt_block_s_ * 1e3;
                 if (gap_ms > depth_ms && gap_ms > adapt_emerg_late_ms_) adapt_emerg_late_ms_ = gap_ms;
+            }
             }
         }
         adapt_last_arrival_ = anow; adapt_last_seq_ = d.sequence;
@@ -2743,7 +3435,7 @@ void source_desc::adapt_retarget(const sink& s, double now){
         // Need = the smallest gap H (ms) with at most SB_AOO_ADAPT_LATE_PER_MIN (2, the hub's budget) gaps per
         // minute above it, plus one block of margin (+2 ms on WAN, as the hub does). One burst does not move
         // the need; two a minute do.
-        static const double late_per_min = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_LATE_PER_MIN", 2, nullptr) * 1.0);
+        static const double late_per_min = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_LATE_PER_MIN", sink_tap_int("SB_HOLD_ALLOW_PER_MIN", 2, nullptr), nullptr) * 1.0);
         const double window_s = 10.0 * adapt_hist_filled_ + std::max(0.0, now - adapt_hist_slice_t0_);
         // The histogram drives the target only once it holds >= 30 s, and always tolerates at least one gap,
         // so one launch gap in a short window cannot park the buffer at the ceiling.
@@ -3014,7 +3706,9 @@ void source_desc::adapt_apply_target(int32_t T){
     depth_pub_.store(T, std::memory_order_relaxed);   
     audioqueue_target_samples_.store(T * (int32_t) audioqueue_.blocksize(), std::memory_order_relaxed);
     sink_evlog("adapt_target", T);
-    if (T > old){
+    if (T > old && gated_.load(std::memory_order_relaxed)){
+        adapt_shrink_pending_ = false;   // the audio side is holding after a dry spell and fills to the new depth itself
+    } else if (T > old){
         const int32_t n = refill_silence_to_target(0);
         drift_silence_frames_ += (int64_t) n * audioqueue_.blocksize();   // A level move, not the sink running ahead
         nextneedsfadein_ = next_; sink_evlog("fade_arm", next_);
@@ -3031,7 +3725,7 @@ void source_desc::adapt_apply_target(int32_t T){
 void source_desc::check_outdated_blocks(){
     // pop outdated blocks (shouldn't really happen...)
     while (!blockqueue_.empty() &&
-           (newest_ - blockqueue_.front().sequence) >= blockqueue_.capacity())
+           (newest_ - blockqueue_.front().sequence) >= gap_limit())
     {
         auto old = blockqueue_.front().sequence;
         LOG_VERBOSE("pop outdated block " << old);

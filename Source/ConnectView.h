@@ -74,6 +74,9 @@ public:
     void showActiveGroupTab();
     void showPrivateGroupTab();
     void showPublicGroupTab();
+    void showStagesTab();
+    void setBrowseOnly(bool browse);   // in a stage: the stage list alone, no connect forms
+    StagesView * getStagesView() const { return mStagesView.get(); }
 
     String getServerHostText() const { return mServerHostEditor->getText(); }
 
@@ -167,6 +170,7 @@ protected:
     bool stagesTabShowing() const;
     void updateStagesActive();
     bool mTabsReady = false;
+    bool mBrowseOnly = false;
     std::unique_ptr<StagesView> mStagesView;
     std::unique_ptr<TabbedComponent> mConnectTab;
     std::unique_ptr<Component> mDirectConnectContainer;

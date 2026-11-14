@@ -23,6 +23,7 @@
 #include "LatencyMatchView.h"
 #include "SuggestNewGroupView.h"
 #include "SonoCallOutBox.h"
+#include "StagesView.h"
 #include <sstream>
 
 #if JUCE_ANDROID
@@ -294,6 +295,14 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     LookAndFeel::setDefaultLookAndFeel(&sonoLookAndFeel);
     
     sonoLookAndFeel.setUsingNativeAlertWindows(true);
+
+    // Test aid: SB_UI_CMD=<folder> runs one-line commands from <folder>/cmd.txt (see runUiCommand).
+    const String uiCmd = SystemStats::getEnvironmentVariable("SB_UI_CMD", {});
+    if (uiCmd.isNotEmpty()) {
+        mUiCmdDir = File(uiCmd);
+        mUiCmdDir.createDirectory();
+        sonoLookAndFeel.setUsingNativeAlertWindows(false);   // dialogs the test can see and answer
+    }
 
     mSettingsFolder = processor.getSupportDir();
 
@@ -733,6 +742,15 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     //mAltConnectButton->setColour(TextButton::buttonColourId, Colours::transparentBlack);
     mAltConnectButton->setTooltip(TRANS("Show the connections page, while staying connected to current stage"));
     mAltConnectButton->setTitle(TRANS("Connect to Other"));
+
+    mStagesButton = std::make_unique<SonoTextButton>("stages");
+    mStagesButton->setButtonText(TRANS("Stages"));
+    mStagesButton->addListener(this);
+    mStagesButton->setColour(TextButton::buttonColourId, Colour::fromFloatRGBA(0.1, 0.4, 0.6, 0.6));
+    mStagesButton->setColour(SonoTextButton::outlineColourId, Colour::fromFloatRGBA(0.5, 0.5, 0.5, 0.4));
+    mStagesButton->setTextJustification(Justification::centred);
+    mStagesButton->setTooltip(TRANS("See the other stages and who is playing, while you stay on this one"));
+    mStagesButton->setTitle(TRANS("Stages"));
 
 
     mVideoButton = std::make_unique<SonoDrawableButton>("vid", DrawableButton::ButtonStyle::ImageOnButtonBackground);
@@ -1183,7 +1201,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
             mMainMuteButton.get(), mMainRecvMuteButton.get(), mMainPushToTalkButton.get(),
             mMetEnableButton.get(), mMetConfigButton.get(), mMetSendButton.get(),
             mMetSyncButton.get(), mMetSyncFileButton.get(),
-            mConnectButton.get(), mAltConnectButton.get(), mVideoButton.get(),
+            mConnectButton.get(), mAltConnectButton.get(), mStagesButton.get(), mVideoButton.get(),
             mPatchbayButton.get(), mSetupAudioButton.get(), mSettingsButton.get(),
             mMainLinkButton.get(), mChatButton.get(), mSoundboardButton.get(),
             mEffectsButton.get(), mSendChannelsChoice.get(),
@@ -1239,6 +1257,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mTopLevelContainer->addAndMakeVisible (mSettingsButton.get());
     mTopLevelContainer->addAndMakeVisible(mConnectButton.get());
     mTopLevelContainer->addChildComponent(mAltConnectButton.get());
+    mTopLevelContainer->addChildComponent(mStagesButton.get());
     mTopLevelContainer->addChildComponent(mVideoButton.get());
     mTopLevelContainer->addAndMakeVisible(mMainStatusLabel.get());
     mTopLevelContainer->addAndMakeVisible(mTopologyModeLabel.get());
@@ -1995,6 +2014,8 @@ String SonobusAudioProcessorEditor::inputMeterChannelName(int ch, int n)
 void SonobusAudioProcessorEditor::timerCallback(int timerid)
 {
     if (timerid == PeriodicUpdateTimerId) {
+        if (mUiCmdDir != File()) runUiCommand();
+
         // Audio health (callbacks vs expected, CoreAudio overloads) every 10 s
         if (JUCEApplicationBase::isStandaloneApp() && getAudioDeviceManager()) {
             if (auto * ad = getAudioDeviceManager()->getCurrentAudioDevice()) {
@@ -2194,6 +2215,9 @@ void SonobusAudioProcessorEditor::buttonClicked (Button* buttonThatWasClicked)
             }
         }
         
+    }
+    else if (buttonThatWasClicked == mStagesButton.get()) {
+        showConnectPopup(!mConnectView->isVisible());   // browsing only: the stage stays connected
     }
     else if (buttonThatWasClicked == mSetupAudioButton.get()) {
         if (!settingsCalloutBox) {
@@ -3365,12 +3389,47 @@ void SonobusAudioProcessorEditor::showSuggestGroupView(bool show)
 }
 
 
+// Test aid: stages | close | shot <name> | join <stage> | password <text> | answer <0|1> | touch | stat
+void SonobusAudioProcessorEditor::runUiCommand()
+{
+    const File f = mUiCmdDir.getChildFile("cmd.txt");
+    if (! f.existsAsFile()) return;
+    const String line = f.loadFileAsString().trim();
+    f.deleteFile();
+    const String verb = line.upToFirstOccurrenceOf(" ", false, false), arg = line.fromFirstOccurrenceOf(" ", false, false).trim();
+    auto save = [this](Component & c, const String & name) {
+        const File out = mUiCmdDir.getChildFile(name + ".png");
+        out.deleteFile();
+        FileOutputStream os(out);
+        if (os.openedOk()) PNGImageFormat().writeImageToStream(c.createComponentSnapshot(c.getLocalBounds(), true, 1.0f), os);
+    };
+    auto * modal = ModalComponentManager::getInstance()->getModalComponent(0);
+    auto * list = mConnectView->getStagesView();
+    String out = "ok";
+    if (verb == "stages") buttonClicked(mStagesButton.get());
+    else if (verb == "close") showConnectPopup(false);
+    else if (verb == "shot") { save(*this, arg); if (modal != nullptr) save(*modal, arg + "-dialog"); }
+    else if (verb == "join") out = list->joinByName(arg) ? "asked" : "no such stage";
+    else if (verb == "password") { auto * aw = dynamic_cast<AlertWindow*>(modal); if (aw != nullptr && aw->getTextEditor("pw") != nullptr) aw->getTextEditor("pw")->setText(arg); else out = "no password dialog"; }
+    else if (verb == "answer") { if (modal != nullptr) modal->exitModalState(arg.getIntValue()); else out = "no dialog"; }
+    else if (verb == "touch") list->touched();
+    else if (verb != "stat") out = "unknown command";
+    mUiCmdDir.getChildFile("log.txt").appendText(Time::getCurrentTime().toString(false, true) + " | " + line + " | " + out
+        + " | stage '" + processor.getCurrentJoinedGroup() + "' port " + String(processor.getServerPortAsTyped())
+        + " | button " + (mStagesButton->isVisible() ? "shown" : "hidden") + ", list " + (mConnectView->isVisible() ? "open" : "closed")
+        + ", dialog " + (modal != nullptr ? "open" : "none") + " | " + list->counters() + "\n");
+}
+
 void SonobusAudioProcessorEditor::showConnectPopup(bool flag)
 {
     if (flag) {
         mConnectView->toFront(true);
 
         mConnectView->updateState();
+
+        const bool inStage = processor.isConnectedToServer() && processor.getCurrentJoinedGroup().isNotEmpty();
+        mConnectView->setBrowseOnly(inStage);
+        if (inStage) mConnectView->showStagesTab();
 
         mConnectView->setVisible(true);
 
@@ -3771,6 +3830,16 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
         mConnectButton->setToggleState(false, dontSendNotification);
         
         mPeerContainer->resetPendingUsers();
+    }
+
+    {
+        const bool inStage = currConnected && currGroup.isNotEmpty();
+        mConnectView->setBrowseOnly(inStage);
+        if (mStagesButton->isVisible() != inStage) {
+            mStagesButton->setVisible(inStage);
+            updateLayout();
+            resized();
+        }
     }
 
     if (mRecordingButton) {
@@ -5032,6 +5101,10 @@ void SonobusAudioProcessorEditor::updateLayout()
     }
     titleBox.items.add(FlexItem(4, 4).withMargin(1).withFlex(0.0));
     titleBox.items.add(FlexItem(minButtonWidth, minitemheight, *mConnectButton).withMargin(0).withFlex(1));
+    if (mStagesButton->isVisible()) {
+        titleBox.items.add(FlexItem(4, 4).withMargin(1).withFlex(0.0));
+        titleBox.items.add(FlexItem(72, minitemheight, *mStagesButton).withMargin(0).withFlex(0));
+    }
     // The globe "Connect to Other" button (stock SonoBus public-rooms browser) has no
     // meaning on a private hub; never shown.
     mAltConnectButton->setVisible(false);

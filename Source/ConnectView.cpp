@@ -97,6 +97,7 @@ publicGroupsListModel(this)
     // The public stage list. A join from it goes the same way as a recent connection.
     mStagesView = std::make_unique<StagesView>();
     mStagesView->currentStage = [this] { return processor.isConnectedToServer() ? processor.getCurrentJoinedGroup() : String(); };
+    mStagesView->currentPort = [this] { return processor.getServerPortAsTyped(); };
     mStagesView->userName = [this] { return mServerUsernameEditor->getText().trim(); };
     mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
     mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
@@ -910,6 +911,20 @@ void ConnectView::showPrivateGroupTab()
 void ConnectView::showPublicGroupTab()
 {
     showPrivateGroupTab();   // there is no public group tab
+}
+
+void ConnectView::showStagesTab()
+{
+    mConnectTab->setCurrentTabIndex(tabIndexOf(mStagesView.get()));
+}
+
+void ConnectView::setBrowseOnly(bool browse)
+{
+    if (mBrowseOnly == browse) return;
+    mBrowseOnly = browse;
+    mConnectTab->setTabBarDepth(browse ? 0 : 36);
+    mConnectTitle->setText(browse ? TRANS("Stages") : TRANS("Connect"), dontSendNotification);
+    if (browse) showStagesTab();
 }
 
 bool ConnectView::getServerGroupAndPasswordText(String & retgroup, String & retpass) const

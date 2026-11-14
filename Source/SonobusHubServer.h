@@ -406,6 +406,9 @@ struct HubPeer {
     bool     holdGapsCleared = false;  // Join transient dropped
     int64_t  holdClearedAtMs = 0;      //   at ~5 s; the measurement window counts from here
     bool     holdQuickDone = false;    //   one QUICK jump to the 10-s measured need
+    uint32_t holdEarlyDry = 0;         // dry spells of the sink seen by the early reaction
+    uint32_t holdEarlyDryTicks = 0;    //   and how many separate moments they came in since its last step
+    std::atomic<uint32_t> fmtEvents{0};   // format messages seen (each restarts the sink and counts there as a dry spell)
     uint32_t holdStallRing[12] = {};  // STALL gaps (far longer than the hold) per 10-s sample, last 2 min
     int      holdStallIdx = 0;        // Next slot in holdStallRing; holdLatePrev: previous sample's 60-s late count, to see how many NEW late blocks arrived in the last 10 s (emergency grow)
     std::atomic<bool> holdAtCeiling { false };
