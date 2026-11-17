@@ -201,6 +201,7 @@ struct HubOutFeed {
     int32_t clientOurId = -1;   // listener's local oursink id for this sender
     int32_t channels    = 0;    // sender's recvChannels at the time of allocation
     uint32_t lastSeqRead = 0;   // Dup/skip cadence detector
+    float rampCoef = 0.0f;      // gain in force at the end of the last block (listener's feed pump only)
     // Serializes audio-thread feed.source->process against any reconfiguration
     // (channel-count change driven by sender's AOO_SOURCE_FORMAT_EVENT).
     std::mutex lock;
@@ -401,6 +402,11 @@ struct HubPeer {
     int64_t holdFastAtMs = 0;         // time of the last one-step return
     double  holdFastToMs = 0;         // hold that step chose
     int     holdDecayWindows = 0;     // consecutive windows that would have earned a shrink (SHADOW only)
+    int     holdFlapLevel = 0;        // steps down taken back lately; each doubles the calm time the next one needs
+    int     holdFlapCredited = 0;     // hours the last step down has stood, already counted
+    int64_t holdDownAtMs = 0;         // time of the last step down still being watched
+    double  holdDownToMs = 0;         // hold that step chose
+    double  holdFlapBackMs = 0;       // hold the last retraction chose; the one-step return down to it needs no extra calm
     uint32_t holdLatePrev = 0;
     uint32_t holdStallPrev = 0;       // Previous sample's 60-s STALL count (GROW-STALL sees NEW stalls)
     bool     holdGapsCleared = false;  // Join transient dropped
@@ -466,6 +472,7 @@ struct HubPeer {
     std::string clientVersion, clientOs;  // Player's version and system (/sb/hxver); empty for players that do not report it
     std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
+    std::atomic<float> clientIfaceMs { -1.0f };   // Player's audio interface latency, input + output (ms, /sb/hxbuf arg 12); -1 = not reported
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
     // Last chirp-onset mach ticks seen in this peer's decoded
     // audio at the hub (equilibrium hunt; see audio thread detector).
@@ -813,6 +820,7 @@ public:
         std::string clientVersion, clientOs;   // Player's version and system; empty when the player does not report it
         std::string clientInstrument;          // Player's instrument; empty when not given
         int clientDevBuf = -1, clientDevSr = -1;   // Player's audio buffer + sample rate
+        float clientIfaceMs = -1.0f;               // Player's audio interface latency, input + output (ms); -1 = not reported
         bool  isLan = false;
         uint64_t lostBlocks = 0;             // Total blocks of this player's stream the hub lost (never arrived, not resent) — the 'Drops' column
         uint64_t bytesIn = 0;                // Cumulative bytes this peer sent us (Up)
@@ -873,8 +881,22 @@ public:
     StageSettings stageSettings() const;
     uint64_t stageSettingsGeneration() const { return mStageGen.load(std::memory_order_relaxed); }
     uint64_t stageMembersGeneration() const { return mStageMembersGen.load(std::memory_order_relaxed); }   // changes on every join and leave
-    // Removes a player now and keeps that name and address out for blockMinutes. False = no such player.
-    bool kickPlayer(const std::string& userName, int blockMinutes = 60);
+    // How long a removed player is kept out: for a time, until this hub restarts, or until the host allows them back.
+    enum class RemovalKind { Timed = 0, UntilRestart = 1, Permanent = 2 };
+    struct RemovedPlayer {
+        std::string user, ip;
+        int64_t removedAtMs = 0;   // epoch ms
+        int64_t untilMs = 0;       // Timed only
+        RemovalKind kind = RemovalKind::Timed;
+    };
+    // Removes a player now and keeps that name and address out (blockMinutes counts for Timed only).
+    // False = no such player.
+    bool kickPlayer(const std::string& userName, int blockMinutes = 60, RemovalKind kind = RemovalKind::Timed);
+    std::vector<RemovedPlayer> removedPlayers() const;                    // removals in force, newest first
+    int removedPlayerCount() const;
+    bool allowBack(const std::string& userName, const std::string& ip);   // lifts that removal at once; false = not in the list
+    // Before start(): where permanent removals are kept; loads the file if present. Empty = in memory only.
+    void setRemovedPlayersFile(const std::string& path);
     void setStageListingStatus(int state, const std::string& text);   // written by the directory client
     // Join check used by the built-in connection server: empty = allow, else the reason shown to the player.
     std::string stageJoinRefusal(const std::string& ip, const std::string& user, int othersInStage);
@@ -1126,6 +1148,8 @@ private:
     int mLocalPort = 0;
     int mSampleRate = HUB_DEFAULT_SAMPLERATE;
     int mBlockSize = HUB_DEFAULT_BLOCKSIZE;
+    static constexpr double kHubGainRampMs = 5.0;
+    float mGainRampStep = 0.0f;   // gain change per sample while a feed ramps; 0 = no ramp (set once at start)
     int mChannels = HUB_DEFAULT_CHANNELS;
 
     bool mUseOpus = true;
@@ -1180,6 +1204,11 @@ private:
     // one step per 2 min, never below the measured target.
     static constexpr int     kHoldDecayWindows = 12;
     static constexpr int64_t kHoldDecayGapMs = 120000;
+    // Flap guard: a step down taken back within kHoldFlapRegretMs doubles the calm time of the next one, up to
+    // 3 samples << kHoldFlapMaxLevel (16 min); each kHoldFlapStoodMs a step down stands takes one doubling off.
+    static constexpr int     kHoldFlapMaxLevel = 5;
+    static constexpr int64_t kHoldFlapRegretMs = 600000;
+    static constexpr int64_t kHoldFlapStoodMs = 3600000;
     std::atomic<int>  mHoldMode { 0 };
     std::atomic<bool> mHoldResizeAll { false };
     std::string mDumpPeerName; int mDumpSecs = 0;
@@ -1533,8 +1562,10 @@ private:
     // Stage limits, kick blocks and the listing status line
     mutable std::mutex mStageMutex;
     StageSettings mStage;
-    struct StageBlock { std::string ip, user; int64_t untilMs = 0; };
-    std::vector<StageBlock> mStageBlocks;
+    std::vector<RemovedPlayer> mStageBlocks;   // under mStageMutex; read by the join check on the server thread
+    std::string mRemovedFile;
+    std::mutex mRemovedFileMutex;              // one writer at a time; taken before mStageMutex, never the other way
+    void removedPlayersSave();                 // permanent removals to the file; control threads only
     int mStageListingState = 0;
     std::string mStageListingText;
     std::atomic<uint64_t> mStageGen{0};

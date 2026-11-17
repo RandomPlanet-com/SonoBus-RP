@@ -2,6 +2,45 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-17
+
+### SonoBus RP 1.3.3
+
+Sound
+- Fewer short cuts: the audio no longer waits on the app's list of players.
+- Smoother buffer changes: when the receive buffer is adjusted, the sound is blended across the change instead of cut.
+- Flat treble to 20 kHz: the clock-drift correction no longer rolls off the top end, and adds no latency.
+- After a network storm the buffer returns to low latency in one step, and reacts to the storm faster.
+- Cleaner start when you join: your outgoing stream no longer restarts several times.
+
+Window
+- Player rows redesigned: every volume slider starts at the same place, MUTE, SOLO and FX sit on the lower line next to the latency, and the Output button sits beside the meter.
+- PAN knob on every player. Stereo players also get a WIDTH knob (100% as sent, 0% mono). Players with several instruments get a PAN that moves their whole mix.
+- Meters use the same bar size everywhere. A player with more channels shows more bars, not thinner ones.
+- The top line says Latency (the Overall Delay, hover your mouse here to see details) and shows the server address without "Hub". Each player row shows a quality light and one Latency figure, the round trip through that player with both audio interfaces included. Hover your mouse over it for the details.
+- Audio interface latency is now counted correctly.
+- Set your instrument right next to your name at the top, any time, even while connected.
+- Point at a channel on a player's meter to see its name.
+- Text is never squeezed: names that do not fit wrap or end with "…".
+- A redesigned Stages list with one Connect button and a table of the players on each stage.
+- Joining a stage lists the players already there in one block, one name per line.
+- Chat stays with its stage. A removed player is told why. Drop counts never show below zero.
+
+Fixes
+- No crash when you disconnect or another player leaves.
+- Resetting a row's drop count resets that player, not another one.
+- The Windows fix from 1.3.2 is now in every player.
+
+### SonoBus RP Hub 1.3.3
+
+- Set or remove the stage password with clear buttons (takes effect when the hub restarts).
+- The advanced settings sit under "For advanced users only".
+- A list of removed players with Allow back, and a choice of how long they stay out: one hour, until the hub restarts, or for good.
+- A player's audio interface latency shows instantly when you point at the player.
+- Steadier buffers for players on bursty connections.
+- Mute, solo and gain changes fade instead of clicking.
+- A player on the hub's own computer can join by 127.0.0.1 or localhost.
+
 ## 2026-11-16
 
 ### SonoBus RP 1.3.2

@@ -103,6 +103,7 @@ public:
 
     // connectview
     void connectionsChanged(ConnectView *comp) override;
+    void peersRemoved(ConnectView *comp) override;
 
     // channelgroupsview
     void channelLayoutChanged(ChannelGroupsView *comp) override;
@@ -150,6 +151,7 @@ public:
     void aooClientError(SonobusAudioProcessor *comp, const String & errmesg) override;
     void aooClientPeerChangedState(SonobusAudioProcessor *comp, const String & mesg) override;
     void sbChatEventReceived(SonobusAudioProcessor *comp, const SBChatEvent & mesg) override;
+    void sbRemovedFromStage(SonobusAudioProcessor *comp, const String & group, const String & reason) override;
     void peerRequestedLatencyMatch(SonobusAudioProcessor *comp, const String & username, float latency) override;
     void peerBlockedInfoChanged(SonobusAudioProcessor *comp, const String & username, bool blocked) override;
     void peerSuggestedNewGroup(SonobusAudioProcessor *comp, const String & username, const String & newgroup, const String & groupPass, bool isPublic, const StringArray & others) override;
@@ -211,6 +213,8 @@ private:
     void showInputReverbView(bool flag);
 
     void updateServerStatusLabel(const String & mesg, bool mainonly=true);
+    void showStageNotice(const String & group, const String & text);
+    String mStageNotice;   // The host's last refusal, shown until the next connect
     void updateChannelState(bool force=false);
     bool updatePeerState(bool force=false);
     void updateTransportState();
@@ -285,6 +289,9 @@ private:
 
     std::unique_ptr<Label> mMainGroupLabel;
     std::unique_ptr<Label> mMainUserLabel;
+    std::unique_ptr<ComboBox> mMainInstrumentCombo;   // next to the own name, always shown
+    void refreshMainInstrument();
+    void fitTopBandToText();   // the stage, name and instrument boxes follow their text
     std::unique_ptr<Label> mMainPeerLabel;
     std::unique_ptr<ImageComponent> mMainGroupImage;
     std::unique_ptr<ImageComponent> mMainPersonImage;
@@ -489,6 +496,7 @@ private:
             PeerRequestedLatencyMatchEvent,
             PeerBlockedInfoChangedEvent,
             PeerSuggestedNewGroupEvent,
+            RemovedEvent,
             Error
         };
         
@@ -513,6 +521,13 @@ private:
         StringArray array;
     };
     Array<ClientEvent> clientEvents;
+
+    // Who is on the stage we are on, so every arrival is told once and the players already there are listed once.
+    String mRosterGroup;            // the confirmed stage, empty until its join is confirmed
+    StringArray mRosterUsers;       // players on that stage
+    StringArray mRosterPending;     // "stage\nplayer" reported before the join was confirmed
+    bool mRosterKept = false;       // connection lost on this stage: the next join is a resume
+    void rosterPost(const String & group, const String & user, bool joined);
 
     CriticalSection    chatStateLock;
     Array<SBChatEvent> newChatEvents;
@@ -551,6 +566,7 @@ private:
     int peersHeight = 0;
     bool isNarrow = false;
     bool isReallyNarrow = false;
+    String mTopBandText;   // stage, own name and instrument the top band was last laid out for
     bool settingsWasShownOnDown = false;
     WeakReference<Component> settingsCalloutBox;
 

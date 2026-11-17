@@ -77,7 +77,8 @@
 #define SB_HXMSG_HUBHELLO     "/hxhubhello"
 #define SB_HXMSG_HUBHELLO_LEN 11
 // Hub -> hosted clients, ~1 Hz per other player:
-// /sb/hxlat  s:userName  f:toHubMs  f:fromHubMs
+// /sb/hxlat  s:userName  f:toHubMs  f:fromHubMs  i:uplinkLost  f:rttMs  i:rec  f:upKbps  i:sendMuted  f:ifaceMs
+// (fields are only ever appended; readers stop at what they know)
 #define SB_HXMSG_LAT     "/hxlat"
 #define SB_HXMSG_LAT_LEN 6
 

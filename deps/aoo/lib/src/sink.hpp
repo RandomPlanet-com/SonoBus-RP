@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string>
+#include <vector>
 #include <chrono>
 #include <atomic>
 
@@ -129,6 +131,7 @@ struct block_info {
     double sr;
     int32_t channel;
     int32_t refill = 0;   // written by a recovery refill, not decoded from the stream
+    int32_t splice = 0;   // first block after a join made on the network side
 };
 
 class sink;
@@ -191,6 +194,9 @@ public:
     std::vector<char> maskexp_;        // network thread scratch
     int32_t mask_samplesize_ = 2;      // last seen bytes/sample (PCM 16 default) for all-idle blocks
     bool mask_req_done_ = false; int32_t mask_req_salt_ = 0;   // one capability request per stream salt
+    // Last format message applied, to recognise a repeat of the same one.
+    bool fmt_seen_ = false; int32_t fmt_salt_ = 0, fmt_version_ = 0, fmt_nch_ = 0, fmt_sr_ = 0, fmt_bs_ = 0;
+    std::string fmt_codec_; std::vector<char> fmt_settings_;
     std::atomic<uint64_t> masked_blocks_rx_{0};
     std::atomic<uint64_t> rx_bytes_{0};   // Wire bytes of this stream (data packets), see aoo_opt_rx_bytes
 
@@ -406,8 +412,19 @@ private:
     int32_t ro_total_ = 0, ro_span_ = 0, ro_left_ = 0, ro_pos_ = 0, ro_base_ = 0;   // ring-out, in frames
     int32_t ro_total_pitch_ = 0, ro_period_ = 0;   // length when the sound has a pitch; its period (0 = none found)
     int32_t ro_find_period(int32_t nchannels, int32_t samplerate) const;
+    int32_t ro_find_period_ref(int32_t nchannels, int32_t samplerate) const;   // the plain form of the same search
     int32_t fi_total_ = 0, fi_span_ = 0, fi_left_ = 0;                              // fade-in, in frames
     bool    dry_ = false;                 // dry since the last block was fed
+    // A join made on the network side (blocks skipped or dropped): what was playing goes on for a few
+    // milliseconds under the fade-in of what follows, on the audio thread.
+    bool    splice_xfade_ = true, xf_ease_ = false;
+    int32_t xf_total_ = 0;                // length of that crossing, in frames
+    // A deeper target reached by playing slightly slower for a moment, not by inserting blocks without sound.
+    // The network thread sets the frames owed; the audio thread takes off what the slow-down has gained.
+    std::atomic<int32_t> adapt_grow_pub_{0};
+    double  adapt_grow_g_ = 0, adapt_grow_acc_ = 0;   // current slow-down and the gained fraction of a frame (audio thread)
+    bool    adapt_grow_open_ = false;     // network thread: a glide was asked for and its end is not logged yet
+    bool    grow_glide(int32_t blocks);
     std::vector<aoo_sample> scratch_;
     std::atomic<int32_t> gate_trim_pub_{0}, gate_wait_pub_{0}, gate_opens_pub_{0};
     int32_t gate_opens_seen_ = 0;         // network thread
@@ -449,6 +466,25 @@ private:
     double  adapt_fast_last_t_ = -1e9;       // time of the last fast decision
     int32_t adapt_fast_depth_ = 0;           // depth that decision chose
     bool    adapt_glide_request_ = false;    // set by the retarget just before a shrink that should glide
+    // Fast learning around a line storm (WAN profile, SB_AOO_ADAPT_FASTLEARN=1): one step up to the gaps just
+    // measured, one step back to the depth before the storm once the line has proven calm. Network thread only.
+    int32_t fl_state_ = 0;                   // 1 = raised for a storm
+    int32_t fl_pre_blocks_ = 0;              // depth before the storm
+    int32_t fl_blocks_ = 0;                  // depth the storm asked for
+    float   fl_top_[2][2] = {};              // two largest uncovered gaps (ms) of this and the previous 5 s
+    double  fl_win_t0_ = -1e9;
+    float   fl_long_[2][2] = {};             // two largest gaps (ms) of this and the previous 30 s
+    double  fl_long_t0_ = -1e9;
+    double  fl_ev_t_ = -1e9;                 // last uncovered gap
+    double  fl_jump_t_ = -1e9;               // last step up
+    double  fl_rough_t_ = -1e9;              // last gap the depth before the storm would not have covered
+    double  fl_over_t_ = -1e9;               // last pause in arrivals longer than the depth
+    double  fl_down_t_ = -1e9;               // last proven step back
+    double  fl_ease_t_ = -1e9;               // last step down without proof
+    int32_t fl_prove_s_ = 15;                // calm seconds asked before the step back (doubles after a relapse)
+    void fl_reset();
+    void fl_gap(double now, double gap_ms, double raw_gap_ms);
+    void fl_prove(double now);
     void adapt_track(const sink& s, const data_packet& d, bool fresh);
     void adapt_retarget(const sink& s, double now);
     void adapt_apply_target(int32_t target);

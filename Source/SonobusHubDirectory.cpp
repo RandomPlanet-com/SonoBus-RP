@@ -82,9 +82,17 @@ std::string HubStageDirectory::checkinJson() {
     const bool locked = !snap.groupPassword.empty();
     const bool showNames = st.names == 1 || (st.names == 0 && !locked);
     std::string players, instruments;   // always sent; names_public says whether the public list may show them
+    std::string onStage, pings, channels;   // per player, from what the hub already knows: seconds on stage, ping in ms (null unknown), channels sent
+    const int64_t nowMs = juce::Time::currentTimeMillis();
     for (const auto& p : snap.peers) {
-        players += (players.empty() ? "" : ",") + jsonText(juce::String::fromUTF8(p.userName.c_str()).substring(0, 30).toStdString());
-        instruments += (instruments.empty() ? "" : ",") + jsonText(p.clientInstrument);
+        const char* sep = players.empty() ? "" : ",";
+        players += sep + jsonText(juce::String::fromUTF8(p.userName.c_str()).substring(0, 30).toStdString());
+        instruments += sep + jsonText(p.clientInstrument);
+        const float rtt = p.smoothedRttMs > 0.0f ? p.smoothedRttMs : p.smoothedRttUpMs;   // the round trip the player's own header shows
+        // Unknown is "null": the directory keeps only real numbers and would turn a -1 into 0.
+        onStage += sep + (p.joinedAtMs > 0 ? std::to_string((long long) juce::jlimit((int64_t) 0, (int64_t) 8640000, (nowMs - p.joinedAtMs) / 1000)) : std::string("null"));
+        pings += sep + (rtt > 0.0f ? std::to_string(juce::jlimit(0, 9999, juce::roundToInt(rtt))) : std::string("null"));
+        channels += sep + std::to_string(juce::jlimit(0, 64, p.recvChannels));
     }
 #if JUCE_MAC
     const char* os = "Mac";
@@ -103,6 +111,7 @@ std::string HubStageDirectory::checkinJson() {
     j += ",\"audio_port\":" + std::to_string(snap.publicAddressPort > 0 ? snap.publicAddressPort : (snap.localUdpPort > 0 ? snap.localUdpPort : 13000));
     j += std::string(",\"locked\":") + (locked ? "true" : "false");
     j += ",\"players\":[" + players + "],\"instruments\":[" + instruments + "],\"count\":" + std::to_string((int) snap.peers.size());
+    j += ",\"on_stage_s\":[" + onStage + "],\"ping_ms\":[" + pings + "],\"channels\":[" + channels + "]";
     j += std::string(",\"names_public\":") + (showNames ? "true" : "false");
     j += ",\"max_players\":" + std::to_string(st.maxPlayers) + ",\"max_channels\":" + std::to_string(st.maxChannels);
     j += ",\"version\":" + jsonText(SONOBUS_HUB_VERSION) + ",\"os\":" + jsonText(os);

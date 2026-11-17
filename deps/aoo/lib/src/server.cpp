@@ -4,6 +4,8 @@
 
 #include "server.hpp"
 #include <cstring>   // Memcmp for the port-check probe
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 
 #include <functional>
@@ -506,6 +508,35 @@ int32_t server::set_lan_subnet(const char *cidr)
     return 1;
 }
 
+// Run-scoped switch: environment first, then the hub's taps file (SB_TAPS_FILE). Read once, server thread only.
+static int sb_switch_int(const char* name, int def){
+    if (const char* e = std::getenv(name); e && *e) return std::atoi(e);
+    if (const char* tf = std::getenv("SB_TAPS_FILE"); tf && *tf){
+        if (FILE* f = std::fopen(tf, "r")){
+            char line[256]; const size_t n = std::strlen(name); int out = def;
+            while (std::fgets(line, sizeof(line), f)){
+                if (!std::strncmp(line, name, n) && line[n] == '='){ out = std::atoi(line + n + 1); break; }
+            }
+            std::fclose(f);
+            return out;
+        }
+    }
+    return def;
+}
+
+// SB_HUB_LOOPBACK_FIX (default 1): two endpoints that both reached this server over loopback are told each
+// other's loopback address. The kernel sources a loopback-bound datagram from 127.0.0.1 on every platform, so a
+// peer told the LAN address while the other side's stream arrives from 127.0.0.1 never matches: token fallback,
+// no control messages, a re-invite for as long as the session runs.
+static bool loopback_peers_fix(){
+    static const bool v = sb_switch_int("SB_HUB_LOOPBACK_FIX", 1) != 0;
+    return v;
+}
+
+static bool is_loopback_name(const std::string& n){
+    return n == "::1" || n.rfind("127.", 0) == 0;
+}
+
 bool server::is_lan_address(const ip_address &a) const
 {
     if (!lan_subnet_set_) return false;
@@ -562,8 +593,16 @@ void server::on_user_joined_group(user& usr, group& grp){
                 // The hub's own client endpoint reaches this server over loopback, so loopback counts as LAN.
                 // Otherwise it gets a LAN player's hairpinned router address and its UDP link to that player times out.
                 const std::string dest_name = dest->source_addr().name();
-                const bool dest_is_loopback = dest_name == "127.0.0.1" || dest_name == "::1" || dest_name.rfind("127.", 0) == 0;
-                if (lan_subnet_set_ && (is_lan_address(dest->source_addr()) || dest_is_loopback)
+                const bool dest_is_loopback = is_loopback_name(dest_name);
+                // Both on this machine: one loopback address each way. The UDP port is the same on every local
+                // address (one socket, no NAT), so the claimed port is kept.
+                if (loopback_peers_fix() && dest_is_loopback && is_loopback_name(e->source_addr().name())) {
+                    pub_name = loc_name = "127.0.0.1";
+                    pub_port = loc_port = loc_port > 0 ? loc_port : pub_port;
+                    std::cerr << "[SRV]     loopback recipient '" << dest_name
+                              << "': advertising '" << u.name << "' as loopback "
+                              << pub_name << ":" << pub_port << "\n";
+                } else if (lan_subnet_set_ && (is_lan_address(dest->source_addr()) || dest_is_loopback)
                     && is_lan_address(e->local_address)) {
                     pub_name = e->local_address.name();
                     pub_port = e->local_address.port();

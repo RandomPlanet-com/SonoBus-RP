@@ -110,6 +110,11 @@ public:
     
     PopupMenu::Options getOptionsForComboBoxPopupMenu (ComboBox&, Label&) override;
     Font getComboBoxFont (ComboBox&) override;
+    // A combo box with a "leadText" property shows it as a small caption on top, the value under it
+    void drawComboBox (Graphics&, int width, int height, bool isButtonDown,
+                       int buttonX, int buttonY, int buttonW, int buttonH, ComboBox&) override;
+    void positionComboBoxText (ComboBox&, Label&, Drawable* image = nullptr) override;
+    void drawComboBoxTextWhenNothingSelected (Graphics&, ComboBox&, Label&) override;
     Font getPopupMenuFont() override;
     void drawPopupMenuBackground (Graphics& g, [[maybe_unused]] int width, [[maybe_unused]] int height) override;
   
@@ -124,6 +129,15 @@ public:
 
     static float getFontScale() { return fontScale; }
     static void setFontScale(float scale) { fontScale = scale; }
+
+    // Draws text in the current font at its natural width, never compressed. Too long for one line: wraps at
+    // spaces only (a " - " break preferred) when the area has room for more lines, and every line that still
+    // does not fit ends in an ellipsis.
+    static void drawTextNoSqueeze (Graphics& g, const String& text, juce::Rectangle<int> area,
+                                   Justification just, int maxLines);
+
+    // The text font of a drawable button with its text beside the image, as drawDrawableButton draws it
+    Font getDrawableButtonTextFont (int buttonHeight) const { return myFont.withHeight ((float) jmin (14, roundToInt (buttonHeight * 0.8f)) * fontScale); }
 
 
 protected:
@@ -178,6 +192,11 @@ public:
     void drawLinearSlider (Graphics&, int x, int y, int width, int height,
                            float sliderPos, float minSliderPos, float maxSliderPos,
                            const Slider::SliderStyle, Slider&) override;
+
+    // Sliders with an "sbKnob" property are drawn as a console pot: tick ring, value arc, body with a pointer.
+    // With room, the "knobCaption" property goes on top and the value text under the knob.
+    void drawRotarySlider (Graphics& g, int x, int y, int width, int height, float sliderPos,
+                           const float rotaryStartAngle, const float rotaryEndAngle, Slider& slider) override;
 
     Justification textJustification = Justification::centred;
     

@@ -108,7 +108,9 @@ public:
 
     void processBlock (AudioBuffer<float>& frombuffer, AudioBuffer<float>& tobuffer,  int destStartChan, int destNumChans, AudioBuffer<float>& silentBuffer, int numSamples, float gainfactor, ProcessState * procstate=nullptr, AudioBuffer<float> * reverbbuffer=nullptr, int revStartChan=0, int revNumChans=2, bool revEnabled=false, float revgainfactor=1.0f, ProcessState * revprocstate=nullptr);
 
-    void processPan (AudioBuffer<float>& frombuffer, int fromStartChan, AudioBuffer<float>& tobuffer, int destStartChan, int destNumChans, int numSamples, float gainfactor, ProcessState * procstate=nullptr);
+    // balGain / balLastGain: optional left and right gains on a stereo destination (ramped when they change)
+    void processPan (AudioBuffer<float>& frombuffer, int fromStartChan, AudioBuffer<float>& tobuffer, int destStartChan, int destNumChans, int numSamples, float gainfactor, ProcessState * procstate=nullptr,
+                     const float * balGain=nullptr, const float * balLastGain=nullptr);
 
 
     void processMonitor (AudioBuffer<float>& frombuffer, int fromStartChan, AudioBuffer<float>& tobuffer, int destStartChan, int destNumChans, int numSamples, float gainfactor, ProcessState * procstate = nullptr, AudioBuffer<float> * reverbbuffer=nullptr, int revStartChan=0, int revNumChans=2, bool revEnabled=false, float revgainfactor=1.0f, ProcessState * revprocstate=nullptr);

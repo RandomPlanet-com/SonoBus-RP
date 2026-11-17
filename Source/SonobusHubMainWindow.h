@@ -73,9 +73,9 @@ public:
     // Click a column header to sort (▲ ascending, again ▼ descending, again = hub order).
     // Applied inside setSnapshot so the choice survives the 1-s refresh. Kept in memory only — the hub has no
     // per-app properties file (hub_settings.json is the strict launch-args model).
-    // Right-click on a player row: menu with "Remove from stage for 1 hour...", confirmed, then onKick(user name).
+    // Right-click on a player row: menu with "Remove from stage...", then a choice of how long, then onKick.
     void mouseDown(const juce::MouseEvent& e) override;
-    std::function<void(const std::string& user)> onKick;
+    std::function<void(const std::string& user, SonobusHubServer::RemovalKind keep)> onKick;
 private:
     void applySort();
     int mSortCol = -1;
@@ -110,6 +110,27 @@ private:
     juce::ScrollBar mScroll{true};
     int mFirstRow = 0, mSortCol = -1; bool mSortDesc = false;
     std::vector<int> mColX;   // column left edges from the last paint (header hit testing)
+};
+
+// "Removed players": every removal in force (1 hour, until restart, permanent), newest first, each with an
+// "Allow back" button. The owner shows it under the live table only while there is a row.
+class RemovedTable : public juce::Component, public juce::SettableTooltipClient, private juce::ScrollBar::Listener {
+public:
+    RemovedTable();
+    void setRows(std::vector<SonobusHubServer::RemovedPlayer> rows);
+    int numRows() const { return (int) mRows.size(); }
+    void paint(juce::Graphics& g) override;
+    void resized() override { layoutScroll(); }
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    std::function<void(const std::string& user, const std::string& ip)> onAllowBack;
+    static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12, kMaxVisibleRows = 4;
+private:
+    void scrollBarMoved(juce::ScrollBar*, double newRangeStart) override { mFirstRow = (int) newRangeStart; repaint(); }
+    void layoutScroll();
+    std::vector<SonobusHubServer::RemovedPlayer> mRows;
+    juce::ScrollBar mScroll{true};
+    int mFirstRow = 0, mButtonX = 1 << 30;   // button column start (set in paint, used by mouseDown)
 };
 
 // "Recent sessions" — one row per group this hub has served (SonobusHubServer::sessions,
@@ -172,6 +193,8 @@ public:
     std::function<void(bool)> onToggleHold;   // true = print
     juce::Label peerLabel;
     PeerTable peerTable;
+    juce::Label removedLabel;
+    RemovedTable removedTable;
     // Bottom strip — recent sessions (left) | the selected session's personnel + password
     // override + "Apply & Restart" (right). onApplySession(group, passwordOverride) — empty override = keep the
     // password that session had.
@@ -224,6 +247,8 @@ public:
         std::function<bool(const HubLaunchArgs& args, std::string& err)> save;
         // Spawn the replacement process (the owner quits this one on success).
         std::function<bool(std::string& err)> relaunch;
+        // Persist only the stage password (empty = none); it applies after the hub restarts.
+        std::function<bool(const std::string& password, std::string& err)> setStagePassword;
     };
     SettingsPanel(const HubLaunchArgs& running, const HubSettingsMeta& meta, Callbacks cb);
     ~SettingsPanel() override;
@@ -240,6 +265,7 @@ private:
     void layoutForm();
     void controlsFromModel(const HubLaunchArgs& a);
     void onRowEdited(Row& r);
+    void applyStagePassword(const juce::String& password);
     void refreshStatus(const juce::String& transient = {});
     bool doSave();
 
@@ -253,6 +279,7 @@ private:
     juce::Viewport mViewport;
     juce::Component mForm;    // viewed component: section labels + rows
     std::vector<std::unique_ptr<juce::Label>> mSectionLabels;
+    std::vector<std::unique_ptr<juce::Label>> mSectionHints;   // one per section label; null = no hint line
     std::vector<std::unique_ptr<Row>> mRows;
     std::set<std::string> mInvalid;   // keys whose text failed to parse
 
@@ -291,6 +318,7 @@ private:
     std::unique_ptr<HubUpdateCheck> mUpdateCheck;   
     void timerCallback() override;
     void refreshSessionDetail();
+    void refreshRemoved();
     void startInstallUpdate();
     std::string mPwPrefillGroup;   // The session whose password was last prefilled, so refreshes do not overwrite typing; refreshSessionDetail: personnel table + Apply button follow the selected session
 

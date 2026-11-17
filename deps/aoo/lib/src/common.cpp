@@ -906,13 +906,17 @@ void dynamic_resampler::update(double srfrom, double srto){
 #endif
 }
 
-// Kaiser(beta 8)-windowed sinc, normalised per phase. Built on first use
+extern "C" int32_t aoo_sb_resamp_flat_on();
+
+// Kaiser-windowed sinc, normalised per phase: beta 3.9 / cutoff 1.0 is flat to 20 kHz; the former beta 8 / cutoff 0.92
+// trades 2 dB at 20 kHz for a wider stopband. Built on first use
 // (setup time, never on the audio thread's first call — see sink do_update which touches it).
 const float* dynamic_resampler::sinc_table(){
     static std::vector<float> tab;
     if (tab.empty()){
         tab.resize((size_t)(kSincPhases + 1) * kSincTaps);
-        const double beta = 8.0, cutoff = 0.92;   // cutoff relative to Nyquist (leave 8 % for the transition band)
+        const bool flat = aoo_sb_resamp_flat_on() != 0;
+        const double beta = flat ? 3.9 : 8.0, cutoff = flat ? 1.0 : 0.92;   // cutoff relative to Nyquist
         auto bessel_i0 = [](double x){ double s = 1, t = 1; for (int k = 1; k < 50; ++k){ t *= (x / (2.0 * k)) * (x / (2.0 * k)); s += t; if (t < 1e-12 * s) break; } return s; };
         const double i0b = bessel_i0(beta);
         for (int ph = 0; ph <= kSincPhases; ++ph){

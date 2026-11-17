@@ -53,7 +53,7 @@ public:
 
         configLabel(infoLabel);
         infoLabel.setJustificationType(Justification::centredLeft);
-        infoLabel.setMinimumHorizontalScale(0.9);
+        infoLabel.setMinimumHorizontalScale(1.0f);
 
         // these are in the header component
         enableButton.setVisible(false);

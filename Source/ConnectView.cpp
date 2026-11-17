@@ -99,6 +99,7 @@ publicGroupsListModel(this)
     mStagesView->currentStage = [this] { return processor.isConnectedToServer() ? processor.getCurrentJoinedGroup() : String(); };
     mStagesView->currentPort = [this] { return processor.getServerPortAsTyped(); };
     mStagesView->userName = [this] { return mServerUsernameEditor->getText().trim(); };
+    mStagesView->stageUserName = [this] { return processor.getCurrentUsername(); };
     mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
     mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
     mStagesView->setWantTestStages(SonobusPlusVersion::get().version.containsIgnoreCase("dev"));
@@ -198,18 +199,17 @@ publicGroupsListModel(this)
 
     mServerInstrumentStaticLabel = std::make_unique<Label>("serverinstst", TRANS("Instrument:"));
     configServerLabel(mServerInstrumentStaticLabel.get());
-    mServerInstrumentStaticLabel->setMinimumHorizontalScale(0.7);
+    mServerInstrumentStaticLabel->setMinimumHorizontalScale(1.0f);
     mServerInstrumentCombo = std::make_unique<ComboBox>("instrument");
     mServerInstrumentCombo->setEditableText(true);   // the list is a help; anything can be typed
-    mServerInstrumentCombo->addItemList({ "Drums", "Percussion", "Bass", "Guitar", "Acoustic Guitar", "Keys", "Piano", "Organ", "Synth", "Vocals",
-                                          "Sax", "Trumpet", "Trombone", "Flute", "Clarinet", "Violin", "Viola", "Cello", "Double Bass",
-                                          "Mandolin", "Banjo", "Pedal Steel", "Harmonica", "Accordion", "DJ / Electronics" }, 1);
+    mServerInstrumentCombo->addItemList(instrumentChoices(), 1);
     mServerInstrumentCombo->setTextWhenNothingSelected(TRANS("choose or type"));
     mServerInstrumentCombo->setTooltip(TRANS("Shown to other players, for example in the stage list"));
     mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
     mServerInstrumentCombo->onChange = [this] {
         processor.setCurrentInstrument(mServerInstrumentCombo->getText());
         mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+        if (onInstrumentChanged) onInstrumentChanged();
     };
 
     mServerUserPasswordEditor = std::make_unique<TextEditor>("userpass"); // 0x25cf
@@ -220,14 +220,14 @@ publicGroupsListModel(this)
 
     mServerUserStaticLabel = std::make_unique<Label>("serveruserst", TRANS("Your Displayed Name:"));
     configServerLabel(mServerUserStaticLabel.get());
-    mServerUserStaticLabel->setMinimumHorizontalScale(0.7);
+    mServerUserStaticLabel->setMinimumHorizontalScale(1.0f);
 
     mServerUserPassStaticLabel = std::make_unique<Label>("serveruserpassst", TRANS("Password:"));
     configServerLabel(mServerUserPassStaticLabel.get());
 
     mServerGroupStaticLabel = std::make_unique<Label>("servergroupst", TRANS("Stage Name:"));
     configServerLabel(mServerGroupStaticLabel.get());
-    mServerGroupStaticLabel->setMinimumHorizontalScale(0.8);
+    mServerGroupStaticLabel->setMinimumHorizontalScale(1.0f);
 
     mServerGroupPassStaticLabel = std::make_unique<Label>("servergrouppassst", TRANS("Password:"));
     configServerLabel(mServerGroupPassStaticLabel.get());
@@ -305,20 +305,20 @@ publicGroupsListModel(this)
     mServerStatusLabel->setJustificationType(Justification::centred);
     mServerStatusLabel->setFont(16);
     mServerStatusLabel->setColour(Label::textColourId, Colour(0x99ffaaaa));
-    mServerStatusLabel->setMinimumHorizontalScale(0.75);
+    mServerStatusLabel->setMinimumHorizontalScale(1.0f);
 
     mServerInfoLabel = std::make_unique<Label>("servinfo", "");
     mServerInfoLabel->setJustificationType(Justification::centred);
     mServerInfoLabel->setFont(16);
     mServerInfoLabel->setColour(Label::textColourId, Colour(0x99dddddd));
-    mServerInfoLabel->setMinimumHorizontalScale(0.85);
+    mServerInfoLabel->setMinimumHorizontalScale(1.0f);
 
     String servaudioinfo = TRANS("The connection server is only used to help users find each other, no audio passes through it. All audio is sent directly between users (peer to peer).");
     mServerAudioInfoLabel = std::make_unique<Label>("servaudioinfo", servaudioinfo);
     mServerAudioInfoLabel->setJustificationType(Justification::centredTop);
     mServerAudioInfoLabel->setFont(14);
     mServerAudioInfoLabel->setColour(Label::textColourId, Colour(0x99aaaaaa));
-    mServerAudioInfoLabel->setMinimumHorizontalScale(0.75);
+    mServerAudioInfoLabel->setMinimumHorizontalScale(1.0f);
 
     mMainStatusLabel = std::make_unique<Label>("mainstat", "");
     mMainStatusLabel->setJustificationType(Justification::centredRight);
@@ -376,7 +376,7 @@ publicGroupsListModel(this)
 
     mPublicServerUserStaticLabel = std::make_unique<Label>("pubuserst", TRANS("Your Displayed Name:"));
     configServerLabel(mPublicServerUserStaticLabel.get());
-    mPublicServerUserStaticLabel->setMinimumHorizontalScale(0.8);
+    mPublicServerUserStaticLabel->setMinimumHorizontalScale(1.0f);
 
     mPublicServerStatusInfoLabel = std::make_unique<Label>("pubsrvinfo", "");
     configServerLabel(mPublicServerStatusInfoLabel.get());
@@ -396,7 +396,7 @@ publicGroupsListModel(this)
     mPublicServerInfoStaticLabel = std::make_unique<Label>("pubinfost", TRANS("Select existing stage below OR "));
     configServerLabel(mPublicServerInfoStaticLabel.get());
     mPublicServerInfoStaticLabel->setFont(14);
-    mPublicServerInfoStaticLabel->setMinimumHorizontalScale(0.8);
+    mPublicServerInfoStaticLabel->setMinimumHorizontalScale(1.0f);
 
     mPublicServerAddGroupButton = std::make_unique<TextButton>("addgroup");
     mPublicServerAddGroupButton->setButtonText(TRANS("Create Stage..."));
@@ -625,6 +625,19 @@ void ConnectView::updateStagesActive()
     if (mStagesView != nullptr) mStagesView->setActive(mTabsReady && isShowing() && stagesTabShowing());
 }
 
+StringArray ConnectView::instrumentChoices()
+{
+    return { "Drums", "Percussion", "Bass", "Guitar", "Acoustic Guitar", "Keys", "Piano", "Organ", "Synth", "Vocals",
+             "Sax", "Trumpet", "Trombone", "Flute", "Clarinet", "Violin", "Viola", "Cello", "Double Bass",
+             "Mandolin", "Banjo", "Pedal Steel", "Harmonica", "Accordion", "DJ / Electronics" };
+}
+
+void ConnectView::refreshInstrument()
+{
+    if (! mServerInstrumentCombo->hasKeyboardFocus(true))
+        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+}
+
 void ConnectView::updateState()
 {
     String locstr;
@@ -637,8 +650,7 @@ void ConnectView::updateState()
 
     updateRecents();
 
-    if (! mServerInstrumentCombo->hasKeyboardFocus(true))
-        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+    refreshInstrument();
 
     if (firstTimeConnectShow) {
         if (recentsIsTab() && recentsListModel.getNumRows() > 0) {
@@ -997,6 +1009,7 @@ void ConnectView::publicGroupLogin()
 
         if (connchanged && processor.isConnectedToServer()) {
             processor.disconnectFromServer();
+            listeners.call(&ConnectView::Listener::peersRemoved, this);
         }
         else if (!processor.getWatchPublicGroups() && processor.isConnectedToServer()) {
             processor.setWatchPublicGroups(true);
@@ -1186,6 +1199,7 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
             //mConnectionTimeLabel->setText(TRANS("Total: ") + SonoUtility::durationToString(processor.getElapsedConnectedTime(), true), dontSendNotification);
 
             processor.disconnectFromServer();
+            listeners.call(&ConnectView::Listener::peersRemoved, this);
             //updateState();
             wasconnected = true;
 
@@ -2131,6 +2145,7 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
     {
         processor.setLaunchConnectRequested(false);   // A user request ends the command-line launch's ownership
         processor.disconnectFromServer();
+        listeners.call(&ConnectView::Listener::peersRemoved, this);
 
         if (mode == SonobusAudioProcessor::NetworkTopologyHostedMix) {
             // Hosted control-path scaffolding only (no audio-path behavior yet).
@@ -2538,12 +2553,12 @@ void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g
     g.drawImageWithin(groupImage, 0, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
     String grouptext;
     grouptext << (info.groupIsPublic ? TRANS("[P] ") : "") << info.groupName;
-    g.drawFittedText (grouptext, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true);
+    g.drawFittedText (grouptext, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
     g.setFont (parent->recentsNameFont);
     g.setColour (parent->findColour(nameTextColourId).withAlpha(0.8f));
     g.drawImageWithin(personImage, adjwidth*xratio, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
-    g.drawFittedText (info.userName, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true);
+    g.drawFittedText (info.userName, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
     String infostr;
 
@@ -2564,7 +2579,7 @@ void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g
     g.setColour (parent->findColour(nameTextColourId).withAlpha(0.5f));
     g.setFont (parent->recentsInfoFont);
 
-    g.drawFittedText (infostr, 14, height * yratio, adjwidth - 24, height * (1.0f - yratio), Justification::centredTop, true);
+    g.drawFittedText (infostr, 14, height * yratio, adjwidth - 24, height * (1.0f - yratio), Justification::centredTop, true, 1.0f);
 
     removeImage->drawWithin(g, Rectangle<float>(adjwidth + removewidth*0.25*yratio, height*0.5 - removewidth*0.5*yratio, removewidth*yratio, removewidth*yratio), RectanglePlacement::fillDestination, 0.9);
 
@@ -2669,14 +2684,14 @@ void ConnectView::PublicGroupsListModel::paintListBoxItem (int rowNumber, Graphi
     float iconsize = height*yratio;
     float groupheight = height*yratio;
     g.drawImageWithin(groupImage, 0, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
-    g.drawFittedText (info.groupName, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true);
+    g.drawFittedText (info.groupName, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
     g.setFont (parent->recentsNameFont);
     g.setColour (parent->findColour(nameTextColourId).withAlpha(0.8f));
     g.drawImageWithin(personImage, adjwidth*xratio, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
     String usertext;
     usertext << info.activeCount << (info.activeCount > 1 ? TRANS(" active users") : TRANS(" active user"));
-    g.drawFittedText (usertext, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true);
+    g.drawFittedText (usertext, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
 
     //g.setColour (parent->findColour(nameTextColourId).withAlpha(0.5f));

@@ -17,6 +17,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "MVerb.h"
 
@@ -89,6 +90,8 @@ struct SBChatEvent
     String targets;
     String tags;
     String message;
+    String stage;                           // the stage it was written on (hub address + stage name), empty for none
+    Time stamp { Time::getCurrentTime() };  // when it was written or received
 };
 
 // chat message storage, thread-safe
@@ -365,6 +368,7 @@ public:
     int    getServerPortAsTyped() const;   // The signaling port the player connected to (what a friend must type), not the AOO audio port
     void sbSendRecStateToHub();            // Tell the hub we started/stopped recording (it tells everyone)
     void sbSendMuteStateToHub();           // Tell the hub we muted/unmuted our send (it tells everyone)
+    void sbSendVersionToHub();             // Version, system and instrument (/sb/hxver) now, not only with the 10-s report
     void sbServePortProbe(const String& hubIp, int64 token, int udpPort, int serverPort);   // Probe our hub's ports from outside on its request
     int    getHubLinkPort() const { const ScopedLock sl(mHubLinkLock); return mHubLinkPort; }
     // The hub announces its block size in the hello; device buffer sizes below it are greyed out in Setup Audio.
@@ -525,10 +529,20 @@ public:
 
     bool removeAllRemotePeers();
     
+    // Rows taken out of the peer list wait in a retired list until the views that pointed into
+    // them are rebuilt. The editor frees them right after a row rebuild; without one, a bound.
+    bool hasRetiredPeers() const { return mRetiredCount.load(std::memory_order_relaxed) > 0; }
+    // Message thread, after a row rebuild that started at retiredBeforeMs (hi-res ms): frees the rows
+    // retired before that moment, which the rebuild can no longer have bound.
+    void freeRetiredPeers(double retiredBeforeMs);
+
     int getNumberRemotePeers() const;
 
     void setRemotePeerLevelGain(int index, float levelgain);
     float getRemotePeerLevelGain(int index) const;
+    // Left/right balance of a player's whole mix, after its instruments' pans: -1 left .. 1 right, 0 = centre
+    void setRemotePeerBalance(int index, float balance);
+    float getRemotePeerBalance(int index) const;
 
     void setRemotePeerChannelGain(int index, int changroup, float levelgain);
     float getRemotePeerChannelGain(int index, int changroup) const;
@@ -557,6 +571,9 @@ public:
     // Info-only peers (HostedMix: other musicians, present for UI but no direct audio)
     bool getRemotePeerInfoOnly(int index) const;
     bool getRemotePeerHubLatency(int index, float & toHubMs, float & fromHubMs) const;
+    float getRemotePeerHubInterfaceMs(int index) const;   // That player's audio interface in + out (ms, relayed by the hub); -1 = not known
+    // Audio interface latency, input and output, each with its buffer (ms). Message thread only.
+    static bool getAudioInterfaceMs(AudioIODevice * ad, float & inMs, float & outMs);
     bool getRemotePeerHubSendMuted(int index) const;   // That player muted their send (relayed by the hub)
     int64_t getRemotePeerHubUplinkLost(int index) const;   // Per-player uplink loss as seen by the hub (-1 unknown)
     bool getSelfHubLatency(float & toHubMs, float & fromHubMs, float & rttMs, int64_t & uplinkLost) const;
@@ -923,6 +940,7 @@ public:
         virtual void aooClientError(SonobusAudioProcessor *comp, const String & errmesg) {}
         virtual void aooClientPeerChangedState(SonobusAudioProcessor *comp, const String & mesg) {}
         virtual void sbChatEventReceived(SonobusAudioProcessor *comp, const SBChatEvent & chatevent) {}
+        virtual void sbRemovedFromStage(SonobusAudioProcessor *comp, const String & group, const String & reason) {}   // The host removed this player
         virtual void peerRequestedLatencyMatch(SonobusAudioProcessor *comp, const String & username, float latency) {}
         virtual void peerBlockedInfoChanged(SonobusAudioProcessor *comp, const String & username, bool blocked) {}
         virtual void peerSuggestedNewGroup(SonobusAudioProcessor *comp, const String & username, const String & newgroup, const String & grouppass, bool isPublic, const StringArray & others) {}
@@ -1056,6 +1074,9 @@ public:
     void setChatFontSizeOffset(int offset) { mChatFontSizeOffset = offset;}
     int getChatFontSizeOffset() const { return mChatFontSizeOffset; }
     Array<SBChatEvent, CriticalSection> & getAllChatEvents() { return mAllChatEvents; }
+    // Chat belongs to one stage. The chat of other stages is kept aside in memory, never on disk.
+    String sbChatStageKey() const;   // the stage new chat lines belong to, empty when in none
+    bool sbChatSyncToStage();        // message thread only: brings the current stage's chat forward, true when the shown chat was exchanged
 
     // soundboard
     void setLastSoundboardWidth(int width) { mLastSoundboardWidth = width; }
@@ -1096,6 +1117,7 @@ private:
         int   sendFormat = 4;
 
         float mainGain = 1.0f;
+        float mainBalance = 0.0f;
         SonoAudio::ChannelGroupParams channelGroupParams[MAX_CHANGROUPS];
         int numChanGroups = 1;
         SonoAudio::ChannelGroupParams channelGroupMultiParams[MAX_CHANGROUPS];
@@ -1321,6 +1343,7 @@ private:
     // the hub's same-username eviction evict the just-established session. Stays true for the session; subsequent
     // server losses are handled by mReconnectTimer.
     std::atomic<bool> mInitialAutoReconnectDone { false };
+    std::atomic<bool> mRemovedByHost { false };   // Set by the hub's notice, cleared by the next connect the user asks for
     Atomic<float>   mDefUserLevel    { 1.0f };
     Atomic<bool>   mSyncMetToHost  { false };
     Atomic<bool>   mSyncMetStartToPlayback  { false };
@@ -1406,6 +1429,12 @@ private:
     int mChatFontSizeOffset = 0;
     // chat message storage, thread-safe
     SBChatEventList mAllChatEvents;
+    void sbChatSetStage(const String & key);
+    CriticalSection mChatStageLock;
+    String mChatStageWanted;                              // guarded by mChatStageLock
+    String mChatStageShown;                               // message thread only, like the two below
+    std::map<String, Array<SBChatEvent>> mChatByStage;    // chat put aside, by stage
+    StringArray mChatStageOrder;                          // oldest first
 
     int mLastSoundboardWidth = 250;
     bool mLastSoundboardShown = false;
@@ -1569,6 +1598,28 @@ private:
 
     OwnedArray<RemotePeer> mRemotePeers;
 
+    // Audio-callback view of mRemotePeers, so the callback never takes mCoreLock. An immutable copy
+    // is swapped in (mCoreLock held for write) whenever the list changes. A replaced copy, and any row
+    // removed with it, is freed only after a callback that may still see it has returned.
+    struct CorePeerSnap { std::vector<RemotePeer*> peers; };
+    std::atomic<CorePeerSnap*> mCoreSnap { nullptr };
+    std::atomic<uint64_t> mCoreSnapAudioSeq { 0 };   // odd while the callback is using a snapshot
+    bool mCoreSnapOn = true;      // SB_CORE_SNAPSHOT (default 1), read once at construction
+    bool mJoinRetryKeep = true;   // SB_JOIN_RETRY_KEEP (default 1), read once at construction
+    // Caller holds mCoreLock for write and has just changed mRemotePeers. Returns the replaced copy.
+    std::unique_ptr<CorePeerSnap> publishCoreSnapLocked();
+    // Never on the audio thread. False if the callback did not return in time (then leak, never free).
+    bool waitCoreSnapReaders();
+
+    // Retired rows (see hasRetiredPeers). Only the retire lock guards the list; never on the audio thread.
+    OwnedArray<RemotePeer> mRetiredPeers;
+    CriticalSection mRetiredLock;
+    std::atomic<int> mRetiredCount { 0 };
+    std::atomic<int64_t> mRetiredDrainMs { 0 };   // last editor drain (hi-res ms); stale = no editor is looking
+    bool mPeerRetireOn = true;    // SB_PEER_RETIRE (default 1), read once at construction; 0 = free at once
+    void retirePeers(OwnedArray<RemotePeer>& removed);   // takes the rows; frees them at once when off
+    void reapRetiredPeers();                             // event thread: the bound when no editor drains
+
     // ── recv-thread caches ────────────────────
     // Everything in this block is touched ONLY by the recv thread (single
     // writer/reader, no locking), except the atomics which the event thread
@@ -1645,6 +1696,13 @@ private:
     // when no editor timer runs.
     std::atomic<uint64_t> mSbAudioCallbacks{0};
     std::atomic<uint64_t> mSbNonFiniteInputs{0};   // NaN/Inf input samples scrubbed in processBlock
+    // Zero runs in the device input (a missed device cycle). Audio thread counts, the health tick reads and resets.
+    struct SbZeroRunState { uint32_t run = 0; float edge = 0.0f; };   // open run length; level of the last sounding sample
+    static constexpr int kSbZeroRunMaxCh = 64;
+    SbZeroRunState mSbZeroRun[kSbZeroRunMaxCh];
+    uint32_t mSbZeroRunMax = 4800;      // longest run counted (100 ms, set in prepareToPlay)
+    bool mSbInputZeroCount = true;
+    std::atomic<uint32_t> mSbInputZeroRuns{0}, mSbInputZeroFrames{0};
     std::atomic<uint64_t> mSbAudioFrames{0}; uint64_t mSbAudioFramesLast = 0;   // Frames actually delivered (short callbacks?)
     uint64_t mSbAudioCbLast = 0; int mSbXrunLast = 0; double mSbAudioHealthLastMs = 0;
     std::map<std::string, uint32_t> mSbAutoLogSeq;   // Last [SB-AUTO] decision seq logged, keyed by sink+source (survives row re-creation)
@@ -1657,9 +1715,12 @@ private:
     std::atomic<uint32_t> mSbRxLatMaxUs { 0 }, mSbRxLatOver2ms { 0 }, mSbRxPackets { 0 }, mSbRxMaxPerWake { 0 };
     std::atomic<uint64_t> mSbCbLastNs { 0 }; std::atomic<uint32_t> mSbCbGapMaxUs { 0 }, mSbCbGapOver2ms { 0 };   // Audio-callback interval jitter
     std::atomic<uint32_t> mSbLockWaitsOver1ms { 0 };
+    // Callbacks that waited 100 us or more for mCoreLock, or found no peer snapshot (reset per health tick).
+    std::atomic<uint32_t> mSbCoreBlocked { 0 };
 public:
-    void sbAudioHealthTick(int xrunsTotal, double sr, int bufSize);
+    void sbAudioHealthTick(int xrunsTotal, double sr, int bufSize, float ifaceMs = -1.0f);   // ifaceMs: our audio interface in + out, -1 = not known
 private:
+    void sbSendHxver(RemotePeer * hubPeer);   // caller holds mCoreLock (read)
     std::thread mNetbufLogThread;
     std::atomic<bool> mNetbufLogStop{false};
     void maybeStartNetbufLogger();
@@ -1697,6 +1758,7 @@ private:
     
     WaitableEvent  mSendWaitable;
     Atomic<int>   mNeedSendSentinel  { 0 };
+    bool mSendWakeEarly = true;   // wake the send thread as soon as the outgoing blocks are queued (set in prepareToPlay)
 
 
     std::unique_ptr<SendThread> mSendThread;

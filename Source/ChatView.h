@@ -36,6 +36,9 @@ public:
     void refreshAllMessages(); // re-render all messages
 
     void clearAll();
+    void resetView();        // the view starts over, the lines stay
+    void showStageChat();    // the chat of another stage came forward
+    void checkStage();       // cheap: exchanges the shown chat when the stage changed
 
     bool haveNewSinceLastView() const;
     void setFocusToChat();
@@ -89,6 +92,7 @@ protected:
     double mLastChatUserMessageStamp = 0.0;
 
     double mLastChatViewStamp = 0.0;
+    double mLastShownEventSec = 0.0;   // time of the last line that printed its time
 
     std::map<String,int> mLastPrivateChatViewEventIndex;
     int mLastGlobalViewEventIndex = 0;

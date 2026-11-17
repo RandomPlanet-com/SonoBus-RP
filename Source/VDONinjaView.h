@@ -128,7 +128,7 @@ public:
         customInfoLabel.setText(TRANS("Extra Parameters:"), dontSendNotification);
         customInfoLabel.setJustificationType(Justification::centredLeft);
         customInfoLabel.setFont(14);
-        customInfoLabel.setMinimumHorizontalScale(0.65f);
+        customInfoLabel.setMinimumHorizontalScale(1.0f);
 
         customFieldEditor.setFont(Font(14 * SonoLookAndFeel::getFontScale()));
         customFieldEditor.setTooltip(TRANS("Enter extra URL parameters here (separated with &), for more details see Advanced Options in the VDO.Ninja documentation"));

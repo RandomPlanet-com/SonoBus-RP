@@ -191,7 +191,8 @@ Tier tierForKey(const std::string& key);
 // web page's Settings section (so a new parameter is added in exactly one place).
 // key == nullptr → section header. col 0 = left, 1 = right.
 // kind: 0 Text, 1 Bool, 2 Choice (choices comma-separated, canonical values), 3 Password (text, masked).
-struct FormSpec { int col; const char* key; const char* label; int kind; const char* choices; };
+// hint: one line shown under a section header (headers only).
+struct FormSpec { int col; const char* key; const char* label; int kind; const char* choices; const char* hint = nullptr; };
 const std::vector<FormSpec>& formSpecs();
 
 juce::File dataDir();                    // settings, taps, stats and session history
@@ -269,6 +270,10 @@ std::vector<std::string> diffKeys(const HubLaunchArgs& x, const HubLaunchArgs& y
 std::vector<std::pair<std::string, std::string>> sessionSnapshot(const HubLaunchArgs& a);
 bool applySession(HubLaunchArgs& a, const std::string& group, const std::string& password,
                   const std::vector<std::pair<std::string, std::string>>& settings, int& applied, std::string& err);
+
+// Write only the stage password to the settings file (empty = no password); every other saved value stays as it is.
+// `live` gets the new password too, so the next hub restart uses it. The running hub keeps its password until then.
+bool saveStagePassword(const juce::File& f, HubLaunchArgs& live, const std::string& password, std::string& err);
 
 // Canonical text form of one field (bools → "1"/"0", codec → "pcm"/"opus").
 juce::String getValueString(const HubLaunchArgs& a, const std::string& key);

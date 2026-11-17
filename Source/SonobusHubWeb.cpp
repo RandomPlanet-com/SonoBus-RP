@@ -163,7 +163,7 @@ th,td{padding:7px 6px;text-align:left;white-space:nowrap;border-bottom:1px solid
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--card);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;white-space:normal;line-height:1.15;vertical-align:bottom}
 th.num,td.num{text-align:left}
 .u{color:var(--dim);font-size:11px;margin-left:2px}.sl{margin:0 4px}.sw{white-space:nowrap}.sa{color:#fff;margin-left:4px;font-size:10px}
-#ptable{width:1749px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}#ptable th.nosort{cursor:default}.nc{text-transform:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}
+#ptable{width:1749px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}#ptable th.nosort{cursor:default}.nc{text-transform:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}td.ifc{position:relative;overflow:visible}td.ifc:hover::after{content:attr(data-tip);position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}
 td.user{white-space:normal;word-break:break-word;position:relative;overflow:visible}td.ins{white-space:normal;word-break:break-word}
 tr:last-child td{border-bottom:0}
 .g{color:#5fd26b}.y{color:#e3c141}.r{color:#ff5e5e}.d{color:#777}.rec{color:#ff5e5e;font-weight:700}
@@ -173,6 +173,8 @@ tr:last-child td{border-bottom:0}
 @media (max-width:900px){.form{grid-template-columns:1fr}}
 .col{min-width:0}
 .sec{color:var(--teal);font-weight:600;margin:14px 0 6px;font-size:14px}.sec:first-child{margin-top:0}
+.hint{color:var(--dim);font-size:12px;margin:-2px 0 6px}
+.pwdots{letter-spacing:2px}.pwact{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;justify-content:flex-end;padding:4px 0 8px}.pwact .msg{margin:0 auto 0 0}.pwact button{padding:4px 12px}
 .row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(160px,220px) 64px;gap:10px;align-items:center;padding:4px 0}
 .row label{color:var(--text)}
 .row input[type=text],.row input[type=password],.row select{width:100%;box-sizing:border-box;background:#1f1f1f;color:var(--text);border:1px solid #333;border-radius:5px;padding:6px 8px;font:13px inherit}
@@ -187,6 +189,10 @@ iframe.log{width:100%;height:70vh;border:0;background:#0e0e0e;border-radius:6px}
 button.kick{padding:1px 6px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.kick:hover{background:#6a2a2a}
 button.slink{padding:2px 8px;font-size:12px;margin-right:6px}button.srm{padding:1px 7px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.srm:hover{background:#6a2a2a}#stable tbody tr[data-g]{cursor:pointer}#stable tbody tr[data-g]:hover td{background:#1b1b1b}#stable tbody tr.sel td{background:var(--teal2)}
 td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
+#xtable{width:auto}
+.ovl{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:20}
+.dlg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:300px;max-width:90vw}
+.dlg label{display:block;padding:4px 0;cursor:pointer}.dlg input[type=radio]{accent-color:var(--teal);margin-right:8px}.dlg .hint{margin:8px 0 0}
 #grp{width:230px}#gmsg{width:320px}.tools label{color:var(--dim)}.tools input[type=password],.tools input[type=text]{background:#1f1f1f;color:var(--text);border:1px solid #333;border-radius:5px;padding:6px 8px;font:13px inherit;width:230px}
 .tools input[type=text]:focus,.tools input[type=password]:focus{outline:none;border-color:var(--teal)}
 </style></head><body>
@@ -209,6 +215,11 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"><col style="width:56px"></colgroup><thead><tr>
  <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
  <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
+ <div id="xwrap" style="display:none">
+  <h2 style="margin-top:20px" title="Players the host removed from this stage. Allow back lets a player join again at once.">Removed players</h2>
+  <div class="wrap" id="xtwrap"><table id="xtable"><colgroup><col style="width:220px"><col style="width:190px"><col style="width:176px"><col style="width:120px"><col style="width:110px"></colgroup><thead><tr><th title="The name the player had when removed">Player</th><th title="The address the player had when removed. The name and the address are both kept out.">Address</th><th title="When the host removed this player">Removed</th><th title="How long this player is still kept out">Time left</th><th></th></tr></thead><tbody id="removed"></tbody></table></div>
+  <div id="xnote" class="notice" style="display:none">Set a Web password to see and manage removed players.</div>
+ </div>
 
  <h2 style="margin-top:20px" title="Stages this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent stages</h2>
  <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Stage</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Stage link (this hub's address + that stage name and password)">Stage link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
@@ -235,6 +246,15 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <h2>Log</h2>
  <iframe class="log" id="logframe" title="hub log"></iframe>
 </div>
+<div id="kdlg" class="ovl" style="display:none"><div class="dlg">
+ <h2 id="kdtitle">Remove player</h2>
+ <div>Keep them out:</div>
+ <label><input type="radio" name="kkeep" value="hour" checked>1 hour</label>
+ <label><input type="radio" name="kkeep" value="restart">Until the hub restarts</label>
+ <label><input type="radio" name="kkeep" value="permanent">Permanently</label>
+ <div class="hint">You can allow them back at any time under Removed players.</div>
+ <div class="tools"><span style="flex:1 1 auto"></span><button id="kdcancel">Cancel</button><button id="kdok" class="warn">Remove</button></div>
+</div></div>
 <script>
 let prev=null,prevT=0,restarting=false,curTab='';
 const $=(id)=>document.getElementById(id);
@@ -356,14 +376,16 @@ async function tick(){
 
    rowKeys.set(p.id,[p.user.toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
    let tr=rowMap.get(p.id);
-   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===0)td.className='user';if(i===1)td.className='ins';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
+   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===7)td.className='ctr ifc';if(i===0)td.className='user';if(i===1)td.className='ins';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
    cells.forEach((c,i)=>setH(tr.children[i],c));
-   setH(tr.children[COLS-1],h.settingsEnabled?`<button class="kick" data-u="${esc(p.user)}" title="Remove this player from the stage and keep them out for 1 hour">Kick</button>`:'');   // rebuilt only when the name or the setting changes
+   {const it=(p.ifaceMs===undefined||p.ifaceMs<0)?'Audio interface: not known':'Audio interface '+p.ifaceMs.toFixed(1)+' ms';const ic=tr.children[7];if(ic.dataset.tip!==it)ic.dataset.tip=it;}   // the tip lives on the stable cell and is set only when its text changes
+   setH(tr.children[COLS-1],h.settingsEnabled?`<button class="kick" data-u="${esc(p.user)}" title="Remove this player from the stage. You choose how long they stay out.">Kick</button>`:'');   // rebuilt only when the name or the setting changes
    if(tr.children[VERC].title!==(p.ver||''))tr.children[VERC].title=p.ver||'';}
   for(const [id,tr] of rowMap){if(!seen.has(id)){tr.remove();rowMap.delete(id);rowKeys.delete(id);}}
   applySort();
   $('norows').style.display=rowMap.size?'none':'';
   if((sessN++%10)===0)loadSessions(false);
+  drawRemoved(h);
   setT($('f_in'),kb(tin));setT($('f_out'),kb(tout));}
  prev=d;prevT=now;}catch(e){setT($('k_err'),restarting?'hub restarting…':'hub not responding: '+e);}
 }
@@ -373,11 +395,28 @@ $('pcbtn').onclick=async()=>{const r=await fetch(api('/api/portcheck'),{method:'
 $('viewlog').onclick=()=>{window.open(api('/log'),'_blank');};
 const post=(p,b)=>fetch(api(p),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 const needPw=(r,d)=>{if(!r.ok||!d.ok)alert(d.error||('Set a Web password to use this (HTTP '+r.status+')'));};
-$('rows').addEventListener('click',async(ev)=>{const b=ev.target.closest('button.kick');if(!b)return;const u=b.dataset.u;
- if(!confirm('Remove '+u+' from the stage? They cannot come back for 1 hour.'))return;
- b.disabled=true;try{const r=await post('/api/kick',{user:u});const d=await r.json().catch(()=>({}));
- if(!r.ok||!d.ok){alert(d.error||('Kick failed (HTTP '+r.status+')'));b.disabled=false;return;}b.textContent='Kicked';}
- catch(e){alert('kick failed: '+e);b.disabled=false;}});
+let kickUser='',kickBtn=null;
+$('rows').addEventListener('click',(ev)=>{const b=ev.target.closest('button.kick');if(!b)return;kickUser=b.dataset.u;kickBtn=b;
+ setT($('kdtitle'),'Remove '+kickUser+' from the stage?');document.querySelector('input[name=kkeep][value=hour]').checked=true;$('kdlg').style.display='flex';});
+$('kdcancel').onclick=()=>{$('kdlg').style.display='none';};
+$('kdlg').onclick=(ev)=>{if(ev.target===$('kdlg'))$('kdcancel').click();};
+document.addEventListener('keydown',(ev)=>{if(ev.key==='Escape'&&$('kdlg').style.display!=='none')$('kdcancel').click();});
+$('kdok').onclick=async()=>{const keep=document.querySelector('input[name=kkeep]:checked').value,u=kickUser,b=kickBtn;$('kdlg').style.display='none';
+ b.disabled=true;try{const r=await post('/api/kick',{user:u,keep});const d=await r.json().catch(()=>({}));
+ if(!r.ok||!d.ok){alert(d.error||('Kick failed (HTTP '+r.status+')'));b.disabled=false;return;}b.textContent='Kicked';loadRemoved();}
+ catch(e){alert('kick failed: '+e);b.disabled=false;}};
+// Removed players: every removal in force, each with Allow back. Fetched when the count changes and every 10 s.
+let xList=[],xCount=-1,xTick=0;
+const xLeft=(x)=>x.kind==='permanent'?'permanent':x.kind==='restart'?'until restart':Math.max(1,Math.ceil(x.leftSec/60))+' min';
+async function loadRemoved(){try{const r=await fetch(api('/api/removed'),{cache:'no-store'});if(!r.ok)return;xList=(await r.json()).removed||[];
+ setH($('removed'),xList.length?xList.map((x,i)=>`<tr><td class="user">${esc(x.user)}</td><td>${x.addr?esc(x.addr):'<span class="d">–</span>'}</td><td>${ft(x.removedAtMs)}</td><td>${xLeft(x)}</td><td><button class="slink allow" data-i="${i}" title="Let this player join again now">Allow back</button></td></tr>`).join(''):'<tr><td colspan="5" class="d">no removed players</td></tr>');}catch(e){}}
+$('removed').addEventListener('click',async(ev)=>{const b=ev.target.closest('button.allow');if(!b)return;const x=xList[Number(b.dataset.i)];if(!x)return;b.disabled=true;
+ try{const r=await post('/api/unkick',{user:x.user,addr:x.addr});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Allow back failed (HTTP '+r.status+')'));}catch(e){alert('allow back failed: '+e);}
+ $('removed').dataset.h='';loadRemoved();});
+function drawRemoved(h){const n=h.removedCount|0;$('xwrap').style.display=n>0?'':'none';
+ if(n>0){$('xtwrap').style.display=h.settingsEnabled?'':'none';$('xnote').style.display=h.settingsEnabled?'none':'';
+  if(h.settingsEnabled&&(n!==xCount||(xTick++%10)===0))loadRemoved();}
+ xCount=n;}
 $('restartbtn').onclick=async()=>{if(!confirm('Restart the hub? Every player drops and rejoins.'))return;try{const r=await post('/api/settings',{values:{},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!confirm('Switch the hub to stage "'+g+'"? The hub restarts and players must rejoin.'))return;try{const r=await post('/api/settings',{values:{group:g},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('gmsgbtn').onclick=async()=>{const t=$('gmsg').value.trim();if(!t)return;try{const r=await post('/api/chat',{message:t});const d=await r.json().catch(()=>({}));needPw(r,d);if(d.ok){$('gmsg').value='';$('gmsgnote').textContent='sent to '+d.sent;setTimeout(()=>$('gmsgnote').textContent='',3000);}}catch(e){}};
@@ -390,21 +429,40 @@ function fieldHtml(f){
  const id='f_'+f.key,tip=esc(f.tip||'');let inp;
  if(f.kind==1) inp=`<input type="checkbox" id="${id}" ${f.value=='1'?'checked':''} title="${tip}">`;
  else if(f.kind==2) inp=`<select id="${id}" title="${tip}">${f.choices.split(',').map(c=>`<option value="${esc(c)}" ${c==f.value?'selected':''}>${esc(c)}</option>`).join('')}</select>`;
- else if(f.kind==3) inp=`<input type="password" id="${id}" value="" placeholder="${f.set?'(set — blank = keep)':'(none)'}" autocomplete="new-password" title="${tip}">`;
+ else if(f.kind==3&&f.key=='group_password') return pwBlock(f);
+ else if(f.kind==3) inp=`<input type="password" id="${id}" value="" placeholder="${f.set?'Type a new password to change it':'(no password)'}" autocomplete="new-password" title="${tip}">`;
  else{const ph=f.key=='public_address'?(detected?detected+' (auto-detected)':'Not detected, enter your address'):'';inp=`<input type="text" id="${id}" value="${esc(f.value)}" placeholder="${esc(ph)}" title="${tip}">`;}
  const when=f.tier=='live'?'Takes effect as soon as you save.':'Takes effect after Save & Restart.';
  return `<div class="row"><label for="${id}" title="${tip}">${esc(f.label)}</label>${inp}<span class="tag ${f.tier}" title="${esc(when)}">${f.tier=='relaunch'?'restart':f.tier}</span></div>`;
 }
+// The stage password is never sent to the page: dots when one is saved, its own Set and Remove actions.
+const PWHINT='Applies after the hub restarts.';
+const pwState=(f)=>f.set?'<span class="pwdots" title="A password is set. It is never shown here.">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span>':'<span class="d">(no password)</span>';
+function pwBlock(f){const tip=esc(f.tip||'');
+ return `<div class="row"><label title="${tip}">${esc(f.label)}</label><span id="pwstate">${pwState(f)}</span><span class="tag ${f.tier}" title="Takes effect after Save &amp; Restart.">restart</span></div>`
+ +`<div class="row"><label for="pwnew">New password</label><input type="password" id="pwnew" value="" autocomplete="new-password" title="Type the new stage password, then click Set password."><span></span></div>`
+ +`<div class="pwact"><span id="pwmsg" class="msg">${f.pending?'Saved. ':''}${PWHINT}</span><button id="pwrm" style="${f.set?'':'display:none'}" title="Removes the stage password. ${PWHINT}">Remove password</button><button id="pwset" title="Saves the new stage password. ${PWHINT}">Set password</button></div>`;}
+async function pwApply(body,done){const m=$('pwmsg');m.textContent='saving…';m.className='msg';
+ try{const r=await post('/api/stagepassword',body);const d=await r.json().catch(()=>({}));
+ if(!r.ok||!d.ok){m.textContent=d.error||('HTTP '+r.status);m.className='msg err';return;}
+ const f=fields.find(x=>x.key=='group_password');if(f){f.set=d.set;f.pending=d.pending;$('pwstate').innerHTML=pwState(f);}
+ $('pwnew').value='';$('pwrm').style.display=d.set?'':'none';m.textContent=done+(d.pending?' '+PWHINT:'');m.className='msg ok';}
+ catch(e){m.textContent='save failed: '+e;m.className='msg err';}}
+function hookPw(){if(!$('pwset'))return;
+ $('pwset').onclick=()=>{const v=$('pwnew').value.trim();if(!v){$('pwmsg').textContent='Type a new password first.';$('pwmsg').className='msg err';return;}pwApply({password:v},'Password set.');};
+ $('pwnew').onkeydown=(e)=>{if(e.key==='Enter')$('pwset').click();};
+ $('pwrm').onclick=()=>{if(confirm('Remove the password? Anyone with the stage name can then join.'))pwApply({remove:true},'Password removed.');};}
 async function loadSettings(){
  try{const r=await fetch(api('/api/settings'),{cache:'no-store'});const d=await r.json();
  if(!d.enabled){$('settingsNote').textContent=d.reason||'settings disabled';$('form').style.display='none';$('settingsTools').style.display='none';return;}
  fields=d.fields;detected=d.detected||'';$('settingsNote').textContent='Settings file: '+d.file+(d.haveFile?'':'. Not saved yet. Click Save to keep these settings.');
- const cols=['',''];for(const f of d.fields){cols[f.col]+=f.key?fieldHtml(f):`<div class="sec">${esc(f.label)}</div>`;}
- $('col0').innerHTML=cols[0];$('col1').innerHTML=cols[1];$('form').style.display='grid';$('settingsTools').style.display='flex';$('smsg').textContent='';
+ const cols=['',''];for(const f of d.fields){cols[f.col]+=f.key?fieldHtml(f):`<div class="sec">${esc(f.label)}</div>`+(f.hint?`<div class="hint">${esc(f.hint)}</div>`:'');}
+ $('col0').innerHTML=cols[0];$('col1').innerHTML=cols[1];hookPw();$('form').style.display='grid';$('settingsTools').style.display='flex';$('smsg').textContent='';
  }catch(e){$('settingsNote').textContent='settings unavailable: '+e;}
 }
 async function save(restart){
  const values={};for(const f of fields){if(!f.key)continue;const el=$('f_'+f.key);if(!el)continue;values[f.key]=f.kind==1?(el.checked?'1':'0'):el.value;}
+ const pn=$('pwnew');if(pn&&pn.value.trim())values.group_password=pn.value.trim();   // a new stage password typed but not set yet goes with the rest
  $('smsg').textContent='saving…';$('smsg').className='msg';
  try{const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({values,restart})});const d=await r.json();
  if(!d.ok){$('smsg').textContent=d.error||('HTTP '+r.status);$('smsg').className='msg err';return;}
@@ -538,7 +596,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
       << "\"platform\":\"" << jsonEscape(webPlatform()) << "\",\"location\":\"" << jsonEscape(mLocation) << "\","
       << "\"settingsEnabled\":" << ((mArgs && !mPassword.empty() && mSettingsFile != juce::File()) ? "true" : "false") << ",\"pollMs\":1000,"
       << "\"portVerifiedAtMs\":" << s.portCheckVerifiedAtMs << ","
-      << "\"playersSinceStart\":" << mHub.playersSinceStart() << ","
+      << "\"playersSinceStart\":" << mHub.playersSinceStart() << ",\"removedCount\":" << mHub.removedPlayerCount() << ","
       << "\"stageMaxPlayers\":" << s.stageMaxPlayers << ",\"stageMaxChannels\":" << s.stageMaxChannels << ","
       << "\"stageListingState\":" << s.stageListingState << ",\"stageListingText\":\"" << jsonEscape(s.stageListingText) << "\","
       << "\"joinLink\":\"" << jsonEscape(SonobusHubWeb::joinLink(s)) << "\"},\"peers\":[";
@@ -561,6 +619,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
           << ",\"rxUnderrunsTotal\":" << p.clientRxUnderrunsTotal << ",\"rxPopsTotal\":" << p.clientRxPopsTotal   
           << ",\"latFeedAgeS\":" << p.clientLatFeedAgeS   // Player-reported age of the hub's latency feed
           << ",\"recvBufMode\":" << p.clientRecvBufMode   // 0 Manual / 1 Auto / -1 unknown
+          << ",\"ifaceMs\":" << p.clientIfaceMs   // Player's audio interface in + out, ms (-1 not reported)
           << ",\"channels\":[";
         for (size_t ci = 0; ci < p.channelNames.size(); ++ci) o << (ci ? "," : "") << "\"" << jsonEscape(p.channelNames[ci]) << "\"";   
         o << "]"
@@ -607,7 +666,9 @@ void SonobusHubWeb::handleClient(int fd) {
         if (mPassword.empty() || !mArgs || mSettingsFile == juce::File()) { sendAll(fd, httpResponse(403, "Forbidden", "application/json", "{\"ok\":false,\"error\":\"set web_password (and a settings file) to enable settings from the web page\"}")); return; }
         if (path == "/api/portcheck") { mHub.requestPortCheck(); sendAll(fd, httpResponse(200, "OK", "application/json", "{\"ok\":true}")); return; }
         if (path == "/api/settings") { bool ok = false; const std::string reply = applySettings(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
+        if (path == "/api/stagepassword") { bool ok = false; const std::string reply = stagePasswordRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/kick") { bool ok = false; const std::string reply = kickRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
+        if (path == "/api/unkick") { bool ok = false; const std::string reply = unkickRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/chat") { bool ok = false; const std::string reply = chatRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/update/install") { bool ok = false; const std::string reply = startUpdate(ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/sessions/removeplayer") { bool ok = false; const std::string reply = removePlayerRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
@@ -619,6 +680,10 @@ void SonobusHubWeb::handleClient(int fd) {
     else if (path == "/api/log") {   // Connection log / hub.log tail; gated like Settings
         if (mPassword.empty()) sendAll(fd, httpResponse(403, "Forbidden", "application/json", "{\"ok\":false,\"error\":\"set web_password to view the log from the web page\"}"));
         else sendAll(fd, httpResponse(200, "OK", "application/json", logJson(query)));
+    }
+    else if (path == "/api/removed") {   // names and addresses: gated like /api/kick
+        if (mPassword.empty() || !mArgs || mSettingsFile == juce::File()) sendAll(fd, httpResponse(403, "Forbidden", "application/json", "{\"ok\":false,\"error\":\"set web_password (and a settings file) to see removed players from the web page\"}"));
+        else sendAll(fd, httpResponse(200, "OK", "application/json", removedJson()));
     }
     else if (path == "/licenses") sendAll(fd, httpResponse(200, "OK", "text/plain; charset=utf-8", licensesText()));
     else if (path == "/log") sendAll(fd, httpResponse(200, "OK", "text/html; charset=utf-8", kLogPage));
@@ -768,7 +833,28 @@ std::string SonobusHubWeb::applySessionRequest(const std::string& body, bool& ok
     return o.str();
 }
 
-// POST /api/kick, body {"user":"..."}, gated like the other POSTs. Removes the player and keeps them out for an hour.
+// POST /api/stagepassword, body {"password":"..."} to set or {"remove":true} to remove, gated like the other POSTs.
+// Only the password changes in the settings file. The running hub keeps its password until it restarts.
+std::string SonobusHubWeb::stagePasswordRequest(const std::string& body, bool& ok) {
+    ok = false;
+    std::lock_guard<std::mutex> g(mSettingsLock);
+    if (!mArgs) return "{\"ok\":false,\"error\":\"settings not available\"}";
+    const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
+    const bool remove = (bool) obj->getProperty("remove");
+    const std::string pw = remove ? std::string() : obj->getProperty("password").toString().trim().toStdString();
+    if (!remove && pw.empty()) return "{\"ok\":false,\"error\":\"Type a new password first.\"}";
+    std::string err;
+    if (!hs::saveStagePassword(mSettingsFile, *mArgs, pw, err)) return "{\"ok\":false,\"error\":\"save failed: " + jsonEscape(err) + "\"}";
+    const bool pending = mHub.snapshotForUI().groupPassword != mArgs->groupPassword;
+    std::cout << "[HUB-WEB] stage password " << (pw.empty() ? "removed" : "set") << (pending ? " (applies after the hub restarts)" : "") << "\n";
+    ok = true;
+    return std::string("{\"ok\":true,\"set\":") + (pw.empty() ? "false" : "true") + ",\"pending\":" + (pending ? "true" : "false") + "}";
+}
+
+// POST /api/kick, body {"user":"...","keep":"hour"|"restart"|"permanent"}, gated like the other POSTs.
+// Removes the player and keeps them out: 1 hour (the default), until the hub restarts, or until allowed back.
 std::string SonobusHubWeb::kickRequest(const std::string& body, bool& ok) {
     ok = false;
     const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
@@ -776,11 +862,49 @@ std::string SonobusHubWeb::kickRequest(const std::string& body, bool& ok) {
     if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
     const std::string user = obj->getProperty("user").toString().toStdString();
     if (user.empty()) return "{\"ok\":false,\"error\":\"no player given\"}";
+    const std::string keep = obj->hasProperty("keep") ? obj->getProperty("keep").toString().toStdString() : std::string("hour");
     constexpr int kBlockMinutes = 60;
-    if (!mHub.kickPlayer(user, kBlockMinutes)) return "{\"ok\":false,\"error\":\"no such player\"}";
-    std::cout << "[HUB-WEB] kick '" << user << "' (blocked " << kBlockMinutes << " min)\n";
+    SonobusHubServer::RemovalKind kind = SonobusHubServer::RemovalKind::Timed;
+    if (keep == "restart") kind = SonobusHubServer::RemovalKind::UntilRestart;
+    else if (keep == "permanent") kind = SonobusHubServer::RemovalKind::Permanent;
+    else if (keep != "hour") return "{\"ok\":false,\"error\":\"keep must be hour, restart or permanent\"}";
+    if (!mHub.kickPlayer(user, kBlockMinutes, kind)) return "{\"ok\":false,\"error\":\"no such player\"}";
+    std::cout << "[HUB-WEB] kick '" << user << "' (kept out: " << (keep == "hour" ? "60 min" : keep == "restart" ? "until the hub restarts" : "permanently") << ")\n";
     ok = true;
     return "{\"ok\":true}";
+}
+
+// POST /api/unkick, body {"user":"...","addr":"..."} as listed by /api/removed, gated like the other POSTs.
+// Lifts that removal at once, whatever its kind.
+std::string SonobusHubWeb::unkickRequest(const std::string& body, bool& ok) {
+    ok = false;
+    const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
+    const std::string user = obj->getProperty("user").toString().toStdString(), addr = obj->getProperty("addr").toString().toStdString();
+    if (user.empty() && addr.empty()) return "{\"ok\":false,\"error\":\"no player given\"}";
+    if (!mHub.allowBack(user, addr)) return "{\"ok\":false,\"error\":\"that player is not in the removed list\"}";
+    std::cout << "[HUB-WEB] allow back '" << user << "'\n";
+    ok = true;
+    return "{\"ok\":true}";
+}
+
+// GET /api/removed: {"ok":true,"removed":[{"user","addr","removedAtMs","kind":"timed"|"restart"|"permanent","leftSec"}]},
+// newest first. leftSec counts for "timed" only (-1 otherwise).
+std::string SonobusHubWeb::removedJson() const {
+    const auto list = mHub.removedPlayers();
+    const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::ostringstream o; o << "{\"ok\":true,\"removed\":[";
+    bool first = true;
+    for (const auto& r : list) {
+        const bool timed = r.kind == SonobusHubServer::RemovalKind::Timed;
+        if (!first) o << ","; first = false;
+        o << "{\"user\":\"" << jsonEscape(r.user) << "\",\"addr\":\"" << jsonEscape(r.ip) << "\",\"removedAtMs\":" << r.removedAtMs
+          << ",\"kind\":\"" << (timed ? "timed" : r.kind == SonobusHubServer::RemovalKind::UntilRestart ? "restart" : "permanent") << "\""
+          << ",\"leftSec\":" << (timed ? std::max<long long>(0, (r.untilMs - nowMs + 999) / 1000) : -1LL) << "}";
+    }
+    o << "]}";
+    return o.str();
 }
 
 // POST /api/chat, body {"message":"..."}, gated like the other POSTs.
@@ -878,12 +1002,13 @@ static const hs::FormSpec* specFor(const std::string& key) {
 std::string SonobusHubWeb::settingsJson() const {
     std::lock_guard<std::mutex> g(mSettingsLock);
     std::ostringstream o;
+    const auto snap = mHub.snapshotForUI();
     const bool enabled = mArgs && !mPassword.empty() && mSettingsFile != juce::File();
     o << "{\"enabled\":" << (enabled ? "true" : "false")
       << ",\"reason\":\"" << jsonEscape(!mArgs ? "settings not wired on this platform" : mSettingsFile == juce::File() ? "hub started with --no-settings" : mPassword.empty() ? "set web_password (hub_settings.json or --web-password) to enable Settings on the web page" : "") << "\""
       << ",\"file\":\"" << jsonEscape(mSettingsFile == juce::File() ? std::string() : mSettingsFile.getFullPathName().toStdString())
       << "\",\"haveFile\":" << (mSettingsFile.existsAsFile() ? "true" : "false")
-      << ",\"detected\":\"" << jsonEscape(mHub.snapshotForUI().advertisedPublicHost) << "\",\"fields\":[";
+      << ",\"detected\":\"" << jsonEscape(snap.advertisedPublicHost) << "\",\"fields\":[";
     sb_hub_gui::HubLaunchArgs defaults;
     hs::applyDefaults(defaults);
     bool first = true;
@@ -893,10 +1018,12 @@ std::string SonobusHubWeb::settingsJson() const {
           << ",\"tip\":\"" << jsonEscape(sp.key ? hs::tipFor(sp.key) : "") << "\""
           << ",\"label\":\"" << jsonEscape(sp.label) << "\",\"kind\":" << sp.kind
           << ",\"choices\":\"" << jsonEscape(sp.choices ? sp.choices : "") << "\"";
+        if (sp.hint) o << ",\"hint\":\"" << jsonEscape(sp.hint) << "\"";
         if (sp.key && enabled) {
             const std::string v = hs::getValueString(*mArgs, sp.key).toStdString();
             o << ",\"def\":\"" << jsonEscape(hs::getValueString(defaults, sp.key).toStdString()) << "\"";
             o << ",\"tier\":\"" << tierName(hs::tierForKey(sp.key)) << "\",\"value\":\"" << jsonEscape(sp.kind == 3 ? std::string() : v) << "\",\"set\":" << (v.empty() ? "false" : "true");
+            if (std::strcmp(sp.key, "group_password") == 0) o << ",\"pending\":" << (v != snap.groupPassword ? "true" : "false");   // saved, not live until the hub restarts
         }
         o << "}";
     }
