@@ -21,6 +21,8 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>   // Local firewall inspection
+#include "SonobusHubCompat.h"
+#if !defined(_WIN32)
 #include <fcntl.h>    // Port check
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -29,6 +31,7 @@
 #include <pwd.h>
 #include <sys/resource.h>
 #include <sys/socket.h>   // disconnectx
+#endif
 #include <cstdlib>
 // One monotonic tick source for the whole hub.
 //   macOS: mach_absolute_time ticks + mach timebase.
@@ -55,9 +58,163 @@
       if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) std::cerr << "[HUB] WARNING: SCHED_FIFO failed for " << who << " (" << strerror(errno) << ") — run as root or grant CAP_SYS_NICE\n";
       else std::cout << "[HUB] " << who << " SCHED_FIFO prio " << sp.sched_priority << "\n";
   }
+#elif defined(_WIN32)
+  // Windows: the performance counter, scaled to nanoseconds by the timebase. Waits use a high-resolution timer for
+  // the bulk and spin for the last stretch, because the timer alone is not exact enough for a sub-millisecond block.
+  struct hub_tb_t { uint32_t numer, denom; };
+  static inline uint64_t hub_qpc_freq() { static const uint64_t f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (uint64_t) q.QuadPart; }(); return f; }
+  static inline void hub_timebase(hub_tb_t* tb) {
+      uint64_t a = 1000000000ULL, b = hub_qpc_freq();
+      uint64_t x = a, y = b; while (y) { const uint64_t t = x % y; x = y; y = t; }
+      tb->numer = (uint32_t) (a / x); tb->denom = (uint32_t) (b / x);
+  }
+  static inline uint64_t hubNowTicks() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return (uint64_t) q.QuadPart; }
+  // Tick switches, read once from the environment:
+  //   SB_HUB_WIN_SPIN_US=<n>  spin for the last n microseconds before a deadline (default 400; each waiting
+  //                           thread spends that share of every block on one core)
+  //   SB_HUB_WIN_TICK=spin    the block tick never sleeps (one whole core; no multimedia task for that thread)
+  //   SB_HUB_WIN_PIN=<cpu>    keep the block tick on one logical processor and the other real-time threads off it
+  //   SB_HUB_WIN_PRIO=normal|high|realtime   process priority class (default high)
+  //   SB_HUB_WIN_MMCSS=0      no multimedia scheduler task for the real-time threads (plain time-critical priority)
+  //   SB_HUB_WIN_KTS=0        no receive timestamps from the stack (arrival times taken at the read)
+  //   SB_HUB_WIN_RXFIRST=1    inside the multimedia class the receive thread outranks the block tick, and the tick
+  //                           outranks the pacer, listener and send threads (default: all equal)
+  //   SB_HUB_WIN_PACER_SPIN_US=<n>  the pacer's own final spin before a slot deadline (default: as SB_HUB_WIN_SPIN_US)
+  struct hub_win_opts_t { uint64_t spinTicks; uint64_t pacerSpinTicks; bool tickSpin; int pinCpu; int prio; bool mmcss; bool kts; bool rxFirst; };
+  static inline const hub_win_opts_t& hub_win_opts() {
+      static const hub_win_opts_t o = [] {
+          hub_win_opts_t v; long us = 400; v.tickSpin = false; v.pinCpu = -1; v.prio = 1; v.mmcss = true; v.kts = true; v.rxFirst = false;
+          if (const char* e = getenv("SB_HUB_WIN_SPIN_US"); e && e[0]) us = std::max(0L, std::min(2000L, atol(e)));
+          long pus = us;
+          if (const char* e = getenv("SB_HUB_WIN_PACER_SPIN_US"); e && e[0]) pus = std::max(0L, std::min(2000L, atol(e)));
+          if (const char* e = getenv("SB_HUB_WIN_RXFIRST"); e && e[0]) v.rxFirst = atoi(e) != 0;
+          v.pacerSpinTicks = hub_qpc_freq() * (uint64_t) pus / 1000000ULL;
+          if (const char* e = getenv("SB_HUB_WIN_TICK"); e && !strcmp(e, "spin")) v.tickSpin = true;
+          if (const char* e = getenv("SB_HUB_WIN_PIN"); e && e[0]) v.pinCpu = std::max(0, std::min(63, atoi(e)));
+          if (const char* e = getenv("SB_HUB_WIN_PRIO"); e && e[0]) v.prio = !strcmp(e, "normal") ? 0 : !strcmp(e, "realtime") ? 2 : 1;
+          if (const char* e = getenv("SB_HUB_WIN_MMCSS"); e && e[0]) v.mmcss = atoi(e) != 0;
+          if (const char* e = getenv("SB_HUB_WIN_KTS"); e && e[0]) v.kts = atoi(e) != 0;
+          v.spinTicks = hub_qpc_freq() * (uint64_t) us / 1000000ULL;
+          return v;
+      }();
+      return o;
+  }
+  // Receive timestamps from the stack (Windows 10 2004 and later), in performance-counter units. The SDK's
+  // names are gated on a newer target version than this build uses, so the few constants are spelled out.
+  struct hub_win_ts_cfg_t { ULONG flags; USHORT txBuffered; };
+  static int hub_win_rx_ts_err = 0;   // last error of the enable, for the log line
+  static inline bool hub_win_rx_ts_enable(int fd) {
+      hub_win_ts_cfg_t cfg; cfg.flags = 0x1 /* RX */; cfg.txBuffered = 0;
+      DWORD got = 0;
+      const bool ok = ::WSAIoctl((SOCKET) fd, 0x980000EBul /* SIO_TIMESTAMPING */, &cfg, sizeof(cfg), nullptr, 0, &got, nullptr, nullptr) == 0;
+      if (!ok) hub_win_rx_ts_err = ::WSAGetLastError();
+      return ok;
+  }
+  static bool hub_win_rx_ts_on = false;   // set once at socket setup, read by the receive and stats threads
+  static inline LPFN_WSARECVMSG hub_win_recvmsg_fn(int fd) {
+      static LPFN_WSARECVMSG fn = [fd] {
+          LPFN_WSARECVMSG f = nullptr; GUID g = WSAID_WSARECVMSG; DWORD got = 0;
+          if (::WSAIoctl((SOCKET) fd, SIO_GET_EXTENSION_FUNCTION_POINTER, &g, sizeof(g), &f, sizeof(f), &got, nullptr, nullptr) != 0) f = nullptr;
+          return f;
+      }();
+      return fn;
+  }
+  static thread_local bool hub_tl_spin_only = false;
+  static thread_local bool hub_tl_pacer = false;
+  static inline void hubWaitUntilTicks(uint64_t t) {
+      static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* high resolution */, TIMER_ALL_ACCESS);
+      const uint64_t spinTicks = hub_tl_pacer ? hub_win_opts().pacerSpinTicks : hub_win_opts().spinTicks;
+      for (;;) {
+          const uint64_t now = hubNowTicks();
+          if (now >= t) return;
+          const uint64_t left = t - now;
+          if (timer && !hub_tl_spin_only && left > spinTicks) {
+              LARGE_INTEGER due; due.QuadPart = -(LONGLONG) ((left - spinTicks) * 10000000ULL / hub_qpc_freq());
+              if (due.QuadPart < 0 && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) { WaitForSingleObject(timer, 50); continue; }
+          }
+          YieldProcessor();
+      }
+  }
+  static inline void hub_set_thread_name(const char* n) {
+      wchar_t w[64]; size_t i = 0; for (; n[i] && i < 63; ++i) w[i] = (wchar_t) (unsigned char) n[i]; w[i] = 0;
+      SetThreadDescription(GetCurrentThread(), w);
+  }
+  // Windows stand-in for the real-time policies: the multimedia class scheduler's "Pro Audio" task plus the
+  // highest ordinary thread priority.
+  static inline void hub_set_fifo(int, const char* who) {
+      const hub_win_opts_t& o = hub_win_opts();
+      static const bool once = [&o] {
+          timeBeginPeriod(1);
+          const DWORD cls = o.prio == 2 ? REALTIME_PRIORITY_CLASS : o.prio == 1 ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
+          const BOOL ok = SetPriorityClass(GetCurrentProcess(), cls);
+          std::cout << "[HUB] process priority class: " << (o.prio == 2 ? "realtime" : o.prio == 1 ? "high" : "normal") << (ok ? "" : " (refused)")
+                    << ", final spin " << (o.spinTicks * 1000000ULL / hub_qpc_freq()) << " us\n";
+          return true;
+      }();
+      (void) once;
+      const bool isTick = !strcmp(who, "audio thread");
+      const bool isRecv = !strcmp(who, "recv thread");
+      const bool spin = isTick && o.tickSpin;
+      hub_tl_spin_only = spin;
+      hub_tl_pacer = !strcmp(who, "pacer thread");
+      DWORD idx = 0;
+      // A thread that never sleeps would be throttled by the multimedia scheduler, so it stays outside it.
+      const HANDLE h = (spin || !o.mmcss) ? nullptr : AvSetMmThreadCharacteristicsW(L"Pro Audio", &idx);
+      // The receive thread does microseconds of work per datagram; it must not queue behind a thread that spins
+      // towards a deadline, so it takes the top level and the tick the next one.
+      const char* lvl = "";
+      if (h && o.rxFirst) {
+          const AVRT_PRIORITY pr = isRecv ? AVRT_PRIORITY_CRITICAL : isTick ? AVRT_PRIORITY_HIGH : AVRT_PRIORITY_NORMAL;
+          if (AvSetMmThreadPriority(h, pr)) lvl = isRecv ? " (level critical)" : isTick ? " (level high)" : " (level normal)";
+      }
+      const BOOL ok = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+      bool pinned = false;
+      if (o.pinCpu >= 0) {
+          // The tick gets the processor to itself: the hub's other real-time threads stay off it.
+          DWORD_PTR procMask = 0, sysMask = 0;
+          const DWORD_PTR bit = (DWORD_PTR) 1 << o.pinCpu;
+          if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) && (procMask & bit) && (procMask & ~bit)) {
+              if (isTick) pinned = SetThreadAffinityMask(GetCurrentThread(), bit) != 0;
+              else SetThreadAffinityMask(GetCurrentThread(), procMask & ~bit);
+          }
+      }
+      std::cout << "[HUB] " << who << " scheduling: " << (h ? "Pro Audio task" : "no multimedia task") << lvl << ", priority " << (ok ? "time critical" : "unchanged")
+                << (spin ? ", never sleeps" : "") << (pinned ? ", pinned to cpu " + std::to_string(o.pinCpu) : std::string()) << "\n";
+  }
 #endif
 // Recvmsg with the kernel's monotonic receive timestamp (ns, 0 = none).
 // Same semantics as recvfrom (flags 0, source address filled).
+#if defined(_WIN32)
+// Windows: the stack's receive timestamp when the socket has them (SO_TIMESTAMP control data on WSARecvMsg),
+// else the time right after the read, which also holds the wait of the datagram in the socket buffer.
+static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, socklen_t* salen, uint64_t* ktsNs) {
+    hub_tb_t tb; hub_timebase(&tb);
+    *ktsNs = 0;
+    if (hub_win_rx_ts_on) {
+        if (LPFN_WSARECVMSG fn = hub_win_recvmsg_fn(fd)) {
+            WSABUF wb; wb.buf = buf; wb.len = (ULONG) len;
+            alignas(8) char ctrl[64];
+            WSAMSG msg; memset(&msg, 0, sizeof(msg));
+            msg.name = sa; msg.namelen = (INT) *salen; msg.lpBuffers = &wb; msg.dwBufferCount = 1;
+            msg.Control.buf = ctrl; msg.Control.len = sizeof(ctrl);
+            DWORD got = 0;
+            if (fn((SOCKET) fd, &msg, &got, nullptr, nullptr) != 0) return -1;
+            *salen = (socklen_t) msg.namelen;
+            for (WSACMSGHDR* c = WSA_CMSG_FIRSTHDR(&msg); c; c = WSA_CMSG_NXTHDR(&msg, c)) {
+                if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == 0x300A /* SO_TIMESTAMP */ && c->cmsg_len >= WSA_CMSG_LEN(sizeof(UINT64))) {
+                    UINT64 q; memcpy(&q, WSA_CMSG_DATA(c), sizeof(q));
+                    *ktsNs = q * tb.numer / tb.denom;
+                }
+            }
+            if (*ktsNs == 0) *ktsNs = hubNowTicks() * tb.numer / tb.denom;
+            return (ssize_t) got;
+        }
+    }
+    const int n = ::recvfrom((SOCKET) fd, buf, (int) len, 0, sa, salen);
+    if (n >= 0) *ktsNs = hubNowTicks() * tb.numer / tb.denom;
+    return n;
+}
+#else
 static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, socklen_t* salen, uint64_t* ktsNs) {
     struct iovec iov; iov.iov_base = buf; iov.iov_len = len;
     alignas(8) char cbuf[64];
@@ -89,6 +246,7 @@ static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, so
     }
     return n;
 }
+#endif
 // Dissolve a connected UDP socket. macOS: connect(AF_UNSPEC) returns EAFNOSUPPORT for UDP, so
 // disconnectx(2); Linux/BSD: connect() with an AF_UNSPEC address is the documented way.
 static int hubDissolveUdp(int fd) {
@@ -105,7 +263,9 @@ static bool hubIdleMaskEnabled() {   // SB_IDLE_MASK=0 disables (A/B measurement
 }
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
   #include <mach/mach.h>
@@ -136,7 +296,9 @@ static const bool kHubDebug = []() {
 // CPU pause hint for the audio thread's short bounded barrier spin. Pure instruction: no syscall,
 // no scheduler interaction (std::this_thread::yield() on macOS is a swtch_pri syscall per call).
 static inline void hub_cpu_pause() {
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(_MSC_VER)
+    YieldProcessor();
+#elif defined(__aarch64__) || defined(__arm64__)
     asm volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(__i386__)
     __builtin_ia32_pause();
@@ -223,7 +385,7 @@ static inline int32_t hub_send_bare_now(HubEndpoint* ep, const char* data, int32
     if (result > 0) {
         ep->sentBytes += result;
     } else if (result < 0) {
-        ep->lastErrno.store(errno, std::memory_order_relaxed);
+        ep->lastErrno.store(hub_sockerr(), std::memory_order_relaxed);
         ep->sendErrors.fetch_add(1, std::memory_order_relaxed);
         gHubSendErrors.fetch_add(1, std::memory_order_relaxed);
     }
@@ -337,8 +499,10 @@ SonobusHubServer::~SonobusHubServer() {
 // So the hub derives both from what the machine knows: the LAN address from the interface inside
 // the configured LAN subnet, the WAN address from one STUN binding request. Control path only
 // (start(), before the signaling server exists); nothing on the audio thread.
+#if !defined(_WIN32)
 #include <ifaddrs.h>
 #include <net/if.h>    // IFF_UP / IFF_LOOPBACK
+#endif
 #include <random>
 
 namespace {
@@ -392,7 +556,7 @@ std::string hub_pick_lan_ipv4(InLan inLan, std::string& ifname, bool& matchedSub
             ifname = "default route";
         }
     }
-    ::close(s);
+    hub_close(s);
     return out;
 }
 
@@ -410,7 +574,7 @@ std::string hub_default_route_cidr(std::string& ifname) {
     socklen_t len = sizeof(me);
     bool ok = (::connect(s, (struct sockaddr*)&probe, sizeof(probe)) == 0)
            && (::getsockname(s, (struct sockaddr*)&me, &len) == 0);
-    ::close(s);
+    hub_close(s);
     if (!ok) return {};
     std::string out;
     struct ifaddrs* list = nullptr;
@@ -448,7 +612,7 @@ bool hub_stun_public_ipv4(const char* host, int port, int timeoutMs, std::string
         return false;
     }
     int s = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { freeaddrinfo(res); err = std::string("socket: ") + strerror(errno); return false; }
+    if (s < 0) { freeaddrinfo(res); err = std::string("socket: ") + strerror(hub_sockerr()); return false; }
 
     uint8_t req[20] = {0};
     req[0] = 0x00; req[1] = 0x01;                 // Binding Request
@@ -484,15 +648,15 @@ bool hub_stun_public_ipv4(const char* host, int port, int timeoutMs, std::string
                 if (!ok && !plain.empty()) { ip = plain; ok = true; }
                 if (!ok) err = "reply without a mapped address";
             } else {
-                err = n < 0 ? std::string("recv: ") + strerror(errno) : "unexpected reply";
+                err = n < 0 ? std::string("recv: ") + strerror(hub_sockerr()) : "unexpected reply";
             }
         } else {
             err = "timeout";
         }
     } else {
-        err = std::string("send: ") + strerror(errno);
+        err = std::string("send: ") + strerror(hub_sockerr());
     }
-    ::close(s);
+    hub_close(s);
     freeaddrinfo(res);
     return ok;
 }
@@ -614,7 +778,7 @@ bool SonobusHubServer::portCheckViaHelper(std::string& text, int& state, bool& a
             } catch (...) {}
         }
     }
-    ::close(sock);
+    hub_close(sock);
     if (mRunning.load()) std::this_thread::sleep_for(std::chrono::milliseconds(400));   // late pings
     const bool udpAudio = mPortProbeAudioHits.load(std::memory_order_relaxed) != a0;
     const bool udpServer = aoo_sb_fwprobe_server_hits() != s0;
@@ -653,6 +817,8 @@ std::string SonobusHubServer::localPortCheckText() const {
     if (fw.find("disabled") != std::string::npos) t += "macOS firewall off";
     else if (fw.find("enabled") != std::string::npos) t += "macOS firewall ON (allow the hub when macOS asks)";
     else t += "not inspected";
+#elif defined(_WIN32)
+    t += "not inspected (allow sonobus-hub in the Windows firewall when it asks)";
 #else
     const std::string ufw = hub_run_cmd("ufw status 2>/dev/null");
     auto ufwAllows = [&](int port, const char* proto) {
@@ -787,11 +953,11 @@ void SonobusHubServer::portCheckThreadMain() {
 // replyFd is a dup() of the socket the request arrived on (the requester's NAT only lets that source back in).
 static std::atomic<uint64_t> g_hubProbeLastServeMs{0};
 static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int udpPort, int serverPort, int replyFd) {
-    if (udpPort <= 0 || udpPort > 65535 || serverPort <= 0 || serverPort > 65535) { ::close(replyFd); return; }
+    if (udpPort <= 0 || udpPort > 65535 || serverPort <= 0 || serverPort > 65535) { hub_close(replyFd); return; }
     const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     uint64_t last = g_hubProbeLastServeMs.load(std::memory_order_relaxed);
-    if (now - last < 2000 || !g_hubProbeLastServeMs.compare_exchange_strong(last, now)) { ::close(replyFd); return; }
+    if (now - last < 2000 || !g_hubProbeLastServeMs.compare_exchange_strong(last, now)) { hub_close(replyFd); return; }
     std::thread([to, token, udpPort, serverPort, replyFd]() {
         auto ping = [&](int port, const char* what) {
             int s = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -800,27 +966,27 @@ static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int
             char b[128]; osc::OutboundPacketStream m(b, sizeof(b));
             m << osc::BeginMessage("/sb/fwprobe/ping") << (osc::int64)token << what << osc::EndMessage;
             for (int i = 0; i < 3; ++i) { ::sendto(s, m.Data(), m.Size(), 0, (struct sockaddr*)&d, sizeof(d)); std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
-            ::close(s);
+            hub_close(s);
         };
         ping(udpPort, "udp-audio");
         ping(serverPort, "udp-server");
         int tcpOk = 0;
         int t = ::socket(AF_INET, SOCK_STREAM, 0);
         if (t >= 0) {
-            fcntl(t, F_SETFL, fcntl(t, F_GETFL, 0) | O_NONBLOCK);
+            hub_set_nonblock(t);
             struct sockaddr_in d = to; d.sin_port = htons((uint16_t)serverPort);
             int r = ::connect(t, (struct sockaddr*)&d, sizeof(d));
             if (r == 0) tcpOk = 1;
-            else if (errno == EINPROGRESS) {
+            else if (hub_connect_pending(hub_sockerr())) {
                 struct pollfd pf { t, POLLOUT, 0 };
                 if (::poll(&pf, 1, 2000) == 1) { int err = 0; socklen_t el = sizeof(err); getsockopt(t, SOL_SOCKET, SO_ERROR, &err, &el); tcpOk = err == 0 ? 1 : 0; }
             }
-            ::close(t);
+            hub_close(t);
         }
         char b[128]; osc::OutboundPacketStream m(b, sizeof(b));
         m << osc::BeginMessage("/sb/fwprobe/result") << (osc::int64)token << (int32_t)tcpOk << osc::EndMessage;
         for (int i = 0; i < 2; ++i) ::sendto(replyFd, m.Data(), m.Size(), 0, (const struct sockaddr*)&to, sizeof(to));
-        ::close(replyFd);
+        hub_close(replyFd);
         char ip[INET_ADDRSTRLEN] = {}; inet_ntop(AF_INET, &to.sin_addr, ip, sizeof(ip));
         std::cout << "[HUB-PORTCHECK] checked " << ip << " for another hub (TCP " << serverPort << (tcpOk ? " OK" : " BLOCKED") << ")\n";
     }).detach();
@@ -829,7 +995,7 @@ static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int
 // Entry 1: request on the hub's audio UDP socket (works on a LAN, or where udp_port is forwarded).
 void SonobusHubServer::handlePortProbeRequest(const struct sockaddr_storage* src, int64_t token, int udpPort, int serverPort) {
     if (src->ss_family != AF_INET) return;
-    const int replyFd = ::dup(mSocket);   // own fd: safe even if the hub stops meanwhile
+    const int replyFd = hub_dup(mSocket);   // own fd: safe even if the hub stops meanwhile
     if (replyFd < 0) return;
     hub_serve_port_probe(*(const struct sockaddr_in*)src, token, udpPort, serverPort, replyFd);
 }
@@ -1035,7 +1201,12 @@ void SonobusHubServer::sessionsSaveLocked() const {
     if (!f) return;   // directory not there yet (hub_settings.json never saved) — in memory only until then
     f << o.str(); f.close();
     if (!f) { ::remove(tmp.c_str()); return; }
+#if defined(_WIN32)
+    // rename() does not replace an existing file on Windows
+    if (!MoveFileExA(tmp.c_str(), mSessionsFile.c_str(), MOVEFILE_REPLACE_EXISTING)) ::remove(tmp.c_str());
+#else
     ::rename(tmp.c_str(), mSessionsFile.c_str());
+#endif
 }
 void SonobusHubServer::setSessionsFile(const std::string& path) {
     std::lock_guard<std::mutex> g(mRecentMutex);
@@ -1201,7 +1372,7 @@ static void hub_fwprobe_req_from_server(const char* buf, int len, const struct s
         const int64_t token = it->AsInt64(); ++it;
         const int32_t up = it->AsInt32(); ++it;
         const int32_t sp = it->AsInt32();
-        const int fd = ::dup(replyfd);
+        const int fd = hub_dup(replyfd);
         if (fd < 0) return;
         hub_serve_port_probe(*(const struct sockaddr_in*)from, token, up, sp, fd);
     } catch (...) {}
@@ -1270,8 +1441,8 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
             const int probe = ::socket(AF_INET, SOCK_DGRAM, 0);
             if (probe < 0) break;   // cannot probe: fall through to the normal bind
             const int rc = ::bind(probe, (struct sockaddr*)&probeAddr, sizeof(probeAddr));
-            const int err = errno;
-            ::close(probe);
+            const int err = hub_sockerr();
+            hub_close(probe);
             if (rc == 0) { held = false; break; }
             if (err != EADDRINUSE) break;   // anything else: let the real bind below report it
             if (!held) {
@@ -1286,7 +1457,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
             std::cerr << "[HUB-SOCK] UDP port " << localUdpPort
                       << " still held after 30 s — refusing to start a second hub on it"
                       << " (quit the previous instance first)\n";
-            ::close(mSocket);
+            hub_close(mSocket);
             mSocket = -1;
             return false;
         }
@@ -1296,7 +1467,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         int one = 1;
         if (::setsockopt(mSocket, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0
             || ::setsockopt(mSocket, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) != 0) {
-            std::cerr << "[HUB] warning: SO_REUSEADDR/SO_REUSEPORT failed (" << strerror(errno)
+            std::cerr << "[HUB] warning: SO_REUSEADDR/SO_REUSEPORT failed (" << strerror(hub_sockerr())
                       << ") — connected send sockets disabled, using the shared socket\n";
             mConnectedSockets = false;
         }
@@ -1320,16 +1491,16 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         int kts = 1;   // Kernel receive timestamps for [HUB-KJIT]
 #if defined(SO_TIMESTAMP_MONOTONIC)
         if (::setsockopt(mSocket, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &kts, sizeof(kts)) < 0)
-            std::cerr << "[HUB] Warning: SO_TIMESTAMP_MONOTONIC failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_TIMESTAMP_MONOTONIC failed: " << strerror(hub_sockerr()) << "\n";
 #elif defined(SO_TIMESTAMPNS)
         if (::setsockopt(mSocket, SOL_SOCKET, SO_TIMESTAMPNS, &kts, sizeof(kts)) < 0)
-            std::cerr << "[HUB] Warning: SO_TIMESTAMPNS failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_TIMESTAMPNS failed: " << strerror(hub_sockerr()) << "\n";
 #endif
     }
     {
         int rcvbuf = 4 * 1024 * 1024;  // 4 MB
         if (::setsockopt(mSocket, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
-            std::cerr << "[HUB] Warning: SO_RCVBUF setsockopt failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_RCVBUF setsockopt failed: " << strerror(hub_sockerr()) << "\n";
         } else {
             int actual = 0;
             socklen_t aLen = sizeof(actual);
@@ -1352,7 +1523,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (::bind(mSocket, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
         std::cerr << "[HUB] Failed to bind UDP socket on port " << localUdpPort << "\n";
-        ::close(mSocket);
+        hub_close(mSocket);
         mSocket = -1;
         return false;
     }
@@ -1363,10 +1534,16 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     ::getsockname(mSocket, (struct sockaddr*)&actualAddr, &addrLen);
     mLocalPort = ntohs(actualAddr.sin_port);
     std::cout << "[HUB] UDP socket bound on port " << mLocalPort << "\n";
+#if defined(_WIN32)
+    hub_win_rx_ts_on = hub_win_opts().kts && hub_win_rx_ts_enable(mSocket) && hub_win_recvmsg_fn(mSocket) != nullptr;
+    std::cout << "[HUB] receive timestamps: " << (hub_win_rx_ts_on ? "from the stack" : "taken at the read");
+    if (!hub_win_rx_ts_on && hub_win_opts().kts) std::cout << " (SIO_TIMESTAMPING error " << hub_win_rx_ts_err << (hub_win_recvmsg_fn(mSocket) ? "" : ", no WSARecvMsg") << ")";
+    std::cout << "\n";
+#endif
 
     // Set socket non-blocking for recv thread
-    int flags = fcntl(mSocket, F_GETFL, 0);
-    fcntl(mSocket, F_SETFL, flags | O_NONBLOCK);
+    hub_set_nonblock(mSocket);
+    hub_udp_setup(mSocket);
 
     // LAN subnet is derived from the default-route interface unless a --lan-subnet CLI override was given.
     if (mLanSubnetCidr.empty()) {
@@ -1406,7 +1583,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         if (!mAooServer || err != 0) {
             std::cerr << "[HUB] Failed to create local AOO server on port " << mLocalServerPort << " (err=" << err << ")\n";
             mAooServer.reset();
-            ::close(mSocket);
+            hub_close(mSocket);
             mSocket = -1;
             return false;
         }
@@ -1438,7 +1615,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (!mClient) {
         std::cerr << "[HUB] Failed to create AOO client\n";
-        ::close(mSocket);
+        hub_close(mSocket);
         mSocket = -1;
         delete clientEndpoint;
         mClientEndpoint = nullptr;
@@ -1720,7 +1897,7 @@ void SonobusHubServer::stop() {
     mAooServer.reset();
 
     if (mSocket >= 0) {
-        ::close(mSocket);
+        hub_close(mSocket);
         mSocket = -1;
     }
 
@@ -2036,6 +2213,17 @@ static bool hub_hold_floor_setting(){
     if (cached < 0) cached = (hub_tap_int("SB_HUB_HOLD_FLOOR_SETTING", 0) == 1) ? 1 : 0;
     return cached == 1;
 }
+// SB_HUB_LOOPBACK_FIX (default 1): a player on the hub machine itself (127.0.0.0/8) is a LAN player; the signaling
+// server gives such a pair loopback addresses, so its address no longer falls inside the LAN subnet. Handshake only.
+static bool hub_loopback_fix(){
+    static const bool v = hub_tap_int("SB_HUB_LOOPBACK_FIX", 1) != 0;
+    return v;
+}
+static bool hub_addr_is_loopback(const struct sockaddr_storage& addr){
+    if (addr.ss_family != AF_INET) return false;
+    const auto* sin = reinterpret_cast<const struct sockaddr_in*>(&addr);
+    return (ntohl(sin->sin_addr.s_addr) >> 24) == 127;
+}
 static int hub_adapt_wan_enabled(){
     static int cached = -1;
     if (cached < 0){
@@ -2173,11 +2361,11 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
     if (mSocket < 0) return -1;
     if (peerAddr.ss_family != AF_INET || peerAddrLen < (socklen_t)sizeof(struct sockaddr_in)) return -1;
     auto fail = [&](const char* what, int fd) {
-        const int e = errno;   // before close() can clobber it
+        const int e = hub_sockerr();   // before close() can clobber it
         if (errOut) *errOut = e;
         std::cerr << "[HUB-SOCK] '" << userName << "': " << what << " failed (errno " << e << " " << strerror(e)
                   << ") — this peer uses the shared socket\n";
-        if (fd >= 0) ::close(fd);
+        if (fd >= 0) hub_close(fd);
         return -1;
     };
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -2201,12 +2389,14 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
         ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &kts, sizeof(kts));
 #elif defined(SO_TIMESTAMPNS)
         ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &kts, sizeof(kts));
+#elif defined(_WIN32)
+        (void) kts; if (hub_win_rx_ts_on) hub_win_rx_ts_enable(fd);
 #endif
     }
     {
         int rcvbuf = 4 * 1024 * 1024;  // same as mSocket: this socket carries the peer's inbound audio
         if (::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0)
-            std::cerr << "[HUB-SOCK] '" << userName << "': warning: SO_RCVBUF failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB-SOCK] '" << userName << "': warning: SO_RCVBUF failed: " << strerror(hub_sockerr()) << "\n";
     }
     struct sockaddr_storage local;
     socklen_t localLen = sizeof(local);
@@ -2221,8 +2411,8 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
 #endif
 
     if (::connect(fd, (const struct sockaddr*)&peerAddr, sizeof(struct sockaddr_in)) != 0) return fail("connect", fd);
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return fail("O_NONBLOCK", fd);
+    if (hub_set_nonblock(fd) < 0) return fail("O_NONBLOCK", fd);
+    hub_udp_setup(fd);
 
     char ipStr[INET_ADDRSTRLEN] = {};
     const auto* sin = reinterpret_cast<const struct sockaddr_in*>(&peerAddr);
@@ -2516,8 +2706,8 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
             peerPort = ntohs(sin6->sin6_port);
         }
     }
-    // Classify LAN vs WAN once, at handshake.
-    peer->isLan = addrMatchesLanSubnet(peer->addr);
+    // Classify LAN vs WAN once, at handshake. The hub machine's own player (loopback) is LAN.
+    peer->isLan = addrMatchesLanSubnet(peer->addr) || (hub_loopback_fix() && hub_addr_is_loopback(peer->addr));
     connLog("peer-audio", std::string(peerAddrStr) + ":" + std::to_string(peerPort), userName, mGroupName, peer->isLan ? "LAN" : "WAN");   
     recentNoteJoin(userName, peerAddrStr, peer->isLan);   // Recent-players list
     std::cout << "[HUB] Peer '" << userName << "' address: " << peerAddrStr << ":" << peerPort
@@ -2804,7 +2994,7 @@ void SonobusHubServer::removePeer(int32_t peerId) {
                     // macOS: connect(AF_UNSPEC) returns EAFNOSUPPORT for UDP; disconnectx(2) is the XNU way.
                     const int rc = hubDissolveUdp(d->connFd);   // Portable (disconnectx on macOS, connect(AF_UNSPEC) on Linux)
                     std::cout << "[HUB-SOCK] dissolved send socket fd=" << d->connFd << " for departed '"
-                              << rp->userName << "' (rc=" << rc << (rc != 0 ? std::string(" ") + strerror(errno) : std::string(""))
+                              << rp->userName << "' (rc=" << rc << (rc != 0 ? std::string(" ") + strerror(hub_sockerr()) : std::string(""))
                               << ") so a rejoin from the same port is not steered into it\n";
                 }
             }
@@ -2992,7 +3182,7 @@ void SonobusHubServer::drainRetiredSnapshots(bool force) {
             if (rd.dest->connFd >= 0) {
                 std::cout << "[HUB-SOCK] closed retired send socket fd=" << rd.dest->connFd
                           << " for '" << (rd.peer ? rd.peer->userName : std::string("?")) << "'\n";
-                ::close(rd.dest->connFd);
+                hub_close(rd.dest->connFd);
                 rd.dest->connFd = -1;
                 // The 4-tuple is free
                 // again (pcb detached) — healEpipeSockets may re-connect now.
@@ -4225,7 +4415,7 @@ void SonobusHubServer::audioProcessThread() {
                       << blockNs << "ns)\n";
         }
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(1, "audio thread");
 #endif
     // Hub clock lock (SB_HUB_CLOCK_LOCK, SB_HUB_CLOCK_REF=<sender name>).
@@ -4905,7 +5095,7 @@ void SonobusHubServer::listenerProcessThread(std::shared_ptr<HubPeer> selfPeer) 
                           (thread_policy_t)&policy,
                           THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(3, "listener thread");
 #endif
 
@@ -5555,6 +5745,9 @@ void SonobusHubServer::statsWriterThread() {
         // buffer ≈ (p99 − p50) + margin. p50 ≈ packet cadence (block period).
         static int jitTick = 0;
         bool logJitter = ((jitTick++ % 2) == 1);
+        // Streams whose arrival gap passed 3 ms in this window. Two or more at once point at the hub host's own
+        // receive path (the senders are independent), one points at that link.
+        int hostStreams = 0, hostStalled = 0, hostStalledLoop = 0; double hostWorstMs = 0;
         {
             std::shared_lock<std::shared_mutex> lock(mPeerMutex);
             for (auto& p : mPeers) {
@@ -5596,12 +5789,26 @@ void SonobusHubServer::statsWriterThread() {
                                   << "\n";
                         p->jitBytesSnap = p->bytesIn.load(std::memory_order_relaxed);
                         p->jitBytesOutSnap = (uint64_t) std::max<int64_t>(0, p->persistentEndpoint ? reinterpret_cast<HubEndpoint*>(p->persistentEndpoint)->sentBytes : 0);
+                        if (q.pps > 0) {
+                            ++hostStreams;
+                            if (q.maxMs > 3.0) {
+                                ++hostStalled; hostWorstMs = std::max(hostWorstMs, (double) q.maxMs);
+                                const auto* sa4 = (const struct sockaddr_in*) &p->addr;
+                                if (p->addr.ss_family == AF_INET && (ntohl(sa4->sin_addr.s_addr) >> 24) == 127) ++hostStalledLoop;
+                            }
+                        }
                         {   // The same window from the kernel's receive timestamps
                             auto k = p->kstats.compute(p->kstats.statsWin);
                             if (k.pps > 0)
                                 std::cout << "[HUB-KJIT] peer='" << p->userName << "'" << std::fixed << std::setprecision(2)
                                           << " p50=" << k.p50 << "ms p95=" << k.p95 << "ms p99=" << k.p99 << "ms max=" << k.maxMs
-                                          << "ms gap=" << k.gapPct << "% (kernel ts)\n";
+                                          << "ms gap=" << k.gapPct << "%"
+                                          << " read_lag_max=" << (p->readLagMaxUs.exchange(0, std::memory_order_relaxed) / 1000.0) << "ms"   // stack timestamp -> read, this window
+#if defined(_WIN32)
+                                          << (hub_win_rx_ts_on ? " (kernel ts)\n" : " (read time)\n");
+#else
+                                          << " (kernel ts)\n";
+#endif
                         }
                     }
                 }
@@ -5817,6 +6024,9 @@ void SonobusHubServer::statsWriterThread() {
                 }
             }
         }
+        if (logJitter && hostStalled >= 2)
+            std::cout << "[HUB-HOST] " << hostStalled << " of " << hostStreams << " streams had an arrival gap over 3 ms in the same 10 s (worst "
+                      << std::fixed << std::setprecision(2) << hostWorstMs << " ms" << (hostStalledLoop ? ", loopback among them" : "") << "): the hub host's receive path, not one link\n";
 
         applyHolds(abufApply);
         if (!abufApply.empty() || mHoldResizeAll.load(std::memory_order_relaxed)) mHoldResizeAll.store(false, std::memory_order_relaxed);
@@ -5882,7 +6092,7 @@ void SonobusHubServer::networkRecvThread() {
     }
     if (!rxRt) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     std::cout << "[HUB] receive thread scheduling: " << (rxRt ? "real-time" : "user-interactive") << "\n";
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(10, "recv thread");
 #endif
     std::cout << "[HUB] WAN hold switches: floor " << hub_hold_floor_ms(kHoldFloorMs) << " ms, margin " << hub_hold_margin_ms()
@@ -5969,8 +6179,8 @@ void SonobusHubServer::networkRecvThread() {
                     rdCursor = 0; rdBurst = 0;
                     if (pr <= 0) {
                         rdCount = 0;
-                        if (pr < 0 && errno != EINTR && errno != EAGAIN) {
-                            std::cerr << "[HUB] poll error: " << strerror(errno) << "\n";
+                        if (pr < 0 && hub_sockerr() != EINTR && hub_sockerr() != EAGAIN) {
+                            std::cerr << "[HUB] poll error: " << strerror(hub_sockerr()) << "\n";
                             std::this_thread::sleep_for(std::chrono::milliseconds(10));   // never spin on a hard error
                         }
                         idle = true;
@@ -6022,15 +6232,15 @@ void SonobusHubServer::networkRecvThread() {
                         ep->recvErrors.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                if (n < 0 && hub_sockerr() != EAGAIN && hub_sockerr() != EWOULDBLOCK && hub_sockerr() != EINTR) {
                     if (pfdPeer[rdCursor] >= 0) {
                         auto* ep = reinterpret_cast<HubEndpoint*>(rsnap->peers[(size_t)pfdPeer[rdCursor]]->persistentEndpoint);
                         if (ep) {
-                            ep->lastErrno.store(errno, std::memory_order_relaxed);
+                            ep->lastErrno.store(hub_sockerr(), std::memory_order_relaxed);
                             ep->recvErrors.fetch_add(1, std::memory_order_relaxed);
                         }
                     } else {
-                        std::cerr << "[HUB] recvfrom error: " << strerror(errno) << "\n";
+                        std::cerr << "[HUB] recvfrom error: " << strerror(hub_sockerr()) << "\n";
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));   // as in shared mode: never spin
                     }
                 }
@@ -6145,8 +6355,18 @@ void SonobusHubServer::networkRecvThread() {
             // thread never sees any of this. Data packets dominate (≈375/s)
             // so the occasional ping/format message in the mix is noise.
             if (matchedPeer && type == AOO_TYPE_SINK) {
-                matchedPeer->jstats.record(std::chrono::steady_clock::now());
-                if (ktsNs) matchedPeer->kstats.record(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ktsNs)));   
+                const auto readNow = std::chrono::steady_clock::now();
+                matchedPeer->jstats.record(readNow);
+                if (ktsNs) {
+                    matchedPeer->kstats.record(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ktsNs)));
+                    // How long the datagram waited between the stack and this read: the receive thread's own lateness.
+                    const int64_t lagNs = (int64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(readNow.time_since_epoch()).count() - (int64_t) ktsNs;
+                    if (lagNs > 0 && lagNs < 1000000000LL) {
+                        const uint32_t lagUs = (uint32_t) (lagNs / 1000);
+                        uint32_t cur = matchedPeer->readLagMaxUs.load(std::memory_order_relaxed);
+                        while (lagUs > cur && !matchedPeer->readLagMaxUs.compare_exchange_weak(cur, lagUs, std::memory_order_relaxed)) {}
+                    }
+                }
             }
 
             if (type == AOO_TYPE_SINK) {
@@ -6261,10 +6481,17 @@ void SonobusHubServer::networkRecvThread() {
 
             }
         } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (hub_sockerr() == EAGAIN || hub_sockerr() == EWOULDBLOCK) {
+#if defined(_WIN32)
+                // A sleep is at least a millisecond here, which would read the packets in clumps: wait on the
+                // socket itself, so the first datagram wakes the thread.
+                struct pollfd pf; pf.fd = (SOCKET) mSocket; pf.events = POLLIN; pf.revents = 0;
+                ::poll(&pf, 1, 1);
+#else
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
             } else {
-                std::cerr << "[HUB] recvfrom error: " << strerror(errno) << "\n";
+                std::cerr << "[HUB] recvfrom error: " << strerror(hub_sockerr()) << "\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
@@ -6472,7 +6699,7 @@ void SonobusHubServer::pacerThread() {
                           (thread_policy_t)&pol,
                           THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(2, "pacer thread");
 #endif
     auto nsToTicks = [&tb](uint64_t ns) -> uint64_t {

@@ -35,6 +35,10 @@ void HubUpdateCheck::checkOnce() {
    #if JUCE_MAC
     const char* const app = "sbplus-hub";
     const char* const packageSuffix = ".zip";
+   #elif JUCE_WINDOWS
+    // Its own channel: never offered a package built for another system.
+    const char* const app = "sbplus-hub-win";
+    const char* const packageSuffix = ".zip";
    #else
     const char* const app = "sbplus-hub-linux";
     const char* const packageSuffix = ".tar.gz";

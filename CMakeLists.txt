@@ -47,7 +47,7 @@ set(DISPLAY_VERSION "${PROJECT_VERSION}${BETA_VERSION_SUFFIX}")
 # Shown on the web page / About as "Hub 1.0.0 (build <commit>, <date>)". Bump here on hub releases.
 # Apple-style versioning — marketing version (CFBundleShortVersionString) + date build id
 # (CFBundleVersion, stamped by the release scripts as YYYY.MM.DD.HHMM). The updater keeps comparing the DATE build.
-set(SONOBUS_PLUS_VERSION "1.3.2")
+set(SONOBUS_PLUS_VERSION "1.3.1")
 set(SONOBUS_HUB_VERSION "1.3.1")
 # the client's date build id + source commit as compile-time defines for platforms
 # without an Info.plist (Windows/Linux). Mac bundles still read CFBundleVersion/SBPlusCommit stamped at release.
@@ -940,6 +940,69 @@ target_include_directories(SonoBusHub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/a
 target_compile_definitions(SonoBusHub PRIVATE USE_CODEC_OPUS=1 AOO_TIMEFILTER_CHECK=0 AOO_STATIC SONOBUS_HUB_NOGUI=1 SONOBUS_HUB_WEB_VERSION="${DISPLAY_VERSION}" SONOBUS_HUB_VERSION="${SONOBUS_HUB_VERSION}" SONOBUS_HUB_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_HUB_COMMIT="${SONOBUS_HUB_COMMIT}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=0)
 target_link_libraries(SonoBusHub PRIVATE juce::juce_core juce::juce_events juce::juce_data_structures juce::juce_recommended_config_flags opus pthread)   # data_structures for the layout ValueTree
 endif()   # Linux hub
+
+# WINDOWS HUB — the Mac hub's window (default) and the headless mode (--nogui, web status page). Executable sonobus-hub.exe.
+if (WIN32)
+juce_add_gui_app(SonoBusHub
+    PRODUCT_NAME "sonobus-hub"
+    COMPANY_NAME "Random Planet"
+    COMPANY_COPYRIGHT "Copyright 2026 Jason Buecker (Random Planet)"   # ASCII for the resource file
+    VERSION "${SONOBUS_HUB_VERSION}"   # file properties show the hub version
+    ICON_BIG "images/sonobus_hub_icon_mac_1024.png"
+    ICON_SMALL "images/sonobus_hub_icon_mac_256.png")
+juce_add_binary_data(SonoBusHubData HEADER_NAME HubBinaryData.h NAMESPACE HubBinaryData SOURCES images/sonobus_hub_icon_mac_256.png)
+target_link_libraries(SonoBusHub PRIVATE SonoBusHubData)
+target_sources(SonoBusHub PRIVATE
+    Source/SonobusHubMain.cpp
+    Source/SonobusHubMainWindow.cpp
+    Source/SonobusHubMainWindow.h
+    Source/SonobusHubServer.cpp
+    Source/SonobusHubServer.h
+    Source/SonobusHubSettings.cpp
+    Source/SonobusHubSettings.h
+    Source/SonobusHubWeb.cpp
+    Source/SonobusHubWeb.h
+    Source/SonobusHubGeo.cpp
+    Source/SonobusHubGeo.h
+    Source/SonobusHubUpdater.cpp
+    Source/SonobusHubUpdater.h
+    Source/SonobusHubDirectory.cpp
+    Source/SonobusHubDirectory.h
+    Source/SonobusHubLayout.cpp
+    Source/SonobusHubLayout.h
+    Source/SonobusHubWebIcon.h
+    Source/SonobusHubCompat.h
+    deps/aoo/lib/src/source.cpp
+    deps/aoo/lib/src/sink.cpp
+    deps/aoo/lib/src/common.cpp
+    deps/aoo/lib/src/sync.cpp
+    deps/aoo/lib/src/time.cpp
+    deps/aoo/lib/src/net_utils.cpp
+    deps/aoo/lib/src/client.cpp
+    deps/aoo/lib/src/server.cpp
+    deps/aoo/lib/src/codec_opus.cpp
+    deps/aoo/lib/src/codec_pcm.cpp
+    deps/aoo/deps/md5/md5.c
+    deps/aoo/deps/oscpack/osc/OscOutboundPacketStream.cpp
+    deps/aoo/deps/oscpack/osc/OscPrintReceivedElements.cpp
+    deps/aoo/deps/oscpack/osc/OscReceivedElements.cpp
+    deps/aoo/deps/oscpack/osc/OscTypes.cpp
+)
+juce_generate_juce_header(SonoBusHub)
+target_include_directories(SonoBusHub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/aoo/lib ${CMAKE_CURRENT_SOURCE_DIR}/deps/aoo/deps ${CMAKE_CURRENT_SOURCE_DIR}/deps/windows)
+target_link_directories(SonoBusHub PRIVATE $<$<CONFIG:Debug>:${CMAKE_CURRENT_SOURCE_DIR}/deps/windows/Debug> $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/deps/windows/Release>)
+target_compile_definitions(SonoBusHub PRIVATE _USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+# SONOBUS_PLUS_BUILD / _COMMIT: the About window reads them where a Mac reads Info.plist
+target_compile_definitions(SonoBusHub PRIVATE USE_CODEC_OPUS=1 AOO_TIMEFILTER_CHECK=0 AOO_STATIC SONOBUS_HUB_WEB_VERSION="${DISPLAY_VERSION}" SONOBUS_HUB_VERSION="${SONOBUS_HUB_VERSION}" SONOBUS_HUB_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_HUB_COMMIT="${SONOBUS_HUB_COMMIT}" SONOBUS_PLUS_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_PLUS_COMMIT="${SONOBUS_HUB_COMMIT}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+target_link_libraries(SonoBusHub PRIVATE juce::juce_gui_extra juce::juce_gui_basics juce::juce_graphics juce::juce_events juce::juce_core juce::juce_data_structures juce::juce_recommended_config_flags opus ws2_32 iphlpapi winmm avrt)
+# A windowed program that keeps the standard main(); the headless mode attaches to the console it was started from.
+target_link_options(SonoBusHub PRIVATE /ENTRY:mainCRTStartup)
+set_target_properties(SonoBusHub PROPERTIES OUTPUT_NAME "sonobus-hub")
+# third-party notices next to the program (the About window points at them)
+add_custom_command(TARGET SonoBusHub POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LICENSES-HUB.txt" "$<TARGET_FILE_DIR:SonoBusHub>/LICENSES-HUB.txt"
+    COMMENT "Copying LICENSES-HUB.txt next to sonobus-hub.exe")
+endif()   # Windows hub
 
 # Auto-sign standalone app bundles after build, when the developer's signing script is present
 if (APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sign_sonobus_apps.sh")

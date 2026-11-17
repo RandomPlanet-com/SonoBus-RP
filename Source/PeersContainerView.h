@@ -94,6 +94,7 @@ public:
     uint32  dropsSampleT[12] = {0};
     int64_t dropsSampleC[12] = {0};
     int     dropsSampleN = 0;
+    foleys::LevelMeterSource * recvMeterSrc = nullptr;   // Rebind when the row's peer changes
 
     std::unique_ptr<Drawable>  sendUpArrow;
     std::unique_ptr<Drawable>  recvDownArrow;

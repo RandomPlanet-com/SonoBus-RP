@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP — Hub Server settings persistence (see SonobusHubSettings.h).
 
+#include "SonobusHubCompat.h"
 #include "SonobusHubSettings.h"
 #include <cctype>
 #include "SonobusHubServer.h"
@@ -203,6 +204,8 @@ static juce::File homeDir() { return juce::File::getSpecialLocation(juce::File::
 juce::File dataDir() {
 #if JUCE_MAC
     return homeDir().getChildFile("Library/Application Support/SonoBus RP Hub");
+#elif JUCE_WINDOWS
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("SonoBus RP Hub");
 #else
     return homeDir().getChildFile(".config/SonoBus RP Hub");
 #endif
@@ -586,8 +589,13 @@ void redirectLogFile(const std::string& path) {
     rotateLogIfLarge(path);
     // `open`-launched apps have no tty, so [HUB-JIT]/[HUB-ABUF]
     // telemetry would vanish without this. Line-buffered so tail -f works.
+#if defined(_WIN32)
+    if (freopen(path.c_str(), "a", stdout)) setvbuf(stdout, NULL, _IOFBF, 1 << 16);   // see hub_start_log_flusher
+    if (freopen(path.c_str(), "a", stderr)) setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+#else
     if (freopen(path.c_str(), "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
     if (freopen(path.c_str(), "a", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+#endif
     std::cout << "[HUB] logging to " << path << "\n";
 }
 
@@ -628,9 +636,36 @@ std::vector<std::string> relaunchArgv(const std::vector<std::string>& argv, long
 bool relaunchProcess(const std::vector<std::string>& argvIn, std::string& err) {
     err.clear();
 #ifdef _WIN32
-    (void)argvIn;
-    err = "relaunch not implemented on Windows";
-    return false;
+    const juce::String exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+    if (exe.isEmpty()) { err = "cannot resolve current executable path"; return false; }
+    // One command line with the usual quoting rules (backslashes doubled only in front of a quote).
+    auto quote = [](const juce::String& arg) {
+        if (arg.isNotEmpty() && !arg.containsAnyOf(" \t\"")) return arg;
+        juce::String out = "\"";
+        int slashes = 0;
+        for (auto c : arg) {
+            if (c == '\\') { ++slashes; continue; }
+            if (c == '"') out << juce::String::repeatedString("\\", slashes * 2 + 1) << "\"";
+            else out << juce::String::repeatedString("\\", slashes) << juce::String::charToString(c);
+            slashes = 0;
+        }
+        return out + juce::String::repeatedString("\\", slashes * 2) + "\"";
+    };
+    juce::String cmd = quote(exe);
+    for (size_t i = 1; i < argvIn.size(); ++i) cmd << " " << quote(juce::String::fromUTF8(argvIn[i].c_str()));
+    std::cout << "[HUB] relaunch: " << cmd << "\n";
+    std::wstring wcmd(cmd.toWideCharPointer());
+    STARTUPINFOW si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    // Nothing is inherited: the new process binds the same ports once this one is gone.
+    if (!CreateProcessW(exe.toWideCharPointer(), &wcmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        err = "CreateProcess failed, error " + std::to_string((unsigned long) GetLastError());
+        return false;
+    }
+    std::cout << "[HUB] relaunched as pid " << (unsigned long) pi.dwProcessId << "\n";
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 #else
     const std::string exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
                                 .getFullPathName().toStdString();

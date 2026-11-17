@@ -2198,8 +2198,6 @@ void SonobusAudioProcessorEditor::buttonClicked (Button* buttonThatWasClicked)
             else {
                 processor.disconnectFromServer();
             }
-            // Rebuild the rows now: the peers are gone and a row must not outlive its peer.
-            updatePeerState(true);
             updateState();
         }
         else {

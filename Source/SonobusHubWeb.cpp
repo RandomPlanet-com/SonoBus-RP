@@ -14,6 +14,8 @@
 #include <iomanip>
 #include <iostream>
 #include <vector>
+#include "SonobusHubCompat.h"
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -24,6 +26,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#endif
 
 static long long webNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -60,12 +63,12 @@ SonobusHubWeb::~SonobusHubWeb() { stop(); if (mUpdateThread.joinable()) mUpdateT
 bool SonobusHubWeb::start() {
     if (mPort <= 0) return false;
     mListenFd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (mListenFd < 0) { std::cerr << "[HUB-WEB] socket: " << strerror(errno) << "\n"; return false; }
+    if (mListenFd < 0) { std::cerr << "[HUB-WEB] socket: " << strerror(hub_sockerr()) << "\n"; return false; }
     int one = 1; ::setsockopt(mListenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_ANY); sa.sin_port = htons((uint16_t) mPort);
     if (::bind(mListenFd, (struct sockaddr*) &sa, sizeof(sa)) < 0 || ::listen(mListenFd, 16) < 0) {
-        std::cerr << "[HUB-WEB] bind/listen on port " << mPort << ": " << strerror(errno) << "\n";
-        ::close(mListenFd); mListenFd = -1; return false;
+        std::cerr << "[HUB-WEB] bind/listen on port " << mPort << ": " << strerror(hub_sockerr()) << "\n";
+        hub_close(mListenFd); mListenFd = -1; return false;
     }
     mRun = true;
     mThread = std::thread([this] { threadMain(); });
@@ -76,7 +79,7 @@ bool SonobusHubWeb::start() {
 
 void SonobusHubWeb::stop() {
     if (!mRun.exchange(false)) return;
-    if (mListenFd >= 0) { ::shutdown(mListenFd, SHUT_RDWR); ::close(mListenFd); mListenFd = -1; }
+    if (mListenFd >= 0) { ::shutdown(mListenFd, SHUT_RDWR); hub_close(mListenFd); mListenFd = -1; }
     if (mThread.joinable()) mThread.join();
     if (!mSharedGeo) mGeo.stop();
 }
@@ -92,7 +95,7 @@ void SonobusHubWeb::threadMain() {
         struct timeval tv; tv.tv_sec = 3; tv.tv_usec = 0;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         handleClient(fd);
-        ::close(fd);
+        hub_close(fd);
     }
 }
 
@@ -208,7 +211,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
  <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"><col style="width:56px"></colgroup><thead><tr>
  <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
- <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
+)HTML" R"HTML( <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
 
  <h2 style="margin-top:20px" title="Stages this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent stages</h2>
  <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Stage</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Stage link (this hub's address + that stage name and password)">Stage link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
@@ -293,7 +296,7 @@ function drawDetail(){const picked=sessions.find(x=>x.group===selGroup),s=picked
  $('recent').innerHTML=s.players.length?sortRows(s.players,rSort,RKEYS).map(p=>`<tr><td class="user">${esc(p.user)}</td><td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${ft(p.lastJoinMs)}</td><td>${p.lastLeftMs>=p.lastJoinMs?ft(p.lastLeftMs):'<span class="g">connected</span>'}</td><td class="num">${p.joins}</td><td>${p.lan?'LAN':'WAN'}</td><td>${p.lastLeftMs>=p.lastJoinMs?`<button class="srm prm" data-u="${esc(p.user)}" title="Remove this player from this stage's list">✕</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="d">no players recorded on this stage</td></tr>';
  $('recent').querySelectorAll('button.prm').forEach(b=>{b.onclick=async()=>{const u=b.dataset.u;if(!confirm('Remove "'+u+'" from this stage\'s players?'))return;
    try{const r=await fetch(api('/api/sessions/removeplayer'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:s.group,user:u})});const d=await r.json();if(!d.ok){alert(d.error||'remove failed');return;}loadSessions(true);}catch(e){alert('remove failed');}};});
- if(pwPrefillGroup!==selGroup){$('spw').value=s.password||'';pwPrefillGroup=selGroup;}$('spw').placeholder=s.password?'':'(no password — type one to set it)';
+)HTML" R"HTML( if(pwPrefillGroup!==selGroup){$('spw').value=s.password||'';pwPrefillGroup=selGroup;}$('spw').placeholder=s.password?'':'(no password — type one to set it)';
  $('sapply').disabled=restarting;}
 $('sapply').onclick=async()=>{const s=sessions.find(x=>x.group===selGroup);if(!s)return;
  if(!confirm('Switch the hub to stage "'+s.group+'" with the settings it ran with, and restart? Every player will have to rejoin.'))return;
@@ -385,7 +388,7 @@ $('gmsg').onkeydown=(e)=>{if(e.key==='Enter')$('gmsgbtn').click();};
 $('k_upd').onclick=()=>{if(updUrl)window.open(updUrl,'_blank');};
 $('updbtn').onclick=async()=>{if(!confirm('Install the update? The hub restarts, so every player drops and rejoins.'))return;
  try{const r=await fetch(api('/api/update/install'),{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Set a Web password to install updates (HTTP '+r.status+')'));}catch(e){alert('update failed: '+e);}};
-let fields=[],detected='',updUrl='';
+)HTML" R"HTML(let fields=[],detected='',updUrl='';
 function fieldHtml(f){
  const id='f_'+f.key,tip=esc(f.tip||'');let inp;
  if(f.kind==1) inp=`<input type="checkbox" id="${id}" ${f.value=='1'?'checked':''} title="${tip}">`;

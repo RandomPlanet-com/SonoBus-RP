@@ -2730,8 +2730,9 @@ void PeersContainerView::updatePeerViews(int specific)
             // Rows are re-ordered in place when peers join or leave, so a tall meter can be left bound to the old
             // row's source and show no level. Rebind on change.
             auto * src = processor.getRemotePeerRecvMeterSource(i);
-            if (src != nullptr && src != pvf->recvMeter->boundSource()) {
-                pvf->recvMeter->bindSource (src);   // boundSource() is null once the old peer is gone
+            if (src != nullptr && src != pvf->recvMeterSrc) {
+                pvf->recvMeter->bindSource (src);   // The tip meter keeps its own source pointer
+                pvf->recvMeterSrc = src;
             }
             // Rows are re-ordered in place, so a row can keep the meter width of the player that sat there before.
             // Re-lay when the row's channel count no longer matches its layout.

@@ -2,12 +2,6 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
-## 2026-11-16
-
-### SonoBus RP 1.3.2
-
-- Windows: the player no longer crashes when you disconnect from a stage with other players on it.
-
 ## 2026-11-14
 
 ### SonoBus RP Hub 1.3.1

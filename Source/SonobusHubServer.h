@@ -42,6 +42,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+#include "SonobusHubCompat.h"
 
 #include <opus/opus.h>
 
@@ -136,7 +137,7 @@ struct HubEndpoint {
     HubEndpoint& operator=(const HubEndpoint&) = delete;
     ~HubEndpoint() {
         HubDest* d = dest.load(std::memory_order_relaxed);
-        if (d->connFd >= 0) ::close(d->connFd);
+        if (d->connFd >= 0) hub_close(d->connFd);
         if (d != &dest0) delete d;   // a rebound destination; retired ones are freed by the drain
     }
 };
@@ -383,6 +384,8 @@ struct HubPeer {
     // isolation are running on the fallback — the address the hub holds
     // for the peer is not the address it sends from.
     std::atomic<uint32_t> fallbackDispatch{0};
+    // Longest wait of a datagram between the stack's receive timestamp and the read, per [HUB-KJIT] window (us).
+    std::atomic<uint32_t> readLagMaxUs{0};
 
     // (adaptive sink buffer state). Written by addPeer +
     // statsWriterThread only; never the audio thread.
@@ -755,7 +758,11 @@ public:
     // HubDest::connFd). Set before start(); read at start() (SO_REUSEPORT
     // on the shared socket, banner), addPeer (socket creation), the recv
     // thread's poll set and the [HUB-PACE] line.
+#if defined(_WIN32)
+    void setConnectedSockets(bool) { mConnectedSockets = false; }   // Windows does not steer datagrams to a connected socket that shares the port
+#else
     void setConnectedSockets(bool on) { mConnectedSockets = on; }
+#endif
     void setRedundancy(int lan, int wan) { mRedundancyLan = lan < 1 ? 1 : (lan > 4 ? 4 : lan);
                                            mRedundancyWan = wan < 1 ? 1 : (wan > 4 ? 4 : wan); }
     // Dump one peer's decoded audio (ch0/ch1

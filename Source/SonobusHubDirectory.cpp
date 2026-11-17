@@ -21,7 +21,7 @@ bool acceptableForward(const juce::String& u) {
     return host == "randomplanet.com" || host.endsWith(".randomplanet.com");
 }
 
-#if JUCE_LINUX || JUCE_MAC
+#if JUCE_LINUX || JUCE_MAC || JUCE_WINDOWS
 juce::String runCurl(const juce::StringArray& cmd, int& exitCode) {
     juce::ChildProcess cp;
     if (!cp.start(cmd, juce::ChildProcess::wantStdOut)) { exitCode = -1; return {}; }
@@ -48,12 +48,14 @@ HubStageDirectory::~HubStageDirectory() {
 bool HubStageDirectory::post(const std::string& path, const std::string& json, int& status, std::string& reply) {
     status = 0; reply.clear();
     const juce::String url = juce::String(mBase) + path;
-#if JUCE_LINUX || JUCE_MAC
+#if JUCE_LINUX || JUCE_MAC || JUCE_WINDOWS
     // curl over IPv4, with the body in a private file so the key is not on a command line. IPv4 on purpose: the
     // directory tests the address the check-in comes from, and a hub's forwarded ports are IPv4.
     const juce::File body = mDataDir.getChildFile(".stage-post.json");
     body.replaceWithText(juce::String::fromUTF8(json.c_str()));
+  #if !JUCE_WINDOWS
     ::chmod(body.getFullPathName().toRawUTF8(), 0600);
+  #endif
     int rc = 0;
     const juce::String out = runCurl({ "curl", "-4", "-sS", "--connect-timeout", "8", "--max-time", "15", "-H", "Content-Type: application/json",
                                        "--data-binary", "@" + body.getFullPathName(), "-w", "\n%{http_code}", url }, rc);

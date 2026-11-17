@@ -17,6 +17,7 @@
 #include <iostream>
 
 #ifdef _WIN32
+#include "SonobusHubCompat.h"   // windows.h after winsock2.h, ssize_t
 #include <process.h>
 #define getpid _getpid
 #else
@@ -813,7 +814,8 @@ StatusPage::StatusPage() {
     copyLinkButton.onClick = [this]() {
         if (onCopyLink) onCopyLink();
         copyLinkButton.setButtonText("Copied");
-        juce::Timer::callAfterDelay(1500, [sp = juce::Component::SafePointer<StatusPage>(this)]() { if (sp) sp->copyLinkButton.setButtonText("Copy Stage Link"); });
+        juce::Component::SafePointer<StatusPage> sp(this);   // outside the inner lambda (MSVC)
+        juce::Timer::callAfterDelay(1500, [sp]() { if (sp) sp->copyLinkButton.setButtonText("Copy Stage Link"); });
     };
     portCheckButton.onClick = [this]() { if (onRerunPortCheck) onRerunPortCheck(); };
 }
@@ -1662,8 +1664,17 @@ HubMainWindow::HubMainWindow(const juce::String& title,
 }
 
 void HubMainWindow::closeButtonPressed() {
+#if JUCE_WINDOWS
+    if (auto* app = dynamic_cast<HubJuceApp*>(juce::JUCEApplication::getInstance())) { app->userRequestedStop(); return; }
+#endif
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
+
+#if JUCE_WINDOWS
+static const char* const kThisComputer = "this computer";
+#else
+static const char* const kThisComputer = "this Mac";
+#endif
 
 // ─── HubJuceApp ───────────────────────────────────────────────────────────────
 HubJuceApp::HubJuceApp(const HubLaunchArgs& args, const HubSettingsMeta& meta, std::vector<std::string> argv)
@@ -1691,9 +1702,58 @@ static void forceRegularActivationPolicy() {
 }
 #endif
 
+#if JUCE_WINDOWS
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+// The Windows counterpart of the Mac's App Nap opt-out, plus the window thread's place below the audio threads.
+static void windowsGuiSetup() {
+    FreeConsole();   // the window needs no console (the log goes to hub.log); a console left attached would stay open
+    // The window's thread stays below the hub's time-critical threads (and a player's audio thread on this PC),
+    // also when Windows would boost it for input or painting.
+    const BOOL pr = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    const BOOL nb = SetThreadPriorityBoost(GetCurrentThread(), TRUE);
+    // A minimised or covered window must not slow the process down or coarsen its timer (power throttling).
+    auto optOut = [](ULONG what) {
+        PROCESS_POWER_THROTTLING_STATE st;
+        memset(&st, 0, sizeof(st));
+        st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        st.ControlMask = what;
+        st.StateMask = 0;
+        return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof(st)) != 0;
+    };
+    const bool speed = optOut(PROCESS_POWER_THROTTLING_EXECUTION_SPEED);
+    const bool timer = optOut(PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION);   // Windows 11; refused on Windows 10
+    std::cout << "[HUB] window thread: priority " << (pr ? "below normal" : "unchanged") << ", boost " << (nb ? "off" : "on")
+              << "; power throttling off: speed " << (speed ? "yes" : "no") << ", timer " << (timer ? "yes" : "no") << "\n";
+}
+
+// The Stop file writes QUIT into the data folder; looked for once a second on the message thread.
+namespace {
+class QuitFileWatch : public juce::Timer {
+public:
+    explicit QuitFileWatch(std::function<void()> fn) : mFn(std::move(fn)) { mFile.deleteFile(); startTimer(1000); }
+    void timerCallback() override {
+        if (!mFile.existsAsFile()) return;
+        mFile.deleteFile();
+        stopTimer();
+        std::cout << "[HUB] QUIT file found, shutting down...\n";
+        mFn();
+    }
+private:
+    juce::File mFile = hub_settings::dataDir().getChildFile("QUIT");
+    std::function<void()> mFn;
+};
+}
+#endif
+
 void HubJuceApp::initialise(const juce::String&) {
 #if JUCE_MAC
     forceRegularActivationPolicy();
+#endif
+#if JUCE_WINDOWS
+    windowsGuiSetup();
+    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); });
 #endif
     const bool firstLaunch = !mMeta.loadedFromFile && mMeta.loadError.empty()
                              && mMeta.file != juce::File() && mMeta.cliKeys.count("group") == 0;
@@ -1769,7 +1829,7 @@ void HubJuceApp::startHubAndWindow() {
             juce::MessageBoxIconType::WarningIcon, "Hub failed to start",
             juce::String("Could not open UDP port ") + juce::String(mArgs.localServerPort)
                 + " (or the server could not be reached).\n\nMost likely another SonoBus (or an older hub) is "
-                  "already running on this Mac. Quit it, then press Restart.");
+                  "already running on " + juce::String(kThisComputer) + ". Quit it, then press Restart.");
     }
 }
 
@@ -1810,9 +1870,7 @@ void HubJuceApp::doRestart() {
 
 void HubJuceApp::makeWindow() {
     auto restartFn = [this]() { doRestart(); };
-    auto quitFn = []() {
-        juce::JUCEApplication::getInstance()->systemRequestedQuit();
-    };
+    auto quitFn = [this]() { userRequestedStop(); };
     SettingsPanel::Callbacks cb;
     cb.save = [this](const HubLaunchArgs& a, std::string& err) { return applySavedSettings(a, err); };
     cb.relaunch = [this](std::string& err) { return doRelaunch(err); };
@@ -1821,10 +1879,56 @@ void HubJuceApp::makeWindow() {
     auto applySessionFn = [this](const std::string& g, const std::string& pw) { applySessionAndRestart(g, pw); };   
     mWindow = std::make_unique<HubMainWindow>(
         "SonoBus RP Hub", mHub.get(), mArgs, mMeta, std::move(cb), restartFn, quitFn, applyGroupFn, applyHoldFn, applySessionFn);
+#if JUCE_WINDOWS
+    mWindow->setIcon(juce::ImageCache::getFromMemory(HubBinaryData::sonobus_hub_icon_mac_256_png, HubBinaryData::sonobus_hub_icon_mac_256_pngSize));
+    attachWindowMenu();
+#endif
+}
+
+// Close button and Quit. Windows asks first while players are on the stage; the Mac quits as before.
+void HubJuceApp::userRequestedStop() {
+#if JUCE_WINDOWS
+    if (mHub && mHub->getNumConnectedPeers() > 0) {
+        if (mStopAsked) return;
+        mStopAsked = true;
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Stop the hub?",
+            "Stop the hub? Players on the stage will be disconnected.", "Stop", "Cancel", nullptr,
+            juce::ModalCallbackFunction::create([this](int result) {
+                mStopAsked = false;
+                if (result == 1) quit();
+            }));
+        return;
+    }
+#endif
+    quit();
+}
+
+void HubJuceApp::anotherInstanceStarted(const juce::String&) {
+#if JUCE_WINDOWS
+    if (!mWindow) return;
+    if (mWindow->isMinimised()) mWindow->setMinimised(false);
+    mWindow->toFront(true);
+#endif
 }
 
 // ─── "About SonoBus RP Hub" in the application menu ──────────────────
 namespace {
+// Third-party notices: inside the bundle on a Mac, next to the program on Windows.
+juce::File noticesFile() {
+#if JUCE_MAC
+    return juce::File::getSpecialLocation(juce::File::currentApplicationFile).getChildFile("Contents/Resources/LICENSES-HUB.txt");
+#else
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("LICENSES-HUB.txt");
+#endif
+}
+juce::String noticesPath() {
+#if JUCE_MAC
+    return "Contents/Resources/LICENSES-HUB.txt";
+#else
+    return "LICENSES-HUB.txt next to sonobus-hub.exe";
+#endif
+}
+
 class HubAboutComponent : public juce::Component {
 public:
     HubAboutComponent() {
@@ -1833,9 +1937,9 @@ public:
                                                HubBinaryData::sonobus_hub_icon_mac_256_pngSize);
         // Third-party notices ship in the bundle (LICENSES-HUB.txt, copied by CMake POST_BUILD)
         addAndMakeVisible(noticesButton);
-        noticesButton.setTooltip("Reveal Contents/Resources/LICENSES-HUB.txt (AOO, oscpack, Opus, MD5, JUCE notices)");
+        noticesButton.setTooltip("Reveal " + noticesPath() + " (AOO, oscpack, Opus, MD5, JUCE notices)");
         noticesButton.onClick = [] {
-            const juce::File f = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getChildFile("Contents/Resources/LICENSES-HUB.txt");
+            const juce::File f = noticesFile();
             if (f.existsAsFile()) f.revealToUser();
         };
         setSize(600, 360);
@@ -1874,7 +1978,7 @@ public:
                          "(Sonosaurus). Free software under the GNU General Public License v3.",
                          r.removeFromTop(64), juce::Justification::topLeft, 4);
         r.removeFromTop(4);
-        g.drawText("Third-party notices: Contents/Resources/LICENSES-HUB.txt", r.removeFromTop(18), juce::Justification::centredLeft);   
+        g.drawText("Third-party notices: " + noticesPath(), r.removeFromTop(18), juce::Justification::centredLeft);   
     }
 private:
     SonobusPlusVersion::Info info;
@@ -1882,12 +1986,28 @@ private:
     juce::TextButton noticesButton { "Third-party notices" };   
 };
 
-// A menu bar with no menus of its own: it exists so the Apple menu can carry our About item.
+// Mac: a menu bar with no menus of its own: it exists so the Apple menu can carry our About item.
+// Windows: one "Hub" menu inside the window with About and the data folder.
 class HubMenuModel : public juce::MenuBarModel {
 public:
+    std::function<void()> onAbout;
+#if JUCE_WINDOWS
+    juce::StringArray getMenuBarNames() override { return { "Hub" }; }
+    juce::PopupMenu getMenuForIndex(int, const juce::String&) override {
+        juce::PopupMenu m;
+        m.addItem(1, "About SonoBus RP Hub");
+        m.addItem(2, "Open the Settings and Log Folder");
+        return m;
+    }
+    void menuItemSelected(int id, int) override {
+        if (id == 1 && onAbout) onAbout();
+        if (id == 2) hub_settings::dataDir().startAsProcess();
+    }
+#else
     juce::StringArray getMenuBarNames() override { return {}; }
     juce::PopupMenu getMenuForIndex(int, const juce::String&) override { return {}; }
     void menuItemSelected(int, int) override {}
+#endif
 };
 }
 
@@ -1910,6 +2030,21 @@ void HubJuceApp::installAppMenu() {
     about.setAction([this]() { showAbout(); });
     extras.addItem(about);
     juce::MenuBarModel::setMacMainMenu(mMenuModel.get(), &extras);
+#elif JUCE_WINDOWS
+    auto model = std::make_unique<HubMenuModel>();
+    model->onAbout = [this]() { showAbout(); };
+    mMenuModel = std::move(model);
+    attachWindowMenu();
+#endif
+}
+
+void HubJuceApp::attachWindowMenu() {
+#if JUCE_WINDOWS
+    if (!mWindow || !mMenuModel) return;
+    const int mh = mWindow->getLookAndFeel().getDefaultMenuBarHeight();
+    mWindow->setMenuBar(mMenuModel.get(), mh);
+    mWindow->setResizeLimits(1180, 760 + mh, 8000, 8000);   // the content keeps the Mac window's room
+    if (mWindow->getHeight() < 760 + mh) mWindow->setSize(mWindow->getWidth(), 760 + mh);
 #endif
 }
 
@@ -2038,6 +2173,10 @@ void HubJuceApp::shutdown() {
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
+#if JUCE_WINDOWS
+    mQuitWatch.reset();
+    if (mWindow) mWindow->setMenuBar(nullptr);   // the window's menu bar refers to the model
+#endif
     mMenuModel.reset();
     mStageDirectory.reset();   // removes the listing while the hub still exists
     mWeb.reset();   // FIRST — the web thread uses the window's geo resolver (HubContent::mGeo) and the hub;
@@ -2046,6 +2185,10 @@ void HubJuceApp::shutdown() {
     mWindow.reset();
     if (mHub) mHub->stop();
     mHub.reset();
+#if JUCE_WINDOWS
+    std::cout << "[HUB] stopped\n";
+    std::cout.flush();
+#endif
 }
 
 // The Mac hub serves the same status/settings page as the Linux hub
@@ -2085,7 +2228,11 @@ int runGui(const HubLaunchArgs& args, const HubSettingsMeta& meta, int argc, cha
     gPendingMeta = meta;
     gPendingArgv.assign(argv, argv + argc);
     juce::JUCEApplicationBase::createInstance = createJuceAppInstance;
+#if JUCE_WINDOWS
+    return juce::JUCEApplicationBase::main();   // a windowed Windows program reads its command line itself
+#else
     return juce::JUCEApplicationBase::main(argc, (const char**)argv);
+#endif
 }
 
 } // namespace sb_hub_gui

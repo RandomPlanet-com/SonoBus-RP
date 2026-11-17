@@ -21,18 +21,13 @@ struct SbChannelTipMeter : public foleys::LevelMeter, public ::juce::SettableToo
     // A meter that shows a SLICE of its source (one channel group): bars = tipNumChannels starting at
     // tipFirstChannel (what our LnF draws for setSelectedChannel + setFixedNumChannels). -1 = whole source.
     int tipFirstChannel = -1, tipNumChannels = -1;
-    int drawnChannels () const
-    {
-        if (tipNumChannels > 0) return tipNumChannels;
-        auto* src = boundSource();
-        return src != nullptr ? src->getNumChannels() : 0;
-    }
+    int drawnChannels () const { return tipNumChannels > 0 ? tipNumChannels : (mSrc != nullptr ? mSrc->getNumChannels() : 0); }
     int firstChannel () const  { return tipFirstChannel >= 0 ? tipFirstChannel : 0; }
 
     void paint (::juce::Graphics& g) override
     {
         foleys::LevelMeter::paint (g);
-        if (!showChannelNumbers || boundSource() == nullptr) return;
+        if (!showChannelNumbers || mSrc == nullptr) return;
         const int n = drawnChannels();
         auto* lnf = dynamic_cast<foleys::LevelMeter::LookAndFeelMethods*> (&getLookAndFeel());
         if (n <= 0 || lnf == nullptr) return;
@@ -55,8 +50,7 @@ struct SbChannelTipMeter : public foleys::LevelMeter, public ::juce::SettableToo
 
 
     void bindSource (foleys::LevelMeterSource* src) { mSrc = src; setMeterSource (src); }
-    // Null once the source has been destroyed (a row can outlive its peer until the next rebuild).
-    foleys::LevelMeterSource* boundSource() const { return mSrc.get(); }
+    foleys::LevelMeterSource* boundSource() const { return mSrc; }
 
     // (x, y in the meter's own coordinates; no juce::Point here: a `Point` macro from the Mac headers collides in
     // some TUs)
@@ -86,12 +80,10 @@ private:
     {
         const int ch = channelAt (e.x, e.y);
         ::juce::String tip;
-        auto* src = boundSource();
-        if (ch >= 0 && nameForChannel) tip = nameForChannel (ch, src != nullptr ? src->getNumChannels() : 0);
+        if (ch >= 0 && nameForChannel) tip = nameForChannel (ch, mSrc != nullptr ? mSrc->getNumChannels() : 0);
         if (tip != mTip) { mTip = tip; setTooltip (tip); }
     }
     foleys::LevelMeter::MeterFlags mFlags;
-    // Weak: the source lives in the processor's peer record and can be freed before this row is rebuilt.
-    ::juce::WeakReference<foleys::LevelMeterSource> mSrc;
+    foleys::LevelMeterSource* mSrc = nullptr;
     ::juce::String mTip;
 };

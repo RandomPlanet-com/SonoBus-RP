@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include "SonobusHubCompat.h"
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -17,6 +19,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#endif
 
 #ifndef SONOBUS_HUB_VERSION
 #define SONOBUS_HUB_VERSION "dev"
@@ -128,17 +131,25 @@ std::string HubGeoResolver::geoLookup(const std::string& ip) {
 #ifdef SO_NOSIGPIPE
     { int one = 1; ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)); }
 #endif
+#if defined(_WIN32)
+    hub_set_nonblock(fd);
+#else
     const int fl = fcntl(fd, F_GETFL, 0); fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+#endif
     int rc = ::connect(fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
-    if (rc < 0 && errno != EINPROGRESS) { ::close(fd); return ""; }
+    if (rc < 0 && !hub_connect_pending(hub_sockerr())) { hub_close(fd); return ""; }
     if (rc < 0) {
         struct pollfd pf; pf.fd = fd; pf.events = POLLOUT; pf.revents = 0;
-        if (::poll(&pf, 1, 3000) <= 0) { ::close(fd); return ""; }
+        if (::poll(&pf, 1, 3000) <= 0) { hub_close(fd); return ""; }
         int err = 0; socklen_t el = sizeof(err);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) < 0 || err != 0) { ::close(fd); return ""; }
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) < 0 || err != 0) { hub_close(fd); return ""; }
     }
+#if defined(_WIN32)
+    { u_long zero = 0; ::ioctlsocket((SOCKET) fd, FIONBIO, &zero); }   // back to blocking, with the timeouts set above
+#else
     fcntl(fd, F_SETFL, fl);
+#endif
     const std::string req = "GET /json/" + ip + "?fields=status,city,region HTTP/1.0\r\nHost: ip-api.com\r\nUser-Agent: SonoBusRPHub/" SONOBUS_HUB_VERSION "\r\nConnection: close\r\n\r\n";
     geoSendAll(fd, req);
     std::string resp; char buf[1024];
@@ -148,7 +159,7 @@ std::string HubGeoResolver::geoLookup(const std::string& ip) {
         if (n <= 0) break;
         resp.append(buf, (size_t) n);
     }
-    ::close(fd);
+    hub_close(fd);
     const size_t hdr = resp.find("\r\n\r\n");
     if (hdr == std::string::npos || resp.rfind("HTTP/1.", 0) != 0 || resp.find(" 200 ") == std::string::npos) return "";
     const juce::var root = juce::JSON::parse(juce::String::fromUTF8(resp.c_str() + hdr + 4, (int)(resp.size() - hdr - 4)));
@@ -165,6 +176,8 @@ std::string hubPlatformString() {
     std::string os = "Linux";
     if (FILE* f = fopen("/etc/os-release", "r")) { char line[256]; while (fgets(line, sizeof(line), f)) { if (!strncmp(line, "PRETTY_NAME=", 12)) { std::string v(line + 12); while (!v.empty() && (v.back() == '\n' || v.back() == '"')) v.pop_back(); if (!v.empty() && v[0] == '"') v.erase(0, 1); os = "Linux, " + v; break; } } fclose(f); }
     return os;
+#elif defined(_WIN32)
+    return juce::SystemStats::getOperatingSystemName().toStdString();
 #elif defined(__APPLE__)
     { auto n = juce::SystemStats::getOperatingSystemName(); if (n.startsWith("Mac OSX")) n = "macOS" + n.substring(7); return n.toStdString(); }   // JUCE says "Mac OSX 15.7.7"; show "macOS 15.7.7"
 #else

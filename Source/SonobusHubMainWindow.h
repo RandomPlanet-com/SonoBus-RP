@@ -356,6 +356,9 @@ public:
     void initialise(const juce::String& commandLine) override;
     void shutdown() override;
     void systemRequestedQuit() override;
+    void anotherInstanceStarted(const juce::String& commandLine) override;   // Windows: brings the window back
+    // Close button / Quit: on Windows asks first when players are on the stage, then stops the hub.
+    void userRequestedStop();
 
 private:
     // Tear down + bring back the SonobusHubServer with the stored launch
@@ -386,6 +389,9 @@ private:
     // (re)start the web status page against the CURRENT mHub (web_port 0 = off).
     void startWeb();
     std::unique_ptr<juce::MenuBarModel> mMenuModel;
+    void attachWindowMenu();                  // Windows: the menu sits in the window (no app menu bar)
+    std::unique_ptr<juce::Timer> mQuitWatch;  // Windows: a QUIT file in the data folder stops the hub (the Stop file)
+    bool mStopAsked = false;
 
     HubLaunchArgs mArgs;
     HubSettingsMeta mMeta;
