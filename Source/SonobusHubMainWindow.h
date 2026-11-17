@@ -156,7 +156,7 @@ public:
     juce::TextButton copyLinkButton{"Copy Stage Link"};
     juce::Label linkLabel;
     juce::TextButton portCheckButton{"Re-run port check"};
-    juce::TextButton installUpdateButton{"Install Update"};
+    juce::TextButton installUpdateButton{"Install and relaunch"};
     std::function<void()> onCopyLink, onRerunPortCheck;
     // Group name on the front page. Apply = persist +
     // in-process hub restart (players rejoin the new group).

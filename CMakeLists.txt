@@ -994,7 +994,7 @@ target_link_directories(SonoBusHub PRIVATE $<$<CONFIG:Debug>:${CMAKE_CURRENT_SOU
 target_compile_definitions(SonoBusHub PRIVATE _USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
 # SONOBUS_PLUS_BUILD / _COMMIT: the About window reads them where a Mac reads Info.plist
 target_compile_definitions(SonoBusHub PRIVATE USE_CODEC_OPUS=1 AOO_TIMEFILTER_CHECK=0 AOO_STATIC SONOBUS_HUB_WEB_VERSION="${DISPLAY_VERSION}" SONOBUS_HUB_VERSION="${SONOBUS_HUB_VERSION}" SONOBUS_HUB_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_HUB_COMMIT="${SONOBUS_HUB_COMMIT}" SONOBUS_PLUS_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_PLUS_COMMIT="${SONOBUS_HUB_COMMIT}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
-target_link_libraries(SonoBusHub PRIVATE juce::juce_gui_extra juce::juce_gui_basics juce::juce_graphics juce::juce_events juce::juce_core juce::juce_data_structures juce::juce_recommended_config_flags opus ws2_32 iphlpapi winmm avrt)
+target_link_libraries(SonoBusHub PRIVATE juce::juce_gui_extra juce::juce_gui_basics juce::juce_graphics juce::juce_events juce::juce_core juce::juce_data_structures juce::juce_cryptography juce::juce_recommended_config_flags opus ws2_32 iphlpapi winmm avrt)   # cryptography: the update checksum
 # A windowed program that keeps the standard main(); the headless mode attaches to the console it was started from.
 target_link_options(SonoBusHub PRIVATE /ENTRY:mainCRTStartup)
 set_target_properties(SonoBusHub PROPERTIES OUTPUT_NAME "sonobus-hub")

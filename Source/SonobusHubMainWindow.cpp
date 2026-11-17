@@ -827,7 +827,7 @@ void StatusPage::resized() {
     // Tool row — Copy Stage Link, the link, Re-run port check (right).
     auto trow = bounds.removeFromTop(40).reduced(14, 4);
     portCheckButton.setBounds(trow.removeFromRight(170));
-    if (installUpdateButton.isVisible()) { trow.removeFromRight(8); installUpdateButton.setBounds(trow.removeFromRight(130)); }
+    if (installUpdateButton.isVisible()) { trow.removeFromRight(8); installUpdateButton.setBounds(trow.removeFromRight(170)); }
     copyLinkButton.setBounds(trow.removeFromLeft(160));
     trow.removeFromLeft(10);
     linkLabel.setBounds(trow);
@@ -1443,7 +1443,7 @@ HubContent::HubContent(SonobusHubServer* hub,
     mStatusPage.linkLabel.setTooltip("The link players use to join this stage.");
     mStatusPage.portCheckButton.setTooltip("Test whether players outside your network can reach this hub.");
     styleButton(mStatusPage.installUpdateButton, pal::accent, pal::bg);
-    mStatusPage.installUpdateButton.setTooltip("Download and install the new hub. The hub restarts, so every player drops and rejoins.");
+    mStatusPage.installUpdateButton.setTooltip("Download and install the new hub, then start it again with the same settings. Players on the stage are disconnected.");
     mStatusPage.installUpdateButton.onClick = [this]() { startInstallUpdate(); };
     setTooltip("Total audio traffic through the hub right now.");
     auto& tabBar = mTabs.getTabbedButtonBar();
@@ -1490,20 +1490,23 @@ void HubContent::startInstallUpdate() {
     if (!mUpdateCheck || mUpdateRun) return;
     const auto zip = mUpdateCheck->zip();
     if (zip.url.isEmpty()) return;
-    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Install Update",
-        "Install SonoBus RP Hub " + mUpdateCheck->latest() + "?\n\nThe hub restarts, so every player drops and rejoins.",
-        "Install", "Cancel", this,
-        juce::ModalCallbackFunction::create([this, zip](int result) {
-            if (result != 1) return;
-            mUpdateRun = std::make_unique<HubUpdateRun>(zip, [this](juce::Result r) {
-                mUpdateRun.reset();
-                std::string err;
-                if (r.wasOk() && mRelaunchFn && mRelaunchFn(err)) return;
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Update not installed",
-                    r.failed() ? r.getErrorMessage() + "\n\nThis hub keeps running."
-                               : juce::String("The update is installed, but the hub could not restart: ") + juce::String(err) + "\n\nQuit and open the hub again.");
-            });
-        }));
+    auto install = [this, zip]() {
+        if (mUpdateRun) return;
+        mUpdateRun = std::make_unique<HubUpdateRun>(zip, [this](juce::Result r) {
+            mUpdateRun.reset();
+            std::string err;
+            if (r.wasOk() && mRelaunchFn && mRelaunchFn(err)) return;
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Update not installed",
+                r.failed() ? r.getErrorMessage() + "\n\nThis hub keeps running."
+                           : juce::String("The update is installed, but the hub could not restart: ") + juce::String(err) + "\n\nQuit and open the hub again.");
+        });
+    };
+    // Asked only when someone would be cut off.
+    if (mHub == nullptr || mHub->getNumConnectedPeers() == 0) { install(); return; }
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Install SonoBus RP Hub " + mUpdateCheck->latest(),
+        "Install the update now? Players on the stage will be disconnected.",
+        "Install and relaunch", "Cancel", this,
+        juce::ModalCallbackFunction::create([install](int result) { if (result == 1) install(); }));
 }
 
 void HubContent::paint(juce::Graphics& g) {
@@ -1764,19 +1767,27 @@ void HubJuceApp::initialise(const juce::String&) {
 // Nothing is hosted until the operator has named the group.
 void HubJuceApp::askFirstLaunch() {
     auto* w = new juce::AlertWindow("Welcome to SonoBus RP Hub",
-                                    "Choose a stage name. Players use it to join this hub.",
+                                    "Choose a stage name. Players use it to join this hub.\n\n"
+                                    "Web page password: protects the hub's web page (players list, settings). "
+                                    "Leave empty to turn the web page off.",
                                     juce::MessageBoxIconType::NoIcon);
+    const bool askWeb = mMeta.cliKeys.count("web_password") == 0 && mMeta.cliKeys.count("web_port") == 0;
     w->addTextEditor("group", "", "Stage name");
     w->addTextEditor("password", "", "Password (optional)");
+    if (askWeb) w->addTextEditor("webpw", "", "Web page password (empty = web page off)", '*');
     w->addButton("Start Hub", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("Quit", 0);
     juce::Process::makeForegroundProcess();
-    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int result) {
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w, askWeb](int result) {
         if (result == 0) { quit(); return; }
         const auto group = w->getTextEditorContents("group").trim();
         if (group.isEmpty()) { askFirstLaunch(); return; }
         mArgs.groupName = group.toStdString();
         mArgs.groupPassword = w->getTextEditorContents("password").toStdString();
+        if (askWeb) {
+            mArgs.webPassword = w->getTextEditorContents("webpw").toStdString();
+            mArgs.webPort = mArgs.webPassword.empty() ? 0 : (mArgs.webPort > 0 ? mArgs.webPort : 18080);
+        }
         std::string err;
         if (hub_settings::save(mMeta.file, mArgs, err)) mMeta.loadedFromFile = true;
         else std::cerr << "[HUB] first-launch settings save FAILED: " << err << "\n";

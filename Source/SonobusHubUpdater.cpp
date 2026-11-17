@@ -8,7 +8,7 @@
 
 namespace sb_hub_gui {
 
-#if JUCE_MAC || JUCE_LINUX
+#if JUCE_MAC || JUCE_LINUX || JUCE_WINDOWS
 static juce::String runTool(const juce::StringArray& cmd, int& exitCode);
 #endif
 
@@ -87,7 +87,7 @@ void HubUpdateCheck::checkOnce() {
     std::cout << "[HUB-UPDATE] installed " << me << ", server latest " << latest << (available ? " -> update available" : " -> up to date") << "\n";
 }
 
-#if JUCE_MAC || JUCE_LINUX
+#if JUCE_MAC || JUCE_LINUX || JUCE_WINDOWS
 static juce::String runTool(const juce::StringArray& cmd, int& exitCode) {
     juce::ChildProcess cp;
     if (!cp.start(cmd, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr)) { exitCode = -1; return {}; }
@@ -129,10 +129,15 @@ static juce::Result downloadAndCheck(const HubUpdateZip& zip, const juce::File& 
     if (zip.size > 0 && dest.getSize() != zip.size) return R::fail("Download size mismatch");
     if (zip.sha256.isNotEmpty()) {
         if (!progress("Verifying download...")) return R::fail("Cancelled");
+       #if JUCE_WINDOWS
+        juce::ignoreUnused(shaTool);
+        if (!juce::SHA256(dest).toHexString().equalsIgnoreCase(zip.sha256.trim())) return R::fail("Download checksum mismatch");
+       #else
         int rc = 0;
         shaTool.add(dest.getFullPathName());
         const auto line = runTool(shaTool, rc);
         if (rc != 0 || !line.startsWithIgnoreCase(zip.sha256.trim())) return R::fail("Download checksum mismatch");
+       #endif
     }
     return R::ok();
 }
@@ -164,6 +169,18 @@ bool hubCanUpdateInPlace() {
 #elif JUCE_LINUX
     const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     return exe.existsAsFile() && exe.getParentDirectory().hasWriteAccess();
+#elif JUCE_WINDOWS
+    // Windows reports folders as writable either way, so a file is tried once (Program Files refuses it).
+    static const bool writable = [] {
+        const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        if (!exe.existsAsFile() || !exe.hasFileExtension(".exe")) return false;
+        const auto probe = exe.getParentDirectory().getChildFile(".sbrp-hub-write-test");
+        probe.deleteFile();
+        if (!probe.create().wasOk()) return false;
+        probe.deleteFile();
+        return true;
+    }();
+    return writable;
 #else
     return false;
 #endif
@@ -260,6 +277,55 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     previous.setExecutePermission(true);   // the kept copy must be runnable for a rollback
     if (::rename(staged.getFullPathName().toRawUTF8(), current.getFullPathName().toRawUTF8()) != 0)
         return R::fail("Could not move the new hub into place");
+    return R::ok();
+#elif JUCE_WINDOWS
+    if (!hubCanUpdateInPlace()) return R::fail("This copy of the hub cannot update itself (its folder is not writable). Download the new zip instead.");
+    // The package carries no signature, so the checksum from the update server is mandatory.
+    if (zip.sha256.isEmpty()) return R::fail("The update has no checksum");
+    const auto current = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto parent = current.getParentDirectory();
+    const auto work = parent.getChildFile(".sbrp-hub-update");
+    work.deleteRecursively();
+    if (!work.createDirectory()) return R::fail("Could not create " + work.getFullPathName());
+    struct Cleanup { juce::File dir; ~Cleanup() { dir.deleteRecursively(); } } cleanup{ work };
+
+    const auto package = work.getChildFile("update.zip");
+    if (auto r = downloadAndCheck(zip, package, {}, progress); r.failed()) return r;
+
+    if (!progress("Unpacking...")) return R::fail("Cancelled");
+    const auto stage = work.getChildFile("stage");
+    stage.createDirectory();
+    {
+        juce::ZipFile z(package);
+        if (z.getNumEntries() == 0) return R::fail("The download is not a zip package");
+        if (const auto u = z.uncompressTo(stage); u.failed()) return R::fail("Unpack failed: " + u.getErrorMessage());
+    }
+    juce::File staged;
+    for (const auto& f : stage.findChildFiles(juce::File::findFiles, true, "sonobus-hub.exe")) { staged = f; break; }
+    if (staged == juce::File()) return R::fail("No hub in the download");
+
+    // The new program must run here before the installed copy is touched.
+    if (!progress("Checking the new hub...")) return R::fail("Cancelled");
+    int rc = 0;
+    const auto version = runTool({ staged.getFullPathName(), "--version" }, rc).trim();
+    if (rc != 0 || !version.startsWith("SonoBus RP Hub")) return R::fail("The new hub does not run on this system");
+    const auto newBuild = version.fromLastOccurrenceOf(" ", false, false);
+    const juce::String curBuild(hubBuildId());
+    if (!buildIsNewer(curBuild, newBuild)) return R::fail("The download (" + newBuild + ") is not newer than this hub (" + curBuild + ")");
+    if (!progress("Installing...")) return R::fail("Cancelled");
+
+    // A running program can be renamed but not overwritten: it steps aside as <name>.previous (one kept).
+    const auto previous = parent.getChildFile(current.getFileName() + ".previous");
+    previous.deleteFile();
+    if (previous.exists()) return R::fail("Could not remove " + previous.getFileName());
+    if (!current.moveFileTo(previous)) return R::fail("Could not set the current hub aside");
+    if (!staged.moveFileTo(current)) {
+        previous.moveFileTo(current);
+        return R::fail("Could not move the new hub into place. The current hub was restored.");
+    }
+    // Licence and readme follow the program. Batch files stay: one of them may be running this hub.
+    for (const auto& f : staged.getParentDirectory().findChildFiles(juce::File::findFiles, false))
+        if (!f.hasFileExtension(".bat")) f.copyFileTo(parent.getChildFile(f.getFileName()));
     return R::ok();
 #else
     juce::ignoreUnused(zip, progress);

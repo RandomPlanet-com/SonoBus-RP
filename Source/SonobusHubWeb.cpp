@@ -201,7 +201,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
   <span style="flex:1 1 auto"></span>
   <span id="pcwrap" style="display:flex;flex-direction:column;align-items:flex-end;gap:2px"><span id="pc" class="sub"></span><span id="pcl" class="sub d" style="font-size:12px"></span><span id="sdir" class="sub" style="font-size:12px"></span><span id="slim" class="sub d" style="font-size:12px"></span></span><button id="pcbtn" title="Ask a connected player to probe this hub's ports from outside again">Re-run port check</button>
   <button id="restartbtn" class="warn" title="Restart the hub. Every player drops and rejoins.">Restart Hub</button>
-  <button id="updbtn" class="warn" style="display:none" title="Download and install the new hub. The hub restarts, so every player drops and rejoins.">Install Update</button>
+  <button id="updbtn" class="warn" style="display:none" title="Download and install the new hub, then start it again with the same settings. Players on the stage are disconnected.">Install and relaunch</button>
   <button id="viewlog" title="Open the hub's connection log in a new window">View Log</button>
  </div>
 </div>
@@ -318,7 +318,7 @@ async function tick(){
  if(restarting){restarting=false;$('smsg').textContent='hub is back up';$('smsg').className='msg ok';loadSettings();$('sdmsg').textContent='hub is back up';$('sdmsg').className='msg ok';$('sapply').disabled=false;loadSessions(true);}
  setT($('title'),'SonoBus RP Hub — '+h.group);
  const tabTitle=(h.group?h.group+' · ':'')+'SonoBus RP Hub';if(document.title!==tabTitle)document.title=tabTitle;
- setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
+ npeers=d.peers.length;setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
  setT($('where'),(h.platform||'')+(h.location?'  ·  '+h.location:''));
  setT($('link'),h.joinLink||'');
  const pcc=h.portCheckState==1?'g':h.portCheckState==2?'r':'d';
@@ -386,9 +386,9 @@ $('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!con
 $('gmsgbtn').onclick=async()=>{const t=$('gmsg').value.trim();if(!t)return;try{const r=await post('/api/chat',{message:t});const d=await r.json().catch(()=>({}));needPw(r,d);if(d.ok){$('gmsg').value='';$('gmsgnote').textContent='sent to '+d.sent;setTimeout(()=>$('gmsgnote').textContent='',3000);}}catch(e){}};
 $('gmsg').onkeydown=(e)=>{if(e.key==='Enter')$('gmsgbtn').click();};
 $('k_upd').onclick=()=>{if(updUrl)window.open(updUrl,'_blank');};
-$('updbtn').onclick=async()=>{if(!confirm('Install the update? The hub restarts, so every player drops and rejoins.'))return;
+$('updbtn').onclick=async()=>{if(npeers>0&&!confirm('Install the update now? Players on the stage will be disconnected.'))return;
  try{const r=await fetch(api('/api/update/install'),{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Set a Web password to install updates (HTTP '+r.status+')'));}catch(e){alert('update failed: '+e);}};
-)HTML" R"HTML(let fields=[],detected='',updUrl='';
+)HTML" R"HTML(let fields=[],detected='',updUrl='',npeers=0;
 function fieldHtml(f){
  const id='f_'+f.key,tip=esc(f.tip||'');let inp;
  if(f.kind==1) inp=`<input type="checkbox" id="${id}" ${f.value=='1'?'checked':''} title="${tip}">`;

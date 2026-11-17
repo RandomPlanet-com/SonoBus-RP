@@ -297,7 +297,10 @@ static int runSetup(HubLaunchArgs& a, const HubSettingsMeta& meta) {
     if (!gave) a.groupName = askLine("Group name (players use it to join): ");
     if (a.groupName.empty()) { std::cerr << "A group name is required.\n"; return 1; }
     if (meta.cliKeys.count("group_password") == 0 && !gave) a.groupPassword = askLine("Group password (optional): ");
-    if (meta.cliKeys.count("web_password") == 0 && !gave) a.webPassword = askLine("Web page password (needed to change settings from the web page): ");
+    if (meta.cliKeys.count("web_password") == 0 && !gave) {
+        a.webPassword = askLine("Web page password. Protects the hub's web page (players list, settings). Leave empty to turn the web page off: ");
+        if (meta.cliKeys.count("web_port") == 0) a.webPort = a.webPassword.empty() ? 0 : (a.webPort > 0 ? a.webPort : 18080);
+    }
     std::string err;
     if (!hs::save(meta.file, a, err)) { std::cerr << "Could not save settings: " << err << "\n"; return 1; }
     std::cout << "Saved " << meta.file.getFullPathName() << "\n";
