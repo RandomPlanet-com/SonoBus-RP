@@ -904,10 +904,108 @@ void ChannelGroupView::paint(Graphics& g)
 
 }
 
+int ChannelGroupView::headerHeight (const HeaderLayout & h)
+{
+    int height = kHeaderTop + kHeaderLineH;                                     // wide: one line
+    if (h.lower) height += kHeaderGap + kHeaderLowerH;                          // and the lower line
+    if (h.form == HeaderWide) return height;
+    height += kHeaderGap + (h.form == HeaderNarrowTall ? kHeaderKnobH : kHeaderLineH);   // name line above the level line
+    if (h.form != HeaderMedium && h.showDest) height += kHeaderGap + kHeaderLineH;       // output line
+    return height;
+}
+
+void ChannelGroupView::layoutHeader()
+{
+    const auto & h = header;
+    const int right = getWidth() - 2;
+    int y = kHeaderTop;
+
+    linkButton->setBounds(0, y, kHeaderIndent - 3, kHeaderLineH);
+    monoButton->setBounds(linkButton->getBounds());
+
+    int knobX = 0, knobY = 0, lowerY = 0, lowerRight = 0;
+
+    if (h.form == HeaderWide) {
+        // Name, level and knobs are columns that end where the row with the widest meter ends them, so every
+        // level slider ends at the same place; the Output button takes the room from the knobs to this row's meter.
+        int xr = right - h.meterSlack;
+        int destRight = right;
+        if (h.showMeter) {
+            meter->setBounds(right - h.meterW, y, h.meterW, kHeaderLineH);
+            destRight = right - h.meterW - 6;
+            xr -= jmax(h.meterW, h.meterCol) + 6;
+        }
+        if (h.destCol > 0) xr -= h.destCol + 6;
+        knobX = xr - h.knobCol;
+        knobY = y - 1;
+        if (h.destCol > 0) {
+            const int destX = knobX + h.knobCol + 6;
+            destButton->setBounds(destX, y, jmax(0, destRight - destX), kHeaderLineH);
+        }
+        const int nameW = jmax(0, jmin(h.nameCol, knobX - 6 - kHeaderIndent - 6));
+        nameLabel->setBounds(kHeaderIndent, y, nameW, kHeaderLineH);
+        const int levelX = kHeaderIndent + nameW + 6;
+        levelSlider->setBounds(levelX, y, jmax(0, knobX - 6 - levelX), kHeaderLineH);
+        lowerY = y + kHeaderLineH + kHeaderGap;
+        lowerRight = knobX - 6;
+    }
+    else {
+        int xr = right;
+        if (h.showMeter) {
+            meter->setBounds(xr - h.meterW, y, h.meterW, kHeaderLineH);
+            xr -= h.meterW + 6;
+        }
+        nameLabel->setBounds(kHeaderIndent, y, jmax(0, xr - kHeaderIndent), kHeaderLineH);
+
+        y += kHeaderLineH + kHeaderGap;
+        const bool tall = h.form == HeaderNarrowTall;
+        knobX = right - h.knobCol;
+        knobY = y - 1;
+        const int levelY = tall ? y + (kHeaderKnobH - kHeaderLineH) / 2 : y;
+        int levelRight = knobX - 6;
+        if (h.form == HeaderMedium && h.destCol > 0) {
+            destButton->setBounds(levelRight - h.destCol, levelY, h.destCol, kHeaderLineH);
+            levelRight -= h.destCol + 6;
+        }
+        levelSlider->setBounds(0, levelY, jmax(0, levelRight), kHeaderLineH);   // from the row's left edge
+
+        y += (tall ? kHeaderKnobH : kHeaderLineH) + kHeaderGap;
+        lowerY = y;
+        lowerRight = tall ? right : knobX - 6;
+        if (h.form != HeaderMedium && h.showDest)
+            destButton->setBounds(0, lowerY + (h.lower ? kHeaderLowerH + kHeaderGap : 0), jmax(0, jmin(h.destOwn, right)), kHeaderLineH);
+    }
+
+    // Knobs: pan alone in the middle of its column, or pan and width side by side (a row without the lower line
+    // has a small knob without caption)
+    const int knobH = jmax(0, jmin(kHeaderKnobH, getHeight() - knobY));
+    if (panMode == PanPair) {
+        const int panW = 46, widthW = 40, both = panW + 4 + widthW;
+        const int kx = knobX + (h.knobCol - both) / 2;
+        panSlider->setBounds(kx, knobY, panW, knobH);
+        widthSlider->setBounds(kx + panW + 4, knobY, widthW, knobH);
+    } else {
+        const int panW = jmin(46, h.knobCol);
+        panSlider->setBounds(knobX + (h.knobCol - panW) / 2, knobY, panW, knobH);
+    }
+
+    // Lower line, from the row's left edge: status text, then the buttons, then room for a note
+    int x = 0;
+    statSlot.setBounds(0, lowerY, h.statW, kHeaderLowerH);
+    if (h.statW > 0) x = h.statW + 8;
+    const int buttonY = lowerY + (kHeaderLowerH - kHeaderButtonH) / 2;
+    for (Button * b : { (Button *) muteButton.get(), (Button *) soloButton.get(), (Button *) fxButton.get() }) {
+        b->setBounds(x, buttonY, h.buttonW, kHeaderButtonH);
+        if (b->isVisible()) x += h.buttonW + 3;
+    }
+    x += 5;
+    noteSlot.setBounds(x, lowerY, jmax(0, lowerRight - x), kHeaderLowerH);
+}
+
 void ChannelGroupView::resized()
 {
-    
-    mainbox.performLayout(getLocalBounds());
+    if (header.active) layoutHeader();
+    else mainbox.performLayout(getLocalBounds());
     
     if (panLabel) {
         panLabel->setBounds(panSlider->getBounds().removeFromTop(16).translated(0, -2));
@@ -1114,13 +1212,13 @@ void ChannelGroupsView::configLabel(Label *label, int ltype)
         label->setFont(12);
         label->setColour(Label::textColourId, dimTextColor);
         label->setJustificationType(Justification::centredRight);        
-        label->setMinimumHorizontalScale(0.3);
+        label->setMinimumHorizontalScale(1.0f);
     }
     else if (ltype == LabelTypeSmall) {
         label->setFont(12 );
         label->setColour(Label::textColourId, regularTextColor);
         label->setJustificationType(Justification::centredRight);
-        label->setMinimumHorizontalScale(0.3);
+        label->setMinimumHorizontalScale(1.0f);
     }
     else {
         label->setFont(14);
@@ -1143,6 +1241,7 @@ void ChannelGroupsView::setPeerMode(bool peermode, int index)
 
 void ChannelGroupsView::resized()
 {
+    mLayoutChanged = false;
     Rectangle<int> bounds = getLocalBounds();
 
     if (!mPeerMode) {
@@ -1388,6 +1487,17 @@ ChannelGroupView * ChannelGroupsView::createChannelGroupView(bool first)
     pvf->panSlider->setLookAndFeel(&pvf->panSliderLNF);
     pvf->singlePanner = true;
 
+    pvf->widthSlider = std::make_unique<Slider>(Slider::RotaryHorizontalVerticalDrag,  Slider::NoTextBox);
+    pvf->widthSlider->setTitle(TRANS("Width"));
+    pvf->widthSlider->setName("width");
+    pvf->widthSlider->addListener(this);
+    pvf->widthSlider->setLookAndFeel(&pvf->panSliderLNF);
+    if (mPeerMode) {
+        // Player rows: knobs instead of the pan slider
+        configKnob(pvf, pvf->panSlider.get(), false);
+        configKnob(pvf, pvf->widthSlider.get(), true);
+    }
+
     std::unique_ptr<Drawable> destimg(Drawable::createFromImageData(BinaryData::chevron_forward_svg, BinaryData::chevron_forward_svgSize));
     std::unique_ptr<Drawable> linkimg(Drawable::createFromImageData(BinaryData::link_svg, BinaryData::link_svgSize));
     std::unique_ptr<Drawable> trirightimg(Drawable::createFromImageData(BinaryData::expand_arrow_inactive_svg, BinaryData::expand_arrow_inactive_svgSize));
@@ -1552,7 +1662,7 @@ ChannelGroupView * ChannelGroupsView::createChannelGroupView(bool first)
     for (Component* c : std::initializer_list<Component*>{
             pvf->nameLabel.get(), pvf->muteButton.get(), pvf->soloButton.get(),
             pvf->chanLabel.get(), pvf->levelSlider.get(), pvf->monitorSlider.get(),
-            pvf->panLabel.get(), pvf->panSlider.get(), pvf->linkButton.get(),
+            pvf->panLabel.get(), pvf->panSlider.get(), pvf->widthSlider.get(), pvf->linkButton.get(),
             pvf->monoButton.get(), pvf->destButton.get(), pvf->fxButton.get(),
             pvf->monfxButton.get(), pvf->inCaption.get(), pvf->outCaption.get() }) {
         if (c) c->setBufferedToImage(true);
@@ -2014,11 +2124,15 @@ void ChannelGroupsView::setupChildren(ChannelGroupView * pvf)
     pvf->addAndMakeVisible(pvf->monfxButton.get());
 
     pvf->addAndMakeVisible(pvf->panSlider.get());
+    pvf->addChildComponent(pvf->widthSlider.get());
 
     if (pvf->inCaption) pvf->addChildComponent(pvf->inCaption.get());
     if (pvf->outCaption) pvf->addChildComponent(pvf->outCaption.get());
 
-    pvf->panSlider->setPopupDisplayEnabled(true, true, dw);
+    // A player's header row shows the knob values under the knobs, so no value bubble there
+    const bool headerKnobs = mPeerMode && pvf == mMainChannelView.get();
+    pvf->panSlider->setPopupDisplayEnabled(!headerKnobs, !headerKnobs, dw);
+    pvf->widthSlider->setPopupDisplayEnabled(!headerKnobs, !headerKnobs, dw);
 
     pvf->monitorSlider->setPopupDisplayEnabled(true, true, dw);
 
@@ -2029,33 +2143,24 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
 {
     int minitemheight = 34 ;
     int mincheckheight = 32;
-    int minPannerWidth = isNarrow ? 56 : 64;
     int minButtonWidth = 60;
-    int maxPannerWidth = 130;
-    int compactMaxPannerWidth = 90;
-    int minSliderWidth = isNarrow ? 90 : 100;
-    int meterwidth = 10;
-    int mainmeterwidth = 10;
-    int muteminbuttwidth = isNarrow ? 30 : 52;
-    int mutebuttwidth = isNarrow ? 42 : 52;
-    int linkbuttwidth = 50;
+    int meterwidth = kSbMeterPxPerChannel;
+    int mainmeterwidth = kSbMeterPxPerChannel;
     int destbuttwidth = 44;
-    int destminbuttwidth = isNarrow ? 36 : 44;
     int monsliderwidth =  0 ;
-    int namewidth = isNarrow ? 88 :  110;
     int addrowheight = minitemheight - 2;
 
 #if JUCE_IOS || JUCE_ANDROID
     // make the button heights a bit more for touchscreen purposes
     minitemheight = 42;
     mincheckheight = 40;
-    minPannerWidth = 60;
 #endif
 
     const int textheight = minitemheight / 2;
 
     bool servconnected = processor.isConnectedToServer();
 
+    mLayoutChanged = true;
     channelsBox.items.clear();
     channelsBox.flexDirection = FlexBox::Direction::column;
     channelsBox.justifyContent = FlexBox::JustifyContent::flexStart;
@@ -2067,10 +2172,6 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
     //peersheight += 2;
 
     const int ph = singleph;
-    int ipw = 0;//2*minButtonWidth + minSliderWidth + 15 + 32 + 60 + 20;
-    int mpw = 0;// 2*minButtonWidth + minPannerWidth + 6 + 44;
-    int iph = 0;
-    int mph = 0;
     int mbh = 0;
 
 
@@ -2086,12 +2187,10 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
     int deststart = 0;
     int destcnt = 1;
 
-    bool pannervisible = true;
-
     int totaloutchans = 1;
     totaloutchans = processor.getTotalNumOutputChannels();
 
-    int estwidth = mEstimatedWidth > 13 ? mEstimatedWidth - 13 : 320;
+    int rowMinWidth = 0;   // Widest line at its smallest (names and output labels given way)
 
     changroups = processor.getRemotePeerChannelGroupCount(mPeerIndex);
 
@@ -2106,20 +2205,8 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
     processor.getRemotePeerChannelGroupDestStartAndCount(mPeerIndex, changroup, deststart, destcnt);
     destcnt = jmin(totaloutchans, destcnt);
 
-
-    if ((destcnt != 2) || chcnt == 0) {
-        pannervisible = false;
-    }
-
-    mainmeterwidth = totalchans * meterwidth;
-    if (totalchans > 2) {
-        mainmeterwidth = 6 * totalchans;
-    }
-    // "VU meter tracks twice as wide in Multichannel Send mode — too skinny".
-    if (processor.getSendChannels() == 0) {   // 0 = Send Multichannel
-        meterwidth *= 2;
-        mainmeterwidth *= 2;
-    }
+    // Every meter has the bottom meters' bars: one fixed pitch per channel, so more channels make a wider meter
+    mainmeterwidth = kSbMeterPxPerChannel * jmax(1, totalchans);
 
 
     // Main connected peer views
@@ -2135,13 +2222,6 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
             processor.getRemotePeerChannelGroupStartAndCount(mPeerIndex, changroup, chstart, chcnt);
             processor.getRemotePeerChannelGroupDestStartAndCount(mPeerIndex, changroup, deststart, destcnt);
             destcnt = jmin(totaloutchans, destcnt);
-
-            if ((destcnt != 2) || chcnt == 0) {
-                pannervisible = false;
-            }
-            else {
-                pannervisible = true;
-            }
             chi = 0;
         }
 
@@ -2156,220 +2236,71 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
         }
         if (i >= 0 && i < mChannelViews.size() && chcnt == 2 && chi == 1) continue;   // a stereo pair is one row
 
+        if (i < 0) {
+            // The player's header is laid out by hand (ChannelGroupView::layoutHeader) in the form the list chose
+            auto & h = pvf->header;
+            h.active = true;
+            h.form = mRowForm;
+            h.nameCol = mRowNameCol;
+            h.destCol = mRowDestCol;
+            h.knobCol = mRowKnobCol;
+            h.statW = mRowStatWidth;
+            h.buttonW = mRowButtonWidth;
+            h.meterSlack = mRowMeterSlack;
+            h.showDest = !viewexpanded;
+            h.destOwn = destWidthFor(pvf, destbuttwidth);
+            h.showMeter = !mHideRowMeter;
+            h.meterW = mainmeterwidth;
+            pvf->meter->setVisible(h.showMeter);
 
-        bool destbuttvisible = true;
-
-        if (chi == 0 || (totalchans > 1) )
-        {
-
-            pvf->namebox.items.clear();
-            pvf->namebox.flexDirection = FlexBox::Direction::row;
-            //.withAlignSelf(FlexItem::AlignSelf::center));
-            // The name box is as wide as the name needs (font untouched); the level slider
-            // (the only flex item after it) gives up the room, so MUTE/SOLO/FX just move right.
-            const int nameNeed = (int) std::ceil(pvf->nameLabel->getFont().getStringWidthFloat(pvf->nameLabel->getText())) + 10;
-            const int rowNameWidth = jmax(namewidth, nameNeed);
-            pvf->namebox.items.add(FlexItem(rowNameWidth, minitemheight, *pvf->nameLabel).withMargin(0).withFlex(1));
-
-            pvf->inbox.items.clear();
-            pvf->inbox.flexDirection = FlexBox::Direction::row;
-            // pvf->inbox.items.add(FlexItem(20, minitemheight, *pvf->chanLabel).withMargin(0).withFlex(0));
-            // pvf->inbox.items.add(FlexItem(3, 3));
-
-            if (totalchans == 1) {
-                pvf->inbox.items.add(FlexItem(linkbuttwidth, minitemheight, *pvf->monoButton).withMargin(0).withFlex(0));
-            } else {
-                pvf->inbox.items.add(FlexItem(linkbuttwidth, minitemheight, *pvf->linkButton).withMargin(0).withFlex(0));
-            }
-            pvf->inbox.items.add(FlexItem(3, 3));
-
-
-            pvf->inbox.items.add(FlexItem(rowNameWidth, minitemheight, pvf->namebox).withMargin(0).withFlex(0));
-            if (!isNarrow) {
-                pvf->inbox.items.add(FlexItem(6, 3));
-                pvf->inbox.items.add(FlexItem(mutebuttwidth, minitemheight, *pvf->muteButton).withMargin(0).withFlex(0));
-                pvf->inbox.items.add(FlexItem(3, 3));
-                pvf->inbox.items.add(FlexItem(mutebuttwidth, minitemheight, *pvf->soloButton).withMargin(0).withFlex(0));
-
-                pvf->inbox.items.add(FlexItem(5, 3));
-                pvf->inbox.items.add(FlexItem(mutebuttwidth, minitemheight, *pvf->fxButton).withMargin(0).withFlex(0));
-
-            }
-            pvf->inbox.items.add(FlexItem(3, 3));
-            pvf->inbox.items.add(FlexItem(minSliderWidth, minitemheight, *pvf->levelSlider).withMargin(0).withFlex(1));
-            pvf->inbox.items.add(FlexItem(1, 3));
-
-            if (isNarrow) {
-                pvf->inbox.items.add(FlexItem(2, 3));
-            }
-
-
-            ipw = 0;
-            iph = minitemheight;
-            for (auto & item : pvf->inbox.items) {
-                ipw += item.minWidth;
-            }
-
-            pvf->monbox.items.clear();
-            pvf->monbox.justifyContent = FlexBox::JustifyContent::flexEnd;   // Pan + output hug the right edge of their box (its max width includes a button slot that is not there)
-            pvf->monbox.flexDirection = FlexBox::Direction::row;
-            //pvf->monbox.items.add(FlexItem(minSliderWidth, minitemheight, *pvf->monitorSlider).withMargin(0).withFlex(1));
-            if (isNarrow) {
-                pvf->monbox.items.add(FlexItem(3, 3).withFlex(0.25));
-                pvf->monbox.items.add(FlexItem(muteminbuttwidth, minitemheight, *pvf->muteButton).withMargin(0).withFlex(1).withMaxWidth(mutebuttwidth));
-                pvf->monbox.items.add(FlexItem(3, 3));
-                pvf->monbox.items.add(FlexItem(muteminbuttwidth, minitemheight, *pvf->soloButton).withMargin(0).withFlex(1).withMaxWidth(mutebuttwidth));
-                pvf->monbox.items.add(FlexItem(3, 3));
-
-                pvf->monbox.items.add(FlexItem(muteminbuttwidth, minitemheight, *pvf->fxButton).withMargin(0).withFlex(1).withMaxWidth(mutebuttwidth));
-
-                pvf->monbox.items.add(FlexItem(3, 3).withFlex(0.25));
-
-                // The collapsed 2ch row shows the main view's meter (i < 0); hide that one too when the peer view
-                // draws the full-height meter.
-                if (mHideRowMeter) {
-                    pvf->meter->setVisible(false);
-                } else if (i < 0 ) {
-                    pvf->meter->setVisible(true);
-                    pvf->monbox.items.add(FlexItem(mainmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));
-                    if (totalchans == 1) {
-                        // add gap
-                        pvf->monbox.items.add(FlexItem(meterwidth, minitemheight).withMargin(0).withFlex(0));
-                    }
-                } else {
-                    pvf->meter->setVisible(true);
-                    pvf->monbox.items.add(FlexItem(meterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));
-                }
-                pvf->monbox.items.add(FlexItem(4, 3));
-
-                //if (pannervisible)
-                {
-                    pvf->monbox.items.add(FlexItem(2, 3));
-                    pvf->monbox.items.add(FlexItem(minPannerWidth, minitemheight, *pvf->panSlider).withMargin(0).withFlex(1).withMaxWidth(maxPannerWidth));
-                    pvf->monbox.items.add(FlexItem(3, 3).withFlex(0.1).withMaxWidth(meterwidth + 10));
-                }
-
-
-                if (destbuttvisible) {
-                    pvf->monbox.items.add(FlexItem(destWidthFor(pvf, destminbuttwidth), minitemheight, *pvf->destButton).withMargin(0).withFlex(1).withMaxWidth(destWidthFor(pvf, destbuttwidth)));
-                    pvf->monbox.items.add(FlexItem(2, 3));
-                }
-
-            }
-            else {
-                // The collapsed 2ch row shows the main view's meter (i < 0); hide that one too when the peer view
-                // draws the full-height meter.
-                if (mHideRowMeter) {
-                    pvf->meter->setVisible(false);
-                } else if (i < 0) {
-                    pvf->meter->setVisible(true);
-                    pvf->monbox.items.add(FlexItem(mainmeterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));
-                    if (totalchans == 1) {
-                        // add gap
-                        pvf->monbox.items.add(FlexItem(meterwidth, minitemheight).withMargin(0).withFlex(0));
-                    }
-                } else {
-                    pvf->meter->setVisible(true);
-                    pvf->monbox.items.add(FlexItem(meterwidth, minitemheight, *pvf->meter).withMargin(0).withFlex(0));
-                }
-                pvf->monbox.items.add(FlexItem(4, 3));
-
-                //if (pannervisible) {
-                    pvf->monbox.items.add(FlexItem(minPannerWidth, minitemheight, *pvf->panSlider).withMargin(0).withFlex(0.25).withMaxWidth(maxPannerWidth));
-                    pvf->monbox.items.add(FlexItem(3, 3));
-                //}
-                //pvf->monbox.items.add(FlexItem(mutebuttwidth, minitemheight, *pvf->fxButton).withMargin(0).withFlex(0));
-                //pvf->monbox.items.add(FlexItem(2, 3));
-
-
-                if (destbuttvisible) {
-                    pvf->monbox.items.add(FlexItem(destWidthFor(pvf, destbuttwidth), minitemheight, *pvf->destButton).withMargin(0).withFlex(0));
-                    pvf->monbox.items.add(FlexItem(2, 3));
-                }
-            }
-
-            mpw = 0;
-            mph = minitemheight;
-            for (auto & item : pvf->monbox.items) {
-                mpw += item.minWidth;
-            }
-
-            pvf->maincontentbox.items.clear();
-
-            pvf->mainbox.items.clear();
-            pvf->mainbox.flexDirection = FlexBox::Direction::column;
-
-            bool dotopgap = (chi == 0) && (i >= 0 );
-
-            if (i == -1) {
-                pvf->mainbox.items.add(FlexItem(3, 4));
-            }
-
-
-            if (dotopgap) {
-                // gap at top
-                pvf->mainbox.items.add(FlexItem(3, 6));
-            }
-
-
-            if (isNarrow) {
-                pvf->maincontentbox.flexDirection = FlexBox::Direction::column;
-                pvf->maincontentbox.items.add(FlexItem(3, 2));
-                if (chi == 0) {
-                    pvf->maincontentbox.items.add(FlexItem(ipw, iph , pvf->inbox).withMargin(0).withFlex(0));
-                    pvf->maincontentbox.items.add(FlexItem(2, 2));
-                }
-                pvf->maincontentbox.items.add(FlexItem(mpw, mph , pvf->monbox).withMargin(0).withFlex(0));
-
-                int mch = 0;
-                for (auto & item : pvf->maincontentbox.items) {
-                    mch += item.minHeight;
-                }
-
-                pvf->mainbox.items.add(FlexItem(60, mch, pvf->maincontentbox).withMargin(0).withFlex(0));
-
-            } else {
-                pvf->maincontentbox.flexDirection = FlexBox::Direction::row;
-                pvf->maincontentbox.justifyContent = FlexBox::JustifyContent::flexEnd;   // Pan + output slide full right
-                pvf->maincontentbox.items.add(FlexItem(3, 2));
-                pvf->maincontentbox.items.add(FlexItem(ipw, iph , pvf->inbox).withMargin(0).withFlex(2));
-                pvf->maincontentbox.items.add(FlexItem(2, 2));
-                //if (pannervisible)
-                {
-                    pvf->maincontentbox.items.add(FlexItem(mpw, mph , pvf->monbox).withMargin(0).withFlex(1).withMaxWidth(maxPannerWidth + mutebuttwidth  + (destbuttvisible ? destWidthFor(pvf, destbuttwidth) + 2 : 0) + 2));
-                }
-                //else {
-                //    pvf->maincontentbox.items.add(FlexItem(mpw, mph , pvf->monbox).withMargin(0).withFlex(0)); // (1).withMaxWidth(mutebuttwidth + destbuttwidth + 4));
-                //}
-
-
-                pvf->mainbox.items.add(FlexItem(60, iph, pvf->maincontentbox).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Stretched so pan + output reach the row's right edge
-            }
-
-
-
-            mbh = 0;
-            for (auto & item : pvf->mainbox.items) {
-                mbh += item.minHeight;
-            }
-
-
-
-            if (isNarrow) {
-                channelsBox.items.add(FlexItem(ipw, mbh, *pvf).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Auto width = stretched
-                //peersheight += ph*2 + 6;
-                peersheight += mbh + 2;
-            } else {
-                channelsBox.items.add(FlexItem(ipw+mpw + 6, mbh, *pvf).withMargin(1).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Auto width = stretched
-                //peersheight += ph + 11;
-                peersheight += mbh + 2;
-            }
+            // The narrowest form's need, whatever the form is now, so the list's minimum width does not depend on it
+            const int headerMinWidth = jmax(ChannelGroupView::kHeaderIndent + 60 + 6 + mainmeterwidth + 2,
+                                            90 + 6 + mRowKnobCol + 2,
+                                            mRowStatWidth + 8 + 3 * kHeaderButtonMin + 6 + 2);
+            mbh = ChannelGroupView::headerHeight(h);
+            channelsBox.items.add(FlexItem(headerMinWidth, mbh, *pvf).withMargin(0).withFlex(0));
+            rowMinWidth = jmax(rowMinWidth, headerMinWidth);
+            peersheight += mbh;
 
             if (i < mChannelViews.size()-1) {
                 channelsBox.items.add(FlexItem(3, 4));
                 peersheight += 4;
             }
+            continue;
+        }
 
+        // An instrument row has the player's columns (name, level, knobs, output) in the same form, so its level
+        // slider starts and ends where the player rows' do; MUTE, SOLO and FX on its lower line. The further
+        // channels of an instrument with more than two have one line: the channel number, its knob and meter.
+        const bool primary = chi == 0;
+        auto & h = pvf->header;
+        h.active = true;
+        h.form = mRowForm;
+        h.nameCol = mRowNameCol;
+        h.destCol = mRowDestCol;
+        h.knobCol = mRowKnobCol;
+        h.statW = 0;
+        h.buttonW = mRowButtonWidth;
+        h.meterSlack = mRowMeterSlack;
+        h.showDest = primary;
+        h.destOwn = destWidthFor(pvf, destbuttwidth);
+        h.showMeter = !mHideRowMeter;
+        h.meterW = meterwidth;
+        h.meterCol = mainmeterwidth;   // an inline meter keeps the player's meter column, so the controls line up
+        h.lower = primary;
+        pvf->meter->setVisible(h.showMeter);
+
+        const int subMinWidth = jmax(ChannelGroupView::kHeaderIndent + 60 + 6 + meterwidth + 2,
+                                     90 + 6 + mRowKnobCol + 2,
+                                     3 * kHeaderButtonMin + 6 + 2);
+        mbh = ChannelGroupView::headerHeight(h);
+        channelsBox.items.add(FlexItem(subMinWidth, mbh, *pvf).withMargin(0).withFlex(0));
+        rowMinWidth = jmax(rowMinWidth, subMinWidth);
+        peersheight += mbh;
+
+        if (i < mChannelViews.size()-1) {
+            channelsBox.items.add(FlexItem(3, 4));
+            peersheight += 4;
         }
 
     }
@@ -2383,7 +2314,7 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
 
     if (isNarrow) {
         channelMinHeight = std::max(mbh,  peersheight);
-        channelMinWidth = ipw + 12;
+        channelMinWidth = rowMinWidth;   // What the lines need at their smallest, so the row never lays them past its edge
     }
     else {
         if (!mPeerMode) {
@@ -2391,7 +2322,7 @@ void ChannelGroupsView::updateLayoutForRemotePeer(bool notify)
         } else {
             channelMinHeight = std::max(mbh,  peersheight);
         }
-        channelMinWidth = ipw + mpw + 50;
+        channelMinWidth = rowMinWidth;
     }
 
     if (notify) {
@@ -2409,8 +2340,9 @@ void ChannelGroupsView::updateLayoutForInput(bool notify)
     int maxPannerWidth = 100;   // Narrower pan block → longer level slider, pan + routing sit next to the meter
     int compactMaxPannerWidth = 90;
     int minSliderWidth = isNarrow ? 90 : 100;
-    int meterwidth = 10;
-    int mainmeterwidth = 10;
+    // Every bar has the bottom Out Level meter's pitch
+    int meterwidth = kSbMeterPxPerChannel;
+    int mainmeterwidth = kSbMeterPxPerChannel;
     int mutebuttwidth = isNarrow ? 42 : 52;
     int muteminbuttwidth = isNarrow ? 30 : 52;
     int linkbuttwidth = 50;
@@ -2551,13 +2483,13 @@ void ChannelGroupsView::updateLayoutForInput(bool notify)
         } else if (i == mChannelViews.size() + 1) {
             pvf = mFileChannelView.get();
             auto numfilechan = processor.getFilePlaybackMeterSource().getNumChannels();
-            mainmeterwidth = numfilechan * (numfilechan > 2 ? 6 : meterwidth);
+            mainmeterwidth = numfilechan * meterwidth;
             ismetorfileorsoundboard = true;
         }
         else if (i > mChannelViews.size()) {
             pvf = mSoundboardChannelView.get();
             auto numsoundboardchan = processor.getSoundboardProcessor()->getMeterSource().getNumChannels();
-            mainmeterwidth = numsoundboardchan * (numsoundboardchan > 2 ? 6 : meterwidth);
+            mainmeterwidth = numsoundboardchan * meterwidth;
             ismetorfileorsoundboard = true;
         }
         else {
@@ -2821,6 +2753,57 @@ Rectangle<int> ChannelGroupsView::getMinimumContentBounds() const
     return Rectangle<int>(0,0, channelMinWidth, channelMinHeight);
 }
 
+ChannelGroupsView::PeerRowMetrics ChannelGroupsView::getPeerRowMetrics() const
+{
+    PeerRowMetrics m;
+    if (!mPeerMode || !mMainChannelView) return m;
+
+    auto * mv = mMainChannelView.get();
+    m.expanded = processor.getRemotePeerViewExpanded(mPeerIndex);
+    m.nameNeed = (int) std::ceil(mv->nameLabel->getFont().getStringWidthFloat(mv->nameLabel->getText())) + 11;
+    m.destNeed = m.expanded ? 0 : destWidthFor(mv, 44);
+    m.widthKnob = mv->panMode == ChannelGroupView::PanPair;
+
+    int totalchans = processor.getRemotePeerRecvChannelCount(mPeerIndex);
+    if (totalchans <= 0 && processor.getRemotePeerInfoOnly(mPeerIndex)) totalchans = 2;
+    m.meterWidth = kSbMeterPxPerChannel * jmax(1, totalchans);
+
+    if (m.expanded) {
+        // The instrument rows share the player rows' columns: their names, outputs and width knobs count too
+        for (auto * cv : mChannelViews) {
+            if (cv->chanIndex != 0) continue;
+            m.nameNeed = jmax(m.nameNeed, (int) std::ceil(cv->nameLabel->getFont().getStringWidthFloat(cv->nameLabel->getText())) + 11);
+            m.destNeed = jmax(m.destNeed, destWidthFor(cv, 44));
+            if (cv->panMode == ChannelGroupView::PanPair) m.widthKnob = true;
+        }
+    }
+
+    return m;
+}
+
+void ChannelGroupsView::setPeerRowLayout(int form, int nameCol, int destCol, int knobCol, int statWidth, int buttonWidth, int meterSlack)
+{
+    mRowMeterSlack = meterSlack;
+    mRowForm = form;
+    mRowNameCol = nameCol;
+    mRowDestCol = destCol;
+    mRowKnobCol = knobCol;
+    mRowStatWidth = statWidth;
+    mRowButtonWidth = buttonWidth;
+}
+
+Rectangle<int> ChannelGroupsView::getStatSlotBounds() const
+{
+    if (!mMainChannelView) return {};
+    return mMainChannelView->statSlot + mMainChannelView->getPosition();
+}
+
+Rectangle<int> ChannelGroupsView::getNoteSlotBounds() const
+{
+    if (!mMainChannelView) return {};
+    return mMainChannelView->noteSlot + mMainChannelView->getPosition();
+}
+
 void ChannelGroupsView::applyToAllSliders(std::function<void(Slider *)> & routine)
 {
     for (int i=0; i < mChannelViews.size(); ++i) {
@@ -2853,6 +2836,74 @@ void ChannelGroupsView::applyToAllSliders(std::function<void(Slider *)> & routin
         routine(mSoundboardChannelView->panSlider.get());
         routine(mSoundboardChannelView->monitorSlider.get());
     }
+}
+
+void ChannelGroupsView::configKnob(ChannelGroupView * pvf, Slider * slider, bool isWidth)
+{
+    slider->setSliderStyle(Slider::RotaryHorizontalVerticalDrag);
+    slider->setTextBoxStyle(Slider::NoTextBox, true, 0, 0);
+    slider->setRotaryParameters(MathConstants<float>::pi * 1.25f, MathConstants<float>::pi * 2.75f, true);
+    slider->setMouseDragSensitivity(160);
+    slider->setSliderSnapsToMousePosition(false);
+    slider->setScrollWheelEnabled(false);
+    slider->setWantsKeyboardFocus(true);
+    slider->getProperties().set ("sbKnob", true);
+
+    if (isWidth) {
+        slider->setRange(0.0, 1.0, 0.0);
+        slider->setDoubleClickReturnValue(true, 1.0);
+        slider->getProperties().set ("knobCaption", TRANS("WIDTH"));
+        slider->getProperties().set ("knobSize", 32);
+        slider->textFromValueFunction = [](double v) -> String { return String((int) std::lround(v * 100.0)) + " %"; };
+        slider->valueFromTextFunction = [](const String& s) -> double { return s.getDoubleValue() * 0.01; };
+        slider->setTooltip(TRANS("Stereo width. 0 % is mono, 100 % is as sent."));
+        slider->setValue(1.0, dontSendNotification);
+    } else {
+        slider->setRange(-1.0, 1.0, 0.0);
+        slider->setDoubleClickReturnValue(true, 0.0);
+        slider->getProperties().set ("knobCaption", TRANS("PAN"));
+        slider->textFromValueFunction = [](double v) -> String {
+            const int pct = (int) std::lround(std::abs(v) * 100.0);
+            if (pct == 0) return "C";
+            return String(v < 0 ? "L " : "R ") + String(pct);
+        };
+        slider->valueFromTextFunction = [](const String& s) -> double {
+            const double v = s.retainCharacters("0123456789.").getDoubleValue() * 0.01;
+            return s.containsIgnoreCase("l") ? -v : v;
+        };
+        slider->setValue(0.0, dontSendNotification);
+    }
+    slider->updateText();
+    ignoreUnused(pvf);
+}
+
+// A stereo pair: left = pan - width, right = pan + width, each kept inside the pan range (width 1 = as sent)
+void ChannelGroupsView::pairPansFromKnobs(ChannelGroupView * pvf, float & left, float & right) const
+{
+    const float pan = (float) pvf->panSlider->getValue();
+    const float half = (float) pvf->widthSlider->getValue() * (pvf->pairSwapped ? -1.0f : 1.0f);
+    left  = jlimit(-1.0f, 1.0f, pan - half);
+    right = jlimit(-1.0f, 1.0f, pan + half);
+}
+
+// Knobs follow the stored pan positions, and stay where they are while they still describe them
+void ChannelGroupsView::syncPairKnobs(ChannelGroupView * pvf, float left, float right)
+{
+    float kl = 0.0f, kr = 0.0f;
+    pairPansFromKnobs(pvf, kl, kr);
+    if (std::abs(kl - left) < 1.0e-3f && std::abs(kr - right) < 1.0e-3f) return;
+
+    pvf->pairSwapped = right < left;
+    pvf->panSlider->setValue(0.5 * (left + right), dontSendNotification);
+    pvf->widthSlider->setValue(0.5 * std::abs(right - left), dontSendNotification);
+}
+
+void ChannelGroupsView::applyPairKnobs(ChannelGroupView * pvf, int changroup)
+{
+    float left = 0.0f, right = 0.0f;
+    pairPansFromKnobs(pvf, left, right);
+    processor.setRemotePeerChannelPan(mPeerIndex, changroup, 0, left);
+    processor.setRemotePeerChannelPan(mPeerIndex, changroup, 1, right);
 }
 
 void ChannelGroupsView::setPairPanner(ChannelGroupView * pvf, bool stereoPair)
@@ -2900,9 +2951,26 @@ void ChannelGroupsView::setDestLabel(ChannelGroupView * pvf, const String & text
     mDestTextChanged = true;
 }
 
+// The Output label in the font the button draws it with (its text area is the width less 10 px)
+static Font destTextFont(Component * button)
+{
+    if (auto * lnf = dynamic_cast<SonoLookAndFeel*>(&button->getLookAndFeel()))
+        return lnf->getDrawableButtonTextFont(ChannelGroupView::kHeaderLineH);
+    return Font(13.0f);
+}
+
 int ChannelGroupsView::destWidthFor(ChannelGroupView * pvf, int minWidth) const
 {
-    return jlimit(minWidth, 280, Font(13.0f).getStringWidth(pvf->destButton->getButtonText()) + 18);
+    return jlimit(minWidth, 320, (int) std::ceil(destTextFont(pvf->destButton.get()).getStringWidthFloat(pvf->destButton->getButtonText())) + 14);
+}
+
+int ChannelGroupsView::destMinWidthFor(ChannelGroupView * pvf, int minWidth) const
+{
+    // The channel numbers always show; the device names after them give way first (elided by the look and feel)
+    const String text = pvf->destButton->getButtonText();
+    const String sep = String::fromUTF8(" \xe2\x80\xba ");
+    const String head = text.contains(sep) ? text.upToFirstOccurrenceOf(sep, true, false) + String::fromUTF8("\xe2\x80\xa6") : text;
+    return jmin(destWidthFor(pvf, minWidth), jmax(minWidth, (int) std::ceil(destTextFont(pvf->destButton.get()).getStringWidthFloat(head)) + 14));
 }
 
 void ChannelGroupsView::updateChannelViews(int specific)
@@ -3308,62 +3376,43 @@ void ChannelGroupsView::updatePeerModeChannelViews(int specific)
     mMainChannelView->meter->setMeterSource (processor.getRemotePeerRecvMeterSource(mPeerIndex));
     mMainChannelView->meter->setSelectedChannel(0);
 
-    if (expanded || changroups > 1 || (destcnt != 2)) {
-        mMainChannelView->panSlider->setVisible(false);
-        mMainChannelView->panLabel->setVisible(false);
-    }
-    else if (chcnt == 1) {
-        mMainChannelView->panLabel->setVisible(true);
-        mMainChannelView->panSlider->setVisible(true);
-        mMainChannelView->panSlider->setDoubleClickReturnValue(true, 0.0);
-
-        if (!mMainChannelView->singlePanner) {
-            mMainChannelView->panSlider->setSliderStyle(Slider::LinearHorizontal); // LinearBar
-            mMainChannelView->panSlider->setTextBoxStyle(Slider::NoTextBox, true, 10, 2); // TextBoxAbove
-
-            mMainChannelView->singlePanner = true;
+    // A pan knob on the player's line for a mono player (its channel) and a stereo player (its pair, with the
+    // width knob). A collapsed player with several instruments has a balance knob for its whole mix; expanded,
+    // the knobs are on its instrument rows only.
+    {
+        auto * mv = mMainChannelView.get();
+        int mode = ChannelGroupView::PanNone;
+        if (!expanded && changroups == 1 && destcnt == 2) {
+            if (chcnt == 1) mode = ChannelGroupView::PanSingle;
+            else if (chcnt == 2 && totalchans == 2) mode = ChannelGroupView::PanPair;
         }
-
-    } else if (chcnt == 2) {
-        mMainChannelView->panLabel->setVisible(true);
-        mMainChannelView->panSlider->setVisible(true);
-        mMainChannelView->panSlider->setDoubleClickReturnValue(true, (chi & 2) ? 1.0f: -1.0f);
-
-        if (mMainChannelView->singlePanner && totalchans == 2 && chi == 0) {
-            mMainChannelView->panSlider->setSliderStyle(Slider::TwoValueHorizontal);
-            mMainChannelView->panSlider->setTextBoxStyle(Slider::NoTextBox, true, 60, 12);
-
-            mMainChannelView->singlePanner = false;
-        } else if (!mMainChannelView->singlePanner && totalchans != 2) {
-            mMainChannelView->panSlider->setSliderStyle(Slider::LinearHorizontal); // LinearBar
-            mMainChannelView->panSlider->setTextBoxStyle(Slider::NoTextBox, true, 10, 2); // TextBoxAbove
-
-            mMainChannelView->singlePanner = true;
+        else if (!expanded && changroups > 1 && totaloutchans >= 2) {
+            mode = ChannelGroupView::PanBalance;
         }
-    } else {
-        if (!mMainChannelView->singlePanner && totalchans != 2) {
-            mMainChannelView->panSlider->setSliderStyle(Slider::LinearHorizontal); // LinearBar
-            mMainChannelView->panSlider->setTextBoxStyle(Slider::NoTextBox, true, 10, 2); // TextBoxAbove
-
-            mMainChannelView->singlePanner = true;
+        if (mode != mv->panMode) {
+            mv->panMode = mode;
+            needsUpdateLayout = true;  // the knob column may change
         }
+        mv->panLabel->setVisible(false);
+        mv->panSlider->setVisible(mode != ChannelGroupView::PanNone);
+        mv->widthSlider->setVisible(mode == ChannelGroupView::PanPair);
 
-        mMainChannelView->panSlider->setVisible(false);
-        mMainChannelView->panLabel->setVisible(false);
-    }
-
-    if (mMainChannelView->panSlider->isTwoValue()) {
-        auto pan1 = processor.getRemotePeerChannelPan(mPeerIndex, changroup, 0);
-        auto pan2 = processor.getRemotePeerChannelPan(mPeerIndex, changroup, 1);
-        if (pan1 != mMainChannelView->panSlider->getMinValue() || pan2 != mMainChannelView->panSlider->getMaxValue()) {
-            mMainChannelView->panSlider->setMinAndMaxValues(pan1, pan2, dontSendNotification);
+        if (!mv->panSlider->isMouseButtonDown() && !mv->widthSlider->isMouseButtonDown()) {
+            if (mode == ChannelGroupView::PanPair) {
+                syncPairKnobs(mv, processor.getRemotePeerChannelPan(mPeerIndex, changroup, 0),
+                                  processor.getRemotePeerChannelPan(mPeerIndex, changroup, 1));
+            }
+            else if (mode == ChannelGroupView::PanSingle) {
+                const auto pan = processor.getRemotePeerChannelPan(mPeerIndex, changroup, chi);
+                if (pan != mv->panSlider->getValue()) mv->panSlider->setValue(pan, dontSendNotification);
+            }
+            else if (mode == ChannelGroupView::PanBalance) {
+                const auto bal = processor.getRemotePeerBalance(mPeerIndex);
+                if (bal != mv->panSlider->getValue()) mv->panSlider->setValue(bal, dontSendNotification);
+            }
         }
-    }
-    else {
-        auto pan = processor.getRemotePeerChannelPan(mPeerIndex, changroup, chi);
-        if (pan != mMainChannelView->panSlider->getValue()) {
-            mMainChannelView->panSlider->setValue(pan, dontSendNotification);
-        }
+        mv->panSlider->setTooltip(mode == ChannelGroupView::PanBalance ? TRANS("Balance of this player's whole mix, after the instruments' own pans. Double-click for centre.")
+                                                                       : TRANS("Pan"));
     }
 
     bool maindestbuttvisible = !expanded;
@@ -3440,7 +3489,10 @@ void ChannelGroupsView::updatePeerModeChannelViews(int specific)
         //    dispname << " | " << name;
         //}
 
-        pvf->nameLabel->setText(dispname, dontSendNotification);
+        if (pvf->nameLabel->getText() != dispname) {
+            pvf->nameLabel->setText(dispname, dontSendNotification);
+            needsUpdateLayout = true;   // the name column follows the names
+        }
         {   // Hover on a remote player's strip -> that channel's label (the clayinfo name), even when the strip is too narrow to print it
             String tip = name.isNotEmpty() ? name : String("(unnamed channel)");
             if (chcnt > 2) tip << "  (" << (chi + 1) << " of " << chcnt << ")";
@@ -3533,24 +3585,28 @@ void ChannelGroupsView::updatePeerModeChannelViews(int specific)
 
         setDestText(pvf, deststart, destcnt);
 
-        if (destcnt != 2) {
-            pvf->panSlider->setVisible(false);
+        // A channel row has its pan knob; a stereo pair's row has pan and width
+        {
+            const int mode = destcnt != 2 ? ChannelGroupView::PanNone
+                           : stereoPair   ? ChannelGroupView::PanPair : ChannelGroupView::PanSingle;
+            if (mode != pvf->panMode) {
+                pvf->panMode = mode;
+                needsUpdateLayout = true;
+            }
             pvf->panLabel->setVisible(false);
-        }
-        else {
-            pvf->panLabel->setVisible(true);
-            pvf->panSlider->setVisible(true);
-            pvf->panSlider->setDoubleClickReturnValue(true, 0.0);
+            pvf->panSlider->setVisible(mode != ChannelGroupView::PanNone);
+            pvf->widthSlider->setVisible(mode == ChannelGroupView::PanPair);
+            pvf->panSlider->setTooltip(TRANS("Pan"));
 
-            setPairPanner(pvf, stereoPair);
-                        
-        }
-
-        if (pvf->panSlider->isTwoValue()) {
-            pvf->panSlider->setMinAndMaxValues(processor.getRemotePeerChannelPan(mPeerIndex, changroup, 0), processor.getRemotePeerChannelPan(mPeerIndex, changroup, 1), dontSendNotification);
-        }
-        else {        
-            pvf->panSlider->setValue(processor.getRemotePeerChannelPan(mPeerIndex, changroup, chi), dontSendNotification);
+            if (!pvf->panSlider->isMouseButtonDown() && !pvf->widthSlider->isMouseButtonDown()) {
+                if (mode == ChannelGroupView::PanPair) {
+                    syncPairKnobs(pvf, processor.getRemotePeerChannelPan(mPeerIndex, changroup, 0),
+                                       processor.getRemotePeerChannelPan(mPeerIndex, changroup, 1));
+                }
+                else if (mode == ChannelGroupView::PanSingle) {
+                    pvf->panSlider->setValue(processor.getRemotePeerChannelPan(mPeerIndex, changroup, chi), dontSendNotification);
+                }
+            }
         }
 
         bool isprimary = chi == 0;
@@ -5113,15 +5169,16 @@ void ChannelGroupsView::sliderValueChanged (Slider* slider)
             }
             return;
         }
-        else if (slider == mMainChannelView->panSlider.get()) {
-            if (mMainChannelView->panSlider->isTwoValue()) {
-                float pan1 = mMainChannelView->panSlider->getMinValue();
-                float pan2 = mMainChannelView->panSlider->getMaxValue();
-                processor.setRemotePeerChannelPan(mPeerIndex, changroup, 0, pan1);
-                processor.setRemotePeerChannelPan(mPeerIndex, changroup, 1, pan2);
+        else if (slider == mMainChannelView->panSlider.get() || slider == mMainChannelView->widthSlider.get()) {
+            const bool isPan = slider == mMainChannelView->panSlider.get();
+            if (mMainChannelView->panMode == ChannelGroupView::PanPair) {
+                applyPairKnobs(mMainChannelView.get(), changroup);
             }
-            else {
+            else if (isPan && mMainChannelView->panMode == ChannelGroupView::PanSingle) {
                 processor.setRemotePeerChannelPan(mPeerIndex, changroup, chi, mMainChannelView->panSlider->getValue());
+            }
+            else if (isPan && mMainChannelView->panMode == ChannelGroupView::PanBalance) {
+                processor.setRemotePeerBalance(mPeerIndex, (float) mMainChannelView->panSlider->getValue());
             }
             return;
         }
@@ -5140,14 +5197,11 @@ void ChannelGroupsView::sliderValueChanged (Slider* slider)
                 //processor.setRemotePeerChanel (mPeerIndex, changroup, pvf->levelSlider->getValue());
                 break;
             }
-            else if (pvf->panSlider.get() == slider) {
-                if (pvf->panSlider->isTwoValue()) {
-                    float pan1 = pvf->panSlider->getMinValue();
-                    float pan2 = pvf->panSlider->getMaxValue();
-                    processor.setRemotePeerChannelPan(mPeerIndex, changroup, 0, pan1);
-                    processor.setRemotePeerChannelPan(mPeerIndex, changroup, 1, pan2);
+            else if (pvf->panSlider.get() == slider || pvf->widthSlider.get() == slider) {
+                if (pvf->panMode == ChannelGroupView::PanPair) {
+                    applyPairKnobs(pvf, changroup);
                 }
-                else {
+                else if (pvf->panSlider.get() == slider && pvf->panMode == ChannelGroupView::PanSingle) {
                     processor.setRemotePeerChannelPan(mPeerIndex, changroup, chi, pvf->panSlider->getValue());
                 }
                 break;

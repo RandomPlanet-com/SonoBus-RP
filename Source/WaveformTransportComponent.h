@@ -38,7 +38,7 @@ public:
         nameLabel.setFont(12);
         nameLabel.setColour(Label::textColourId, Colour::fromFloatRGBA(0.8, 0.8, 0.8, 0.8).withAlpha(0.8f));
         nameLabel.setJustificationType(Justification::centredTop);
-        nameLabel.setMinimumHorizontalScale(0.5f);
+        nameLabel.setMinimumHorizontalScale(1.0f);
         
         wavecolor = Colour::fromFloatRGBA(0.2, 0.5, 0.7, 1.0);
         thumbnail.addChangeListener (this);

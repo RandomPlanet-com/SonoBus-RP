@@ -198,6 +198,12 @@ static int32_t sink_tap_int(const char* name, int32_t def, bool* set){
     return def;
 }
 
+// SB_AOO_RESAMP_FLAT=0: the drift resampler table keeps the former Kaiser beta 8 / cutoff 0.92 shape.
+// Read once, when the table is built at setup time.
+extern "C" int32_t aoo_sb_resamp_flat_on(){
+    static const int32_t v = sink_tap_int("SB_AOO_RESAMP_FLAT", 1, nullptr);
+    return v;
+}
 // SB_AOO_LATE_RESYNC=0: after the buffer ran dry, refill with silence up to the target at once (the former rule).
 static int32_t late_resync_on(){
     static const int32_t v = sink_tap_int("SB_AOO_LATE_RESYNC", 1, nullptr);
@@ -254,6 +260,17 @@ static bool adapt_lan_fast(){
 static double adapt_glide_max(){
     static const double g = std::max<int32_t>(0, std::min<int32_t>(30000, sink_tap_int("SB_AOO_ADAPT_GLIDE_PPM", 10000, nullptr))) * 1e-6;
     return g;
+}
+// SB_AOO_GROW_GLIDE=1: a depth that grows by up to about 10 ms is reached by playing slightly slower (at most the
+// glide speed above) instead of inserting blocks without sound. Default 0: the refill.
+static bool grow_glide_on(){
+    static const bool on = sink_tap_int("SB_AOO_GROW_GLIDE", 0, nullptr) != 0;
+    return on;
+}
+// SB_AOO_RO_FAST=0: the period search of the ring-out runs the former, slower way.
+static bool ro_fast(){
+    static const bool on = sink_tap_int("SB_AOO_RO_FAST", 1, nullptr) != 0;
+    return on;
 }
 
 /*//////////////////// aoo_sink /////////////////////*/
@@ -1269,6 +1286,7 @@ void source_desc::do_update(const sink &s){
                 (void) adapt_fast_recover(); (void) adapt_lan_fast(); (void) adapt_glide_max();   // read the switches here, never first on the audio thread
                 adapt_underruns_sec_ = 0; adapt_strike_secs_ = 0; adapt_clean_secs_ = 0; adapt_shrink_pending_ = false; adapt_headroom_prev_ = 0; adapt_warm_ = false; adapt_warm_at_ = -1; adapt_committed_ = false; adapt_commit_blocks_ = 0; adapt_last_shadow_ = -1e9;
                 memset(adapt_hist_, 0, sizeof(adapt_hist_)); adapt_hist_slice_ = 0; adapt_hist_filled_ = 0; adapt_hist_slice_t0_ = -1; adapt_last_arrival_ = -1; adapt_hist_blocks_ = 0; adapt_up_secs_ = 0; adapt_last_up_ = -1e9; adapt_emerg_late_ms_ = 0; adapt_emerg_win_grown_ = 0; memset(adapt_stall_ts_, 0, sizeof(adapt_stall_ts_)); adapt_stall_idx_ = 0; adapt_stall_n_ = 0; adapt_stalls_excluded_ = 0; adapt_stall_clean_secs_ = 0;
+                fl_reset();
                 static bool logged = false;
                 if (!logged){ logged = true; fprintf(stderr, "aoo_sink: %s-ADAPTIVE depth: init %d floor %d max %d blocks (%.2f ms/block)\n", adapt_lan_profile_ ? "LAN" : "WAN", nbuffers, adapt_floor_blocks_, adapt_max_blocks_, block_ms); }
                 sink_evlog("adapt_init", nbuffers);
@@ -1359,6 +1377,7 @@ void source_desc::do_update(const sink &s){
         late_resync_ = late_resync_on() != 0;
         gate_time_ = gate_time_on() != 0;
         { static const int32_t df = sink_tap_int("SB_AOO_DRY_FADE", 1, nullptr); dry_fade_on_ = df != 0; }
+        (void) ro_fast();   // read the switch here, never first on the audio thread
         {
             // ring-out about 16 ms (about 24 ms when the sound has a pitch), fade-in about 5 ms, in whole blocks;
             // the history holds about 70 ms for the pitch search, plus the fade-in and a margin
@@ -1369,6 +1388,11 @@ void source_desc::do_update(const sink &s){
             const int32_t fi_blocks = dry_fade_on_ ? std::max<int32_t>(1, (int32_t) std::ceil(0.005 * decoder_->samplerate() / bs)) : 1;
             const int32_t hist_blocks = std::max<int32_t>(rop_blocks, (int32_t) std::ceil(0.070 * decoder_->samplerate() / bs));
             ro_total_ = ro_blocks * bs; ro_total_pitch_ = rop_blocks * bs; fi_total_ = fi_blocks * bs;
+            // SB_AOO_SPLICE_XFADE=0: a join made on the network side gets the plain one-block fade-in only.
+            { static const int32_t xf = sink_tap_int("SB_AOO_SPLICE_XFADE", 1, nullptr); splice_xfade_ = xf != 0 && dry_fade_on_; }
+            xf_total_ = std::min<int32_t>(fi_total_, std::max<int32_t>(2, (int32_t) std::ceil(0.003 * decoder_->samplerate() / bs)) * bs);   // about 3 ms
+            (void) grow_glide_on(); (void) adapt_glide_max();   // read here, never first on the audio thread
+            adapt_grow_pub_.store(0, std::memory_order_relaxed); adapt_grow_g_ = 0; adapt_grow_acc_ = 0; adapt_grow_open_ = false;
             hist_frames_ = dry_fade_on_ ? (hist_blocks + fi_blocks + 2) * bs : 0;
             hist_.assign((size_t) hist_frames_ * (size_t) std::max<int32_t>(1, decoder_->nchannels()), 0);
             scratch_.assign(nblk, 0);
@@ -1480,6 +1504,29 @@ int32_t source_desc::handle_format(const sink& s, int32_t salt, const aoo_format
     // take writer lock!
     unique_lock lock(mutex_);
 
+    // A repeat of the format already in use (same stream, same settings) changes nothing: keep the
+    // buffer and the stream as they are. Only the user format may differ. Latency impact: none.
+    {
+        static const bool keep = sink_tap_int("SB_AOO_FMT_SAME_KEEP", 1, nullptr) != 0;
+        const bool same = keep && fmt_seen_ && decoder_ && salt == fmt_salt_ && salt == salt_
+            && version == fmt_version_ && f.nchannels == fmt_nch_ && f.samplerate == fmt_sr_
+            && f.blocksize == fmt_bs_ && fmt_codec_ == f.codec
+            && size == (int32_t) fmt_settings_.size()
+            && (size <= 0 || (settings && memcmp(settings, fmt_settings_.data(), (size_t) size) == 0));
+        if (same){
+            sink_evlog("format_same", salt);
+            if (userformat) {
+                userformat_.assign(userformat, userformat+ufsize);
+            }
+            event e;
+            e.type = AOO_SOURCE_FORMAT_EVENT;
+            e.source.endpoint = endpoint_;
+            e.source.id = id_;
+            push_event(e);
+            return 1;
+        }
+    }
+
     salt_ = salt;
 
     // create/change decoder if needed
@@ -1510,6 +1557,9 @@ int32_t source_desc::handle_format(const sink& s, int32_t salt, const aoo_format
     
     // read format
     decoder_->read_format(f, settings, size);
+    fmt_seen_ = true; fmt_salt_ = salt; fmt_version_ = version;
+    fmt_nch_ = f.nchannels; fmt_sr_ = f.samplerate; fmt_bs_ = f.blocksize; fmt_codec_ = f.codec;
+    if (settings && size > 0) fmt_settings_.assign(settings, settings + size); else fmt_settings_.clear();
 
     // user format
     if (userformat) {
@@ -1937,6 +1987,22 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
             resampler_.write(scratch_.data(), nsamples);
         } else {
             const aoo_sample *played = blk;
+            if (fi_left_ == 0) xf_ease_ = false;
+            if (info.splice && !dry_ && xf_total_ > 0 && hist_frames_ > 0 && bframes > 0){
+                // A join made on the network side: the sound before it goes on (period by period, or backwards)
+                // and what follows fades in across it. Nothing is held back; the crossing takes the place of the
+                // first blocks after the join.
+                ro_base_ = hist_wf_; ro_pos_ = 0;
+                ro_period_ = ro_find_period(nchannels, decoder_->samplerate());
+                xf_ease_ = ro_period_ > 0;
+                const int32_t have = hist_nf_ - (hist_nf_ % bframes);
+                if (ro_period_ > 0 || have >= xf_total_){
+                    ro_left_ = xf_total_; ro_span_ = 4 * xf_total_;   // level: the fade-in alone shapes the crossing
+                } else {
+                    ro_left_ = ro_span_ = have;
+                }
+                fi_span_ = fi_left_ = xf_total_;
+            }
             if (dry_ && fi_left_ == 0){   // the first block after a dry spell (or after a cut) starts the fade-in
                 fi_span_ = fi_left_ = std::max<int32_t>(1, fi_total_);
                 hist_nf_ = 0;             // a later ring-out must not reach back across the gap
@@ -1954,6 +2020,13 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
                     if (ro_left_ > 0){
                         const float gro = ro_gain() * (1.0f - gin);
                         ro_put(scratch_.data() + (size_t) j * nchannels, gro, true);
+                    }
+                    if (xf_ease_){
+                        // the repeated period starts where the sound left off: the mismatch one period back is
+                        // taken out at the join and let go across the crossing
+                        const aoo_sample* a = ro_frame(0); const aoo_sample* b = ro_frame(ro_period_);
+                        const float w = (1.0f - gin) * (1.0f - gin);
+                        for (int c = 0; c < nchannels; ++c) scratch_[(size_t) j * nchannels + c] += (a[c] - b[c]) * w;
                     }
                 }
                 if (fi_left_ == 0) ro_left_ = 0;   // the ring-out ends with the fade-in
@@ -1996,6 +2069,22 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
             adapt_glide_g_ += std::max(-dg, std::min(dg, want - adapt_glide_g_));
             dr *= (1.0 + adapt_glide_g_);
         }
+        // Growing by glide: the source is consumed slightly slower until the frames owed have been gained. The
+        // slow-down moves at the pace of the speed-up above and eases out so that it ends when nothing is owed.
+        if (gmax > 0 && feed_pass == 0 && (adapt_grow_g_ > 0 || adapt_grow_pub_.load(std::memory_order_relaxed) > 0)){
+            const int32_t owed = (holding || dry_) ? 0 : std::max<int32_t>(0, adapt_grow_pub_.load(std::memory_order_relaxed));
+            const double sr = (double) std::max<int32_t>(1, s.samplerate());
+            const double srcsr = (double) std::max<int32_t>(1, decoder_->samplerate());
+            const double want = owed > 0 ? std::min(gmax, std::sqrt(8.0 * gmax * (double) owed / srcsr)) : 0.0;
+            const double dg = gmax * (double) numsampleframes / (0.25 * sr);
+            adapt_grow_g_ += std::max(-dg, std::min(dg, want - adapt_grow_g_));
+            if (owed > 0){
+                adapt_grow_acc_ += adapt_grow_g_ * (double) numsampleframes * srcsr / sr;
+                const int32_t k = std::min<int32_t>(owed, (int32_t) adapt_grow_acc_);
+                if (k > 0){ adapt_grow_acc_ -= k; adapt_grow_pub_.fetch_sub(k, std::memory_order_relaxed); }
+            }
+        }
+        if (adapt_grow_g_ > 0) dr *= (1.0 - adapt_grow_g_);
         resampler_.update(samplerate_ * dr, s.real_samplerate());
     }
     if (resampler_.read_available() >= readsamples) break;
@@ -2250,6 +2339,7 @@ bool source_desc::check_packet(const data_packet &d){
         // clear the block queue and fill audio buffer with zeros.
         blockqueue_.clear();
         ack_list_.clear();
+        const bool jumped = next_ != d.sequence;
         next_ = d.sequence;
         // Refill to the target depth, not the ring's capacity (see refill_silence_to_target()).
         // Tiny buffers (target <= 2) refill fully, because keeping a slot free would leave them nearly
@@ -2257,6 +2347,7 @@ bool source_desc::check_packet(const data_packet &d){
         // one slot of headroom so the next real block enters immediately.
         const int count = refill_silence_to_target((governor_target_blocks_ <= 2) ? 0 : 1);
         gate_refill_pub_.fetch_add(count, std::memory_order_relaxed);   // the audio side does not take these for arrivals
+        adapt_grow_pub_.store(0, std::memory_order_relaxed);            // the refill has set the depth
         sink_evlog("recovery_fill", count);
         if (count > 0) refill_pending_.store(1, std::memory_order_relaxed);   // Overshoot after this refill is drained at once
 
@@ -2270,6 +2361,8 @@ bool source_desc::check_packet(const data_packet &d){
             //if (large_gap > 0) {
             nextneedsfadein_ = next_; sink_evlog("fade_arm", next_);
             //}
+        } else if (jumped && splice_xfade_){
+            nextneedsfadein_ = next_; sink_evlog("fade_arm", next_);   // a jump with nothing refilled is a join too
         }
 
         if (dropped){
@@ -2355,6 +2448,8 @@ bool source_desc::add_packet(const data_packet& d){
                 if (excess > 0){
                     skip_ahead(excess);
                     sink_evlog("overflow_skip", excess);
+                } else if (count == 0 && splice_xfade_){
+                    nextneedsfadein_ = next_; sink_evlog("fade_arm", next_);
                 }
                 if (d.sequence < next_){
                     // this packet is inside the skipped range
@@ -2417,10 +2512,109 @@ static bool sb_newer_block_complete_impl(It from, It end, int32_t next){
     return false;
 }
 
+// Sum of a[i] * b[i], kept in several running sums so the compiler can use vector registers.
+static float ro_dot(const float* a, const float* b, int n){
+    enum { K = 32 };
+    float acc[K] = {0};
+    int i = 0;
+    for (; i + K <= n; i += K){
+        for (int k = 0; k < K; ++k) acc[k] += a[i + k] * b[i + k];
+    }
+    for (; i < n; ++i) acc[0] += a[i] * b[i];
+    for (int w = K / 2; w > 0; w /= 2){
+        for (int k = 0; k < w; ++k) acc[k] += acc[k + w];
+    }
+    return acc[0];
+}
+
+// n interleaved frames, each summed to mono.
+static void ro_mono(const aoo_sample* f, int nch, int n, float* out){
+    if (nch == 1){
+        for (int j = 0; j < n; ++j) out[j] = (float) f[j];
+    } else if (nch == 2){
+        for (int j = 0; j < n; ++j) out[j] = (float) f[2 * j] + (float) f[2 * j + 1];
+    } else {
+        for (int j = 0; j < n; ++j, f += nch){
+            float v = (float) f[0];
+            for (int c = 1; c < nch; ++c) v += (float) f[c];
+            out[j] = v;
+        }
+    }
+}
+
 // Audio thread, once at the start of a dry spell: the period of the sound just played, in frames, or 0 when it has
 // no clear pitch. Autocorrelation of the last 40 ms (mono, every fourth frame) over periods of 2 to 25 ms, then one
-// pass at full rate around the best one.
+// pass at full rate around the best one. The history is copied once to a mono run, so every sum runs over plain
+// arrays; the energy of the moving window is updated per lag, not summed again.
 int32_t source_desc::ro_find_period(int32_t nchannels, int32_t samplerate) const {
+    if (hist_frames_ <= 0 || nchannels <= 0 || samplerate <= 0) return 0;
+    if (!ro_fast()) return ro_find_period_ref(nchannels, samplerate);
+    const int stride = 4;
+    const int N = std::min<int>(800, std::min<int>(hist_nf_, samplerate * 65 / 1000) / stride);
+    if (N < 240) return 0;
+    const int minLag = std::max<int>(4, samplerate * 2 / 1000 / stride);
+    const int maxLag = std::min<int>(N / 2, samplerate * 25 / 1000 / stride);
+    const int win = std::min<int>(N - maxLag, samplerate * 40 / 1000 / stride);
+    if (maxLag <= minLag || win < 60) return 0;
+    // the newest frames as one mono run in time order; 'now' is one past the newest
+    enum { kSpan = 4096 };
+    const int span = std::min<int>(hist_nf_, std::max<int>(N * stride, samplerate * 20 / 1000 + (maxLag + 1) * stride));
+    if (span > kSpan) return ro_find_period_ref(nchannels, samplerate);
+    float fm[kSpan];
+    {
+        int32_t start = (ro_base_ - span) % hist_frames_;
+        if (start < 0) start += hist_frames_;
+        const int first = std::min<int>(span, hist_frames_ - start);
+        ro_mono(hist_.data() + (size_t) start * nchannels, nchannels, first, fm);
+        if (first < span) ro_mono(hist_.data(), nchannels, span - first, fm + first);
+    }
+    const float* now = fm + span;
+    // every fourth frame, oldest first
+    float dm[800];
+    for (int i = 0; i < N; ++i) dm[i] = now[-1 - (N - 1 - i) * stride];
+    const float* cur = dm + (N - win);
+    double e0 = 0;
+    for (int i = 0; i < win; ++i) e0 += (double) cur[i] * (double) cur[i];
+    if (e0 <= 0) return 0;   // silence
+    // energy of the window one lag back; it moves by one frame per lag
+    double el = 0;
+    for (int j = N - win - minLag; j < N - minLag; ++j) el += (double) dm[j] * (double) dm[j];
+    float best = 0; int bestLag = 0;
+    float sc[512];
+    for (int lag = minLag; lag <= maxLag && lag < 512; ++lag){
+        const float num = ro_dot(cur, cur - lag, win);
+        const float den = (float) (e0 + el);
+        sc[lag] = den > 1e-9f ? 2.0f * num / den : 0.0f;   // 1 = the same shape one period back
+        if (sc[lag] > best){ best = sc[lag]; bestLag = lag; }
+        const int in = N - win - lag - 1, out = N - 1 - lag;
+        if (in >= 0) el += (double) dm[in] * (double) dm[in] - (double) dm[out] * (double) dm[out];
+    }
+    if (best < 0.6f || bestLag == 0) return 0;
+    // the shortest period that fits nearly as well (a note, not two or three of its periods)
+    sc[minLag - 1] = 0.0f;   // below the range: no fit
+    for (int lag = minLag; lag < bestLag; ++lag){
+        if (sc[lag] >= 0.92f * best && sc[lag] >= sc[lag - 1] && sc[lag] >= sc[lag + 1]){ bestLag = lag; break; }
+    }
+    // full rate around it
+    int P = bestLag * stride; float pbest = -1;
+    const int fwin = std::min<int>(samplerate * 20 / 1000, hist_nf_ - (bestLag * stride + stride + 1));
+    if (fwin < 64) return 0;
+    const float* a = now - fwin;
+    const float ea = ro_dot(a, a, fwin);
+    for (int cand = bestLag * stride - (stride - 1); cand <= bestLag * stride + (stride - 1); ++cand){
+        const float num = ro_dot(a, a - cand, fwin);
+        const float den = ea + ro_dot(a - cand, a - cand, fwin);
+        const float sc2 = den > 1e-9f ? 2.0f * num / den : 0.0f;
+        if (sc2 > pbest){ pbest = sc2; P = cand; }
+    }
+    // needs two periods of history behind the start for the ease at each turn
+    if (P < 16 || hist_nf_ < 2 * P + 8) return 0;
+    return P;
+}
+
+// The same search straight from the history ring, one frame at a time (SB_AOO_RO_FAST=0, and rates whose mono run
+// would not fit above).
+int32_t source_desc::ro_find_period_ref(int32_t nchannels, int32_t samplerate) const {
     if (hist_frames_ <= 0 || nchannels <= 0 || samplerate <= 0) return 0;
     const int stride = 4;
     const int N = std::min<int>(800, std::min<int>(hist_nf_, samplerate * 65 / 1000) / stride);
@@ -2519,7 +2713,7 @@ void source_desc::process_blocks(const sink& s){
         const char *data;
         int32_t size;
         block_info i;
-        const bool dofadein = b->sequence == nextneedsfadein_;
+        const bool dofadein = (splice_xfade_ ? next : b->sequence) == nextneedsfadein_;
         
         if (b->sequence == next && b->complete()){
             // block is ready
@@ -2570,6 +2764,10 @@ void source_desc::process_blocks(const sink& s){
             LOG_WARNING("aoo_sink: couldn't decode block!");
             // decoder failed - fill with zeros
             std::fill(ptr, ptr + nsamples, 0);
+        }
+        else if (dofadein && splice_xfade_) {
+            i.splice = 1;   // crossed over on the audio side
+            nextneedsfadein_ = -1;
         }
         else if (dofadein) {
             // fade the samples in
@@ -2726,6 +2924,7 @@ void source_desc::process_blocks(const sink& s){
             }
             if (adapt_shrink_pending_ && excess <= 0) adapt_shrink_pending_ = false;   // Nothing to drain
             if (excess <= 0 && adapt_glide_active_.load(std::memory_order_relaxed)){ adapt_glide_active_.store(false, std::memory_order_relaxed); sink_evlog("adapt_glide_done", depth); }
+            if (adapt_grow_open_ && adapt_grow_pub_.load(std::memory_order_relaxed) <= 0){ adapt_grow_open_ = false; sink_evlog("adapt_grow_done", depth); }
             if (drift_on_) drift_tick(s, s.elapsed_time(), depth, target);   
             // While the audio side holds after a dry spell it trims the queue itself, from the front.
             const bool gated = gated_.load(std::memory_order_relaxed);
@@ -3183,6 +3382,128 @@ void source_desc::late_window(aoo_late_window& out){
     }
 }
 
+// ─── Fast learning around a line storm (WAN profile) ───
+// SB_AOO_ADAPT_FASTLEARN=0: the depth follows a storm the former way (a step per strike, slow way back).
+static bool adapt_fastlearn(){
+    static const bool on = sink_tap_int("SB_AOO_ADAPT_FASTLEARN", 1, nullptr) != 0;
+    return on;
+}
+// SB_AOO_ADAPT_FASTLEARN_PROVE_S: calm seconds before the step back (15).
+static int32_t fl_prove_base(){
+    static const int32_t v = std::max<int32_t>(5, std::min<int32_t>(120, sink_tap_int("SB_AOO_ADAPT_FASTLEARN_PROVE_S", 15, nullptr)));
+    return v;
+}
+// SB_AOO_ADAPT_FASTLEARN_RANK=1: a step up covers the largest uncovered gap, not the second largest.
+static int32_t fl_rank(){
+    static const int32_t v = sink_tap_int("SB_AOO_ADAPT_FASTLEARN_RANK", 2, nullptr);
+    return v;
+}
+static double fl_margin_ms(double blk_ms){
+    static const double wan_margin_ms = std::max<int32_t>(0, std::min<int32_t>(10000, sink_tap_int("SB_AOO_ADAPT_WAN_MARGIN_US", 2000, nullptr))) / 1000.0;
+    return blk_ms + wan_margin_ms;
+}
+// Two largest values kept per half window: the largest and the second largest of both halves.
+static void fl_push(float h[2], float g){
+    if (g > h[0]){ h[1] = h[0]; h[0] = g; } else if (g > h[1]) h[1] = g;
+}
+static float fl_second(const float a[2], const float b[2], float& top1){
+    const bool at = a[0] >= b[0];
+    top1 = at ? a[0] : b[0];
+    return at ? std::max(b[0], a[1]) : std::max(a[0], b[1]);
+}
+void source_desc::fl_reset(){
+    (void) adapt_fastlearn(); (void) fl_rank(); (void) fl_margin_ms(1.0);   // read the switches at setup
+    fl_state_ = 0; fl_pre_blocks_ = 0; fl_blocks_ = 0;
+    fl_top_[0][0] = fl_top_[0][1] = fl_top_[1][0] = fl_top_[1][1] = 0;
+    fl_long_[0][0] = fl_long_[0][1] = fl_long_[1][0] = fl_long_[1][1] = 0;
+    fl_win_t0_ = fl_long_t0_ = fl_ev_t_ = fl_jump_t_ = fl_rough_t_ = fl_over_t_ = fl_down_t_ = fl_ease_t_ = -1e9;
+    fl_prove_s_ = fl_prove_base();
+}
+// Network thread, per arrival gap. An uncovered gap is longer than the depth and shorter than the ceiling. The
+// second one within 10 s raises the depth in one step to cover the second largest of the last seconds plus the
+// margin, so one lone late packet sets nothing and a step never exceeds what was measured.
+void source_desc::fl_gap(double now, double gap_ms, double raw_gap_ms){
+    const double blk_ms = adapt_block_s_ * 1e3;
+    const double depth_ms = governor_target_blocks_ * blk_ms;
+    const double ceil_ms = adapt_max_blocks_ * blk_ms;
+    if (std::max(gap_ms, raw_gap_ms) > depth_ms) fl_over_t_ = now;
+    if (fl_state_ != 0 && gap_ms > (fl_pre_blocks_ - 1) * blk_ms) fl_rough_t_ = now;
+    const float g = (float) gap_ms;
+    if (now - fl_long_t0_ >= 30.0){
+        const bool stale = (now - fl_long_t0_) >= 60.0;
+        fl_long_[1][0] = stale ? 0 : fl_long_[0][0]; fl_long_[1][1] = stale ? 0 : fl_long_[0][1];
+        fl_long_[0][0] = fl_long_[0][1] = 0; fl_long_t0_ = now;
+    }
+    if (gap_ms >= ceil_ms) return;                // no depth covers it: never sets one
+    if (g > fl_long_[0][1]) fl_push(fl_long_[0], g);
+    if (gap_ms <= depth_ms) return;
+    if (now - fl_win_t0_ >= 5.0){
+        const bool stale = (now - fl_win_t0_) >= 10.0;
+        fl_top_[1][0] = stale ? 0 : fl_top_[0][0]; fl_top_[1][1] = stale ? 0 : fl_top_[0][1];
+        fl_top_[0][0] = fl_top_[0][1] = 0; fl_win_t0_ = now;
+    }
+    fl_push(fl_top_[0], g);
+    const bool second = fl_ev_t_ > fl_jump_t_ && (now - fl_ev_t_) <= 10.0;
+    fl_ev_t_ = now;
+    if (!second) return;
+    float top1 = 0;
+    const float top2 = fl_second(fl_top_[0], fl_top_[1], top1);
+    const float need = (fl_rank() <= 1 || top2 <= 0) ? top1 : top2;
+    const int32_t E = std::min<int32_t>(adapt_max_blocks_, (int32_t) std::ceil((need + fl_margin_ms(blk_ms)) / blk_ms));
+    if (E <= governor_target_blocks_) return;
+    if (fl_state_ == 0){
+        if ((now - fl_down_t_) <= 60.0){ fl_prove_s_ = std::min<int32_t>(240, fl_prove_s_ * 2); sink_evlog("fastlearn_prove_s", fl_prove_s_); }
+        else if (now - fl_down_t_ > 300.0) fl_prove_s_ = fl_prove_base();
+        fl_pre_blocks_ = governor_target_blocks_; fl_state_ = 1;
+    }
+    fl_blocks_ = E; fl_jump_t_ = now; fl_rough_t_ = now;
+    adapt_last_up_ = now; adapt_clean_secs_ = 0; adapt_stall_clean_secs_ = 0;
+    sink_evlog("fastlearn_gap10", (int32_t) (need * 10.0f));
+    adapt_apply_target(E);
+    sink_evlog("fastlearn_up", E);
+    adapt_note(4, E, need);
+}
+// Network thread, once a second while raised. Calm = no gap the depth before the storm would not have covered.
+// After the proving time the depth returns there in one step; a storm that comes back within a minute of that
+// doubles the proving time (up to 4 min, back to the start after 5 quiet minutes). A line that stays rougher than
+// before never proves calm: a minute without a step up brings the depth down to what that minute needed, sized
+// like a step up.
+void source_desc::fl_prove(double now){
+    const double blk_ms = adapt_block_s_ * 1e3;
+    const int32_t cur = governor_target_blocks_;
+    const int32_t pre = std::max<int32_t>(adapt_floor_blocks_, fl_pre_blocks_);
+    const bool proven = (now - fl_rough_t_) >= (double) fl_prove_s_;
+    int32_t R = pre;
+    double since = fl_rough_t_, need_ms = 0;
+    if (!proven){
+        if ((now - fl_jump_t_) < 60.0 || (now - fl_ease_t_) < 60.0) return;
+        float top1 = 0;
+        const float top2 = fl_second(fl_long_[0], fl_long_[1], top1);
+        need_ms = (fl_rank() <= 1) ? top1 : top2;
+        R = std::max<int32_t>(pre, std::min<int32_t>(adapt_max_blocks_, (int32_t) std::ceil((need_ms + fl_margin_ms(blk_ms)) / blk_ms)));
+        if (R > cur - std::max<int32_t>(2, cur / 8)) return;   // not worth a splice
+        fl_ease_t_ = now; since = fl_long_t0_ - 30.0;
+    }
+    if (proven || R <= pre){
+        fl_state_ = 0; fl_blocks_ = 0; fl_ev_t_ = -1e9;
+        fl_top_[0][0] = fl_top_[0][1] = fl_top_[1][0] = fl_top_[1][1] = 0;
+    } else {
+        fl_blocks_ = R;
+    }
+    if (R >= cur) return;
+    for (int32_t k = 0; k < kAdaptHistSlices; ++k){            // forget the slices that hold the storm
+        if (adapt_hist_slice_t0_ - 10.0 * k < since)
+            memset(adapt_hist_[(adapt_hist_slice_ - k + kAdaptHistSlices) % kAdaptHistSlices], 0, sizeof(adapt_hist_[0]));
+    }
+    adapt_headroom_blocks_ = 0; adapt_headroom_prev_ = 0;
+    adapt_hist_blocks_ = std::min<int32_t>(adapt_hist_blocks_, R); adapt_base_blocks_ = std::min<int32_t>(adapt_base_blocks_, R);
+    adapt_last_shrink_ = now;
+    if (proven) fl_down_t_ = now;
+    adapt_apply_target(R);                                     // one splice
+    sink_evlog(proven ? "fastlearn_down" : "fastlearn_ease", R);
+    adapt_note(5, R, (float) need_ms);
+}
+
 // ─── WAN ADAPTIVE receive depth ───
 // Network thread only (called from handle_data under the shared lock, i.e.
 // never concurrently with do_update). No allocation, no audio-thread state.
@@ -3290,6 +3611,7 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
                 const double depth_ms = governor_target_blocks_ * adapt_block_s_ * 1e3;
                 if (gap_ms > depth_ms && gap_ms > adapt_emerg_late_ms_) adapt_emerg_late_ms_ = gap_ms;
             }
+            if (adapt_warm_ && !adapt_lan_profile_ && adapt_block_s_ > 0 && adapt_fastlearn()) fl_gap(now, gap_ms, raw_gap_ms);
             }
         }
         adapt_last_arrival_ = anow; adapt_last_seq_ = d.sequence;
@@ -3410,6 +3732,12 @@ void source_desc::adapt_retarget(const sink& s, double now){
     // SB_AOO_ADAPT_JOIN_GUARD_S (60) of a source add / feed rebuild in this sink; the hub's churn at a join is a transient.
     static const double join_guard_s = std::max(0.0, sink_tap_int("SB_AOO_ADAPT_JOIN_GUARD_S", 60, nullptr) * 1.0);
     const bool join_guard = (now - s.last_source_change()) < join_guard_s;
+    // Fast learning: dry spells behind a pause in arrivals move the depth by the gaps measured (fl_gap), not by a
+    // step per strike.
+    const bool fl_on = adapt_fastlearn() && !adapt_lan_profile_;
+    if (fl_on && (now - fl_over_t_) < 2.0 && (adapt_strike_secs_ >= 2 || u >= 3 * budget)){
+        adapt_strike_secs_ = 0; adapt_stall_clean_secs_ = 0;
+    } else
     if (join_guard && (adapt_strike_secs_ >= 2 || u >= 3 * budget || lan_grow)){
         adapt_strike_secs_ = 0; adapt_strike_win_n_ = 0; sink_evlog("adapt_grow_join_guarded", u);
     } else
@@ -3479,10 +3807,12 @@ void source_desc::adapt_retarget(const sink& s, double now){
             adapt_base_blocks_ = (int32_t) std::ceil(need_s / adapt_block_s_) + 1;
         }
     }
+    if (fl_on && fl_state_ != 0) fl_prove(now);
     // headroom can never push past the max (else decay would be invisible for minutes)
     adapt_headroom_blocks_ = std::max<int32_t>(0, std::min<int32_t>(adapt_headroom_blocks_, adapt_max_blocks_ - adapt_base_blocks_));
     int32_t T = adapt_base_blocks_ + adapt_headroom_blocks_;
     T = std::max<int32_t>(adapt_floor_blocks_, std::min<int32_t>(T, adapt_max_blocks_));
+    if (fl_on && fl_state_ != 0) T = std::max<int32_t>(T, std::min<int32_t>(fl_blocks_, adapt_max_blocks_));   // the storm's depth stands until the way back
     const int32_t cur = governor_target_blocks_;
     // Underrun-driven emergency grow, mirror of the hub's GROW-EMERGENCY. The strike rule needs two
     // CONSECUTIVE strike seconds (or 3 underruns in one second), but WAN stalls land one underrun every
@@ -3507,7 +3837,8 @@ void source_desc::adapt_retarget(const sink& s, double now){
             if (now - adapt_emerg_win_t0_ >= 10.0){ adapt_emerg_win_t0_ = now; adapt_emerg_win_n_ = 0; adapt_emerg_win_grown_ = 0; adapt_emerg_late_ms_ = 0; }
             adapt_emerg_win_n_ += u;
             if (adapt_warm_ && adapt_emerg_win_n_ >= emerg_thr && (now - adapt_last_emerg_) >= (double) emerg_gap_s
-                && cur < adapt_max_blocks_ && adapt_emerg_win_grown_ < emerg_cap){
+                && cur < adapt_max_blocks_ && adapt_emerg_win_grown_ < emerg_cap
+                && !(fl_on && (adapt_emerg_late_ms_ > 0 || (now - fl_over_t_) < 10.0))){   // measured gaps are fl_gap's
                 const double late_ms = adapt_emerg_late_ms_;
                 int32_t want = cur + 1;                                   // unmeasured (loss): exactly one block
                 if (late_ms > 0 && adapt_block_s_ > 0)
@@ -3584,8 +3915,8 @@ void source_desc::adapt_retarget(const sink& s, double now){
         // double, at most 120 s); five clean minutes reset it, so a line that stays rough keeps what it needs.
         // On the LAN profile the wait is short and the depth returns all the way to the need: a local link that
         // stumbled once is back within seconds, and one that keeps stumbling backs off the same way.
-        bool fast_done = false;
-        if (adapt_fast_recover() && adapt_block_s_ > 0 && (!adapt_lan_profile_ || adapt_lan_fast())){
+        bool fast_done = fl_on && fl_state_ != 0;   // raised for a storm: fl_prove() owns the way back
+        if (!fast_done && adapt_fast_recover() && adapt_block_s_ > 0 && (!adapt_lan_profile_ || adapt_lan_fast())){
             static const int32_t fast_base_wan = std::max<int32_t>(5, sink_tap_int("SB_AOO_ADAPT_FAST_WAIT_S", 10, nullptr));
             static const int32_t fast_base_lan = std::max<int32_t>(3, sink_tap_int("SB_AOO_ADAPT_LAN_FAST_WAIT_S", 5, nullptr));
             static const int32_t fast_marg_wan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_FAST_MARGIN_BLOCKS", 2, nullptr));
@@ -3699,6 +4030,28 @@ void source_desc::adapt_events(aoo_adapt_events& out) const {
     }
 }
 
+// Network thread. blocks > 0: the target went up by that much; true when the glide takes it (the switch is on, the
+// audio side is not holding after a dry spell, and no more than about 10 ms is owed in all). Otherwise nothing is
+// owed any more: the refill or the hold sets the depth. blocks < 0: the target came down, that much less is owed.
+bool source_desc::grow_glide(int32_t blocks){
+    const int32_t bs = std::max<int32_t>(1, decoder_->blocksize());
+    const int32_t owed = std::max<int32_t>(0, adapt_grow_pub_.load(std::memory_order_relaxed));
+    if (blocks <= 0){
+        if (owed > 0) adapt_grow_pub_.store(std::max<int32_t>(0, owed + blocks * bs), std::memory_order_relaxed);
+        return false;
+    }
+    const int32_t want = owed + blocks * bs;
+    const bool take = grow_glide_on() && adapt_glide_max() > 0 && !gated_.load(std::memory_order_relaxed)
+                      && want <= (int32_t) (0.010 * decoder_->samplerate());
+    if (take || owed > 0) adapt_grow_pub_.store(take ? want : 0, std::memory_order_relaxed);
+    if (take){
+        adapt_grow_open_ = true;
+        drift_silence_frames_ += (int64_t) blocks * audioqueue_.blocksize();   // a level move, as with the refill
+        sink_evlog("adapt_grow_glide", blocks);
+    }
+    return take;
+}
+
 void source_desc::adapt_apply_target(int32_t T){
     const int32_t old = governor_target_blocks_;
     if (T == old || T <= 0) return;
@@ -3706,8 +4059,11 @@ void source_desc::adapt_apply_target(int32_t T){
     depth_pub_.store(T, std::memory_order_relaxed);   
     audioqueue_target_samples_.store(T * (int32_t) audioqueue_.blocksize(), std::memory_order_relaxed);
     sink_evlog("adapt_target", T);
+    const bool glide_up = grow_glide(T - old);
     if (T > old && gated_.load(std::memory_order_relaxed)){
         adapt_shrink_pending_ = false;   // the audio side is holding after a dry spell and fills to the new depth itself
+    } else if (glide_up){
+        adapt_shrink_pending_ = false;   // played slightly slower until the depth is there; nothing is inserted
     } else if (T > old){
         const int32_t n = refill_silence_to_target(0);
         drift_silence_frames_ += (int64_t) n * audioqueue_.blocksize();   // A level move, not the sink running ahead
@@ -3736,6 +4092,7 @@ void source_desc::check_outdated_blocks(){
         // update 'next'
         if (next_ <= old){
             next_ = old + 1;
+            if (splice_xfade_) nextneedsfadein_ = next_;
         }
         // record dropped block
         streamstate_.add_lost(1);

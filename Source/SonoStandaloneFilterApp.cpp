@@ -246,8 +246,11 @@ public:
         void timerCallback() override {
             if (holder == nullptr) return;
             if (auto* sp = dynamic_cast<SonobusAudioProcessor*>(holder->processor.get()))
-                if (auto* ad = holder->deviceManager.getCurrentAudioDevice())
-                    sp->sbAudioHealthTick(ad->getXRunCount(), ad->getCurrentSampleRate(), ad->getCurrentBufferSizeSamples());
+                if (auto* ad = holder->deviceManager.getCurrentAudioDevice()) {
+                    float inMs = 0.0f, outMs = 0.0f;
+                    const float ifaceMs = SonobusAudioProcessor::getAudioInterfaceMs(ad, inMs, outMs) ? inMs + outMs : -1.0f;
+                    sp->sbAudioHealthTick(ad->getXRunCount(), ad->getCurrentSampleRate(), ad->getCurrentBufferSizeSamples(), ifaceMs);
+                }
         }
     } mHeadlessHealth;
    #endif

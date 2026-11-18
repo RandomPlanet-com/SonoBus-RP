@@ -325,7 +325,8 @@ void ChannelGroup::processBlock (AudioBuffer<float>& frombuffer,
 
 void ChannelGroup::processPan (AudioBuffer<float>& frombuffer, int fromStartChan,
                                AudioBuffer<float>& tobuffer, int destStartChan, int destNumChans,
-                               int numSamples, float gainfactor, ProcessState * oprocstate)
+                               int numSamples, float gainfactor, ProcessState * oprocstate,
+                               const float * balGain, const float * balLastGain)
 {
     int fromNumChan = frombuffer.getNumChannels();
     int toNumChan = tobuffer.getNumChannels();
@@ -339,6 +340,8 @@ void ChannelGroup::processPan (AudioBuffer<float>& frombuffer, int fromStartChan
         //tobuffer.clear(0, numSamples);
 
         for (int channel = destStartChan; channel < destStartChan + destNumChans && channel < toNumChan; ++channel) {
+            const float bal = balGain ? balGain[channel - destStartChan] : 1.0f;
+            const float lastbal = balLastGain ? balLastGain[channel - destStartChan] : bal;
             int pani = 0;
             for (int i=fromStartChan; i < fromStartChan + params.numChannels && i < fromNumChan; ++i, ++pani) {
                 const float upan = (params.numChannels != 2 ? params.pan[pani] : i==fromStartChan ? params.panStereo[0] : params.panStereo[1]);
@@ -349,12 +352,12 @@ void ChannelGroup::processPan (AudioBuffer<float>& frombuffer, int fromStartChan
 
                 // apply pan law
                 pgain *= params.centerPanLaw + (fabsf(upan) * (1.0f - params.centerPanLaw));
-                pgain *= gainfactor;
+                pgain *= gainfactor * bal;
 
-                if (fabsf(upan - lastpan) > 0.00001f) {
+                if (fabsf(upan - lastpan) > 0.00001f || bal != lastbal) {
                     float plastgain = channel == destStartChan ? (lastpan >= 0.0f ? (1.0f - lastpan) : 1.0f) : (lastpan >= 0.0f ? 1.0f : (1.0f+lastpan));
                     plastgain *= params.centerPanLaw + (fabsf(lastpan) * (1.0f - params.centerPanLaw));
-                    plastgain *= gainfactor;
+                    plastgain *= gainfactor * lastbal;
 
                     tobuffer.addFromWithRamp(channel, 0, frombuffer.getReadPointer(i), numSamples, plastgain, pgain);
                 } else {

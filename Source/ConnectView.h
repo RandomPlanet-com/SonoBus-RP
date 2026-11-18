@@ -33,6 +33,7 @@ public:
     public:
         virtual ~Listener() {}
         virtual void connectionsChanged(ConnectView *comp) {}
+        virtual void peersRemoved(ConnectView *comp) {}   // every peer was dropped on the message thread
     };
 
     void addListener(Listener * listener) { listeners.add(listener); }
@@ -56,6 +57,11 @@ public:
 
     void updateState();
     void updateLayout();
+
+    // Instrument: one stored value (the processor), shown here and in the main window
+    static StringArray instrumentChoices();
+    void refreshInstrument();                       // show the stored value unless the field is being edited
+    std::function<void()> onInstrumentChanged;      // called after this panel stored a new value
 
     void paint(Graphics & g) override;
     void resized() override;

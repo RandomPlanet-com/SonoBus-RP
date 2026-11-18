@@ -43,11 +43,118 @@ static TextLayout sonoLayoutTooltipText (const String& text, Colour colour) noex
     return tl;
 }
 
+static String sbElideEnd (const Font& f, const String& in, float w)
+{
+    const String s = in.trim();
+    if (f.getStringWidthFloat (s) <= w)
+        return s;
+    const String ell = String::fromUTF8 ("\xe2\x80\xa6");
+    int lo = 0, hi = s.length();
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        if (f.getStringWidthFloat (s.substring (0, mid).trimEnd() + ell) <= w) lo = mid;
+        else hi = mid - 1;
+    }
+    return s.substring (0, lo).trimEnd() + ell;
+}
+
+// Splits one paragraph into at most `budget` lines, breaking only at spaces; the last line keeps the rest.
+static void sbWrapWords (const Font& f, const String& para, float w, int budget, StringArray& out)
+{
+    String rest = para.trim();
+    while (rest.isNotEmpty() && budget > 0)
+    {
+        if (budget == 1 || f.getStringWidthFloat (rest) <= w) {
+            out.add (rest);
+            return;
+        }
+        // "Group - Name": break after the dash so the second part keeps a line of its own
+        const int dash = rest.indexOf (" - ");
+        if (dash > 0) {
+            const String head = rest.substring (0, dash + 2);
+            if (! rest.substring (0, dash).containsChar (' ') || f.getStringWidthFloat (head) <= w) {
+                out.add (head);
+                rest = rest.substring (dash + 3).trimStart();
+                --budget;
+                continue;
+            }
+        }
+        // As many whole words as fit; a single word wider than the line takes the line alone
+        int breakAt = -1;
+        for (int i = rest.indexOfChar (' '); i > 0; i = rest.indexOfChar (i + 1, ' ')) {
+            if (f.getStringWidthFloat (rest.substring (0, i).trimEnd()) <= w) breakAt = i;
+            else break;
+        }
+        if (breakAt < 0)
+            breakAt = rest.indexOfChar (' ');
+        if (breakAt < 0) {
+            out.add (rest);
+            return;
+        }
+        out.add (rest.substring (0, breakAt).trimEnd());
+        rest = rest.substring (breakAt).trimStart();
+        --budget;
+    }
+}
+
+void SonoLookAndFeel::drawTextNoSqueeze (Graphics& g, const String& text, juce::Rectangle<int> area,
+                                         Justification just, int maxLines)
+{
+    if (area.getWidth() <= 0 || area.getHeight() <= 0 || text.isEmpty())
+        return;
+
+    const Font font = g.getCurrentFont();
+    const float w = (float) area.getWidth();
+    const float lineH = font.getHeight();
+    const bool hasBreaks = text.containsAnyOf ("\r\n");
+
+    if (! hasBreaks && (maxLines <= 1 || font.getStringWidthFloat (text.trim()) <= w)) {
+        g.drawText (sbElideEnd (font, text, w), area, just, true);
+        return;
+    }
+
+    StringArray paras;
+    if (hasBreaks) paras.addLines (text);
+    else           paras.add (text);
+
+    // Explicit line breaks are always kept; extra wrapped lines only where the height allows
+    const int fitLines = jmax (1, (int) ((float) area.getHeight() / lineH));
+    const int budget = jmax (jmax (1, jmin (maxLines, fitLines)), paras.size());
+
+    StringArray lines;
+    for (int i = 0; i < paras.size(); ++i) {
+        const int laterParas = paras.size() - i - 1;
+        sbWrapWords (font, paras[i], w, jmax (1, budget - lines.size() - laterParas), lines);
+    }
+
+    if (lines.size() == 1) {
+        g.drawText (sbElideEnd (font, lines[0], w), area, just, true);
+        return;
+    }
+
+    const float total = lineH * (float) lines.size();
+    float y = (float) area.getY();
+    if (just.testFlags (Justification::bottom))                 y = (float) area.getBottom() - total;
+    else if (! just.testFlags (Justification::top))             y += ((float) area.getHeight() - total) * 0.5f;
+
+    auto horiz = just.getOnlyHorizontalFlags();
+    if (horiz == 0) horiz = Justification::left;
+    const Justification lineJust (horiz | Justification::verticallyCentred);
+
+    for (const auto& line : lines) {
+        g.drawText (sbElideEnd (font, line, w), juce::Rectangle<float> ((float) area.getX(), y, w, lineH), lineJust, true);
+        y += lineH;
+    }
+}
+
 SonoLookAndFeel::SonoLookAndFeel(bool useUniversalFont) : mUseUniversalFont(useUniversalFont)
 {
     // setColour (mainBackgroundColourId, Colour::greyLevel (0.8f));
     //DBG("Sonolook and feel");
-    
+
+    // Any fitted text that is not handled here elides instead of compressing the glyphs
+    Font::setDefaultMinimumHorizontalScaleFactor (1.0f);
+
     setUsingNativeAlertWindows(true);
 
     //fontScale = 1.2; // 1.125;
@@ -618,11 +725,8 @@ void SonoLookAndFeel::drawTabButtonText (TabBarButton& button, Graphics& g, bool
     g.setFont (font);
     g.addTransform (t);
     
-    g.drawFittedText (button.getButtonText().trim(),
-                      0, 0, (int) length, (int) depth,
-                      Justification::centred,
-                      //jmax (1, ((int) depth) / 12), 0.5f);
-                      1, 0.5f);
+    drawTextNoSqueeze (g, button.getButtonText().trim(), { 0, 0, (int) length, (int) depth },
+                       Justification::centred, 1);
 }
 
 static Range<float> getBrightnessRange (const Image& im)
@@ -678,9 +782,9 @@ void SonoLookAndFeel::drawLabel (Graphics& g, Label& label)
         
         auto textArea = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
         
-        g.drawFittedText (label.getText(), textArea, label.getJustificationType(),
-                          jmax (1, (int) (textArea.getHeight() / font.getHeight())),
-                          label.getMinimumHorizontalScale());
+        // The label's minimum horizontal scale is ignored on purpose: text elides or wraps, never compresses
+        drawTextNoSqueeze (g, label.getText(), textArea, label.getJustificationType(),
+                           jmax (1, (int) (textArea.getHeight() / font.getHeight())));
         
         olcolor = label.findColour (Label::outlineColourId).withMultipliedAlpha (alpha);
     }
@@ -721,7 +825,7 @@ Label* SonoLookAndFeel::createSliderTextBox (Slider& slider)
     Label * lab = LookAndFeel_V4::createSliderTextBox(slider);
     lab->setKeyboardType(TextInputTarget::decimalKeyboard);
     lab->setFont(myFont.withHeight(14.0));
-    lab->setMinimumHorizontalScale(0.5);
+    lab->setMinimumHorizontalScale(1.0f);
     lab->setJustificationType(Justification::centredRight);
     return lab;
 }
@@ -760,12 +864,9 @@ void SonoLookAndFeel::drawButtonTextWithAlignment (Graphics& g, TextButton& butt
     const int leftIndent  = jmin (fontHeight, 2 + cornerSize / (button.isConnectedOnLeft() ? 4 : 2));
     const int rightIndent = jmin (fontHeight, 2 + cornerSize / (button.isConnectedOnRight() ? 4 : 2));
     
-    g.drawFittedText (button.getButtonText(),
-                      leftIndent,
-                      yIndent,
-                      button.getWidth() - leftIndent - rightIndent,
-                      button.getHeight() - yIndent * 2,
-                      textjust, 2, 0.7f);
+    drawTextNoSqueeze (g, button.getButtonText(),
+                       { leftIndent, yIndent, button.getWidth() - leftIndent - rightIndent, button.getHeight() - yIndent * 2 },
+                       textjust, 2);
 }
 
 
@@ -821,7 +922,7 @@ void SonoLookAndFeel::drawFileBrowserRow (Graphics& g, int width, int height,
 
         g.drawFittedText (filename,
                           x, 0, sizeX - x, height,
-                          Justification::centredLeft, 1);
+                          Justification::centredLeft, 1, 1.0f);
 
         g.setFont (myFont.withHeight(height * 0.5f));
         g.setColour (Colours::darkgrey);
@@ -830,18 +931,18 @@ void SonoLookAndFeel::drawFileBrowserRow (Graphics& g, int width, int height,
         {
             g.drawFittedText (fileSizeDescription,
                               sizeX, 0, dateX - sizeX - 8, height,
-                              Justification::centredRight, 1);
+                              Justification::centredRight, 1, 1.0f);
 
             g.drawFittedText (fileTimeDescription,
                               dateX, 0, width - 8 - dateX, height,
-                              Justification::centredRight, 1);
+                              Justification::centredRight, 1, 1.0f);
         }
     }
     else
     {
         g.drawFittedText (filename,
                           x, 0, width - x, height,
-                          Justification::centredLeft, 1);
+                          Justification::centredLeft, 1, 1.0f);
 
     }
 }
@@ -903,6 +1004,74 @@ void SonoLookAndFeel::layoutFileBrowserComponent (FileBrowserComponent& browserC
 Font SonoLookAndFeel::getComboBoxFont (ComboBox& box)
 {
     return { jmin (16.0f, (float) box.getHeight() * 0.9f) };
+}
+
+// Captioned combo box: caption line, value line under it, small arrow at the right of the value line.
+// Caption type and colour match the captioned buttons (drawDrawableButton, "leadText").
+static constexpr int kLeadCaptionH = 11;
+static constexpr int kLeadArrowW = 14;
+
+static juce::Rectangle<int> leadComboValueArea (int width, int height)
+{
+    const int valueH = jmin (22, jmax (12, height - kLeadCaptionH - 2));
+    const int top = jmax (1, (height - kLeadCaptionH - valueH) / 2);
+    return { 1, top + kLeadCaptionH, jmax (0, width - 1 - kLeadArrowW), valueH };
+}
+
+void SonoLookAndFeel::drawComboBox (Graphics& g, int width, int height, bool isButtonDown,
+                                    int buttonX, int buttonY, int buttonW, int buttonH, ComboBox& box)
+{
+    if (! box.getProperties().contains ("leadText")) {
+        LookAndFeel_V4::drawComboBox (g, width, height, isButtonDown, buttonX, buttonY, buttonW, buttonH, box);
+        return;
+    }
+
+    const auto bounds = juce::Rectangle<int> (0, 0, width, height).toFloat();
+    g.setColour (box.findColour (ComboBox::backgroundColourId));
+    g.fillRoundedRectangle (bounds, 3.0f);
+    g.setColour (box.findColour (ComboBox::outlineColourId));
+    g.drawRoundedRectangle (bounds.reduced (0.5f, 0.5f), 3.0f, 1.0f);
+
+    const auto value = leadComboValueArea (width, height);
+    const auto textColour = box.findColour (ComboBox::textColourId).withMultipliedAlpha (box.isEnabled() ? 1.0f : 0.4f);
+    g.setFont (Font (10.0f));
+    g.setColour (textColour.withMultipliedAlpha (0.6f));
+    g.drawText (box.getProperties()["leadText"].toString(), 6, value.getY() - kLeadCaptionH, jmax (0, width - 10), kLeadCaptionH,
+                Justification::centredLeft, false);
+
+    const float cx = (float) (width - 2 - kLeadArrowW / 2), cy = (float) value.getCentreY();
+    Path arrow;
+    arrow.startNewSubPath (cx - 4.0f, cy - 2.0f);
+    arrow.lineTo (cx, cy + 2.0f);
+    arrow.lineTo (cx + 4.0f, cy - 2.0f);
+    g.setColour (box.findColour (ComboBox::arrowColourId).withAlpha (box.isEnabled() ? 0.9f : 0.2f));
+    g.strokePath (arrow, PathStrokeType (1.5f));
+}
+
+void SonoLookAndFeel::positionComboBoxText (ComboBox& box, Label& label, Drawable* image)
+{
+    if (! box.getProperties().contains ("leadText")) {
+        LookAndFeel_V4::positionComboBoxText (box, label, image);
+        return;
+    }
+    label.setBounds (leadComboValueArea (box.getWidth(), box.getHeight()));
+    label.setBorderSize ({ 0, 5, 0, 2 });
+    label.setFont (Font (15.0f));
+}
+
+void SonoLookAndFeel::drawComboBoxTextWhenNothingSelected (Graphics& g, ComboBox& box, Label& label)
+{
+    if (! box.getProperties().contains ("leadText")) {
+        LookAndFeel_V4::drawComboBoxTextWhenNothingSelected (g, box, label);
+        return;
+    }
+    // Drawn where the value goes (the stock version assumes the label sits at the box origin)
+    g.setColour (findColour (ComboBox::textColourId).withMultipliedAlpha (0.5f));
+    const auto font = getLabelFont (label);
+    g.setFont (font);
+    const auto area = label.getBorderSize().subtractedFrom (label.getBounds());
+    drawTextNoSqueeze (g, box.getTextWhenNothingSelected(), area, label.getJustificationType(),
+                       jmax (1, (int) ((float) area.getHeight() / font.getHeight())));
 }
 
 Font SonoLookAndFeel::getPopupMenuFont()
@@ -981,10 +1150,9 @@ void SonoLookAndFeel::drawToggleButton (Graphics& g, ToggleButton& button,
 
     const int textX = (int) tickWidth + 10;
 
-    g.drawFittedText (button.getButtonText(),
-                      textX, 0,
-                      button.getWidth() - textX - 2, button.getHeight(),
-                      Justification::centredLeft, 10);
+    drawTextNoSqueeze (g, button.getButtonText(),
+                       { textX, 0, button.getWidth() - textX - 2, button.getHeight() },
+                       Justification::centredLeft, 10);
 }
 
 void SonoLookAndFeel::drawTickBox (Graphics& g, Component& component,
@@ -1361,24 +1529,21 @@ void SonoLookAndFeel::drawDrawableButton (Graphics& g, DrawableButton& button,
 
         if (button.getStyle() == DrawableButton::ImageAboveTextLabel) {
 
-            g.drawFittedText (button.getButtonText(),
-                              2, button.getHeight() - textH - 1,
-                              button.getWidth() - 4, textH,
-                              Justification::centred, 1);
+            drawTextNoSqueeze (g, button.getButtonText(),
+                               { 2, button.getHeight() - textH - 1, button.getWidth() - 4, textH },
+                               Justification::centred, 1);
         }
         else if (button.getStyle() == DrawableButton::ImageBelowTextLabel) {
-            g.drawFittedText (button.getButtonText(),
-                              2, 1,
-                              button.getWidth() - 4, textH,
-                              Justification::centred, 1);
+            drawTextNoSqueeze (g, button.getButtonText(),
+                               { 2, 1, button.getWidth() - 4, textH },
+                               Justification::centred, 1);
         }
         else if (button.getStyle() == DrawableButton::ImageRightOfTextLabel) {
             const bool leftAligned = drawableTextJustification.testFlags(Justification::left);
             const int lpad = leftAligned ? 6 : 2;   
-            g.drawFittedText (button.getButtonText(),
-                              lpad, 1,
-                              textW - (lpad - 2), button.getHeight() - 2,
-                              drawableTextJustification, leftAligned ? 1 : 2, leftAligned ? 1.0f : 0.6f);   // never squish the font
+            drawTextNoSqueeze (g, button.getButtonText(),
+                               { lpad, 1, textW - (lpad - 2), button.getHeight() - 2 },
+                               drawableTextJustification, leftAligned ? 1 : 2);
         }
         else if (button.getStyle() == DrawableButton::ImageLeftOfTextLabel && button.getProperties().contains ("leadText")) {
             // A small caption at the top right, the text under it, with no image.
@@ -1393,14 +1558,25 @@ void SonoLookAndFeel::drawDrawableButton (Graphics& g, DrawableButton& button,
             g.drawText (lead, 4, top, button.getWidth() - 10, captionH, Justification::centredRight, false);
             g.setFont (textFont);
             g.setColour (textColour);
-            g.drawFittedText (button.getButtonText(), 4, top + captionH, button.getWidth() - 10, textH,
-                              Justification::centredRight, 1, 0.8f);
+            // Too long: keep the part up to " › " (the channel numbers) and elide the names with "…"
+            String text = button.getButtonText();
+            const float tw = (float) (button.getWidth() - 10);
+            const String sep = String::fromUTF8 (" \xe2\x80\xba ");
+            if (textFont.getStringWidthFloat (text) > tw && text.contains (sep)) {
+                const String ell = String::fromUTF8 ("\xe2\x80\xa6");
+                const String head = text.upToFirstOccurrenceOf (sep, true, false);
+                String tail = text.fromFirstOccurrenceOf (sep, false, false);
+                while (tail.isNotEmpty() && textFont.getStringWidthFloat (head + tail + ell) > tw)
+                    tail = tail.dropLastCharacters (1);
+                text = head + tail.trimEnd() + ell;
+            }
+            drawTextNoSqueeze (g, text, { 4, top + captionH, button.getWidth() - 10, textH },
+                               Justification::centredRight, 1);
         }
         else if (button.getStyle() == DrawableButton::ImageLeftOfTextLabel) {
-            g.drawFittedText (button.getButtonText(),
-                              button.getWidth() - textW - 4 , 1,
-                              textW , button.getHeight() - 2,
-                              Justification::centred, 2, 0.6f);
+            drawTextNoSqueeze (g, button.getButtonText(),
+                               { button.getWidth() - textW - 4, 1, textW, button.getHeight() - 2 },
+                               Justification::centred, 2);
         }
     }
 }
@@ -1444,7 +1620,7 @@ Label* SonoBigTextLookAndFeel::createSliderTextBox (Slider& slider)
     lab->setKeyboardType(TextInputTarget::decimalKeyboard);
     lab->setFont(myFont.withHeight(maxSize));
     lab->setJustificationType(textJustification);
-    lab->setMinimumHorizontalScale(0.5);
+    lab->setMinimumHorizontalScale(1.0f);
 
     return lab;
 }
@@ -1486,10 +1662,9 @@ void SonoBigTextLookAndFeel::drawToggleButton (Graphics& g, ToggleButton& button
 
     const int textX = (int) tickWidth + 10;
 
-    g.drawFittedText (button.getButtonText(),
-                      textX, 0,
-                      button.getWidth() - textX - 2, button.getHeight(),
-                      Justification::centredLeft, 10);
+    drawTextNoSqueeze (g, button.getButtonText(),
+                       { textX, 0, button.getWidth() - textX - 2, button.getHeight() },
+                       Justification::centredLeft, 10);
 }
 
 
@@ -1513,7 +1688,7 @@ Label* SonoPanSliderLookAndFeel::createSliderTextBox (Slider& slider)
     lab->setKeyboardType(TextInputTarget::decimalKeyboard);
     lab->setFont(myFont.withHeight(maxSize));
     lab->setJustificationType(textJustification);
-    lab->setMinimumHorizontalScale(0.5);
+    lab->setMinimumHorizontalScale(1.0f);
 
     return lab;
 }
@@ -1549,6 +1724,83 @@ int SonoPanSliderLookAndFeel::getSliderPopupPlacement (Slider&)
     ;
 }
 
+
+void SonoPanSliderLookAndFeel::drawRotarySlider (Graphics& g, int x, int y, int width, int height, float sliderPos,
+                                                 const float rotaryStartAngle, const float rotaryEndAngle, Slider& slider)
+{
+    if (! slider.getProperties().contains ("sbKnob")) {
+        SonoLookAndFeel::drawRotarySlider (g, x, y, width, height, sliderPos, rotaryStartAngle, rotaryEndAngle, slider);
+        return;
+    }
+
+    // Caption, knob and value are stacked from the top, so knobs of different sizes line their captions up
+    const float captionH = 10.0f, valueH = 11.0f;
+    const bool labelled = height >= 50;
+    const float wanted = (float) (int) slider.getProperties().getWithDefault ("knobSize", 40);
+    auto area = juce::Rectangle<int> (x, y, width, height).toFloat();
+    const float d = labelled ? jmin (wanted, area.getWidth(), area.getHeight() - captionH - valueH)
+                             : jmin (wanted, area.getWidth(), area.getHeight());
+    if (d < 8.0f) return;
+
+    const float cx = area.getCentreX();
+    const float cy = labelled ? area.getY() + captionH + d * 0.5f : area.getCentreY();
+    const float k = d / 44.0f;
+    const float alpha = slider.isEnabled() ? 1.0f : 0.4f;
+    const float toAngle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
+    const bool fromCentre = slider.getProperties().contains ("fromCentre");
+    const float midAngle = (rotaryStartAngle + rotaryEndAngle) * 0.5f;
+    const auto at = [cx, cy] (float radius, float angle) {
+        return Point<float> (cx + radius * std::sin (angle), cy - radius * std::cos (angle));
+    };
+
+    // Tick ring; the centre tick of a centred knob is longer and brighter
+    for (int i = 0; i <= 10; ++i) {
+        const float a = rotaryStartAngle + (float) i * 0.1f * (rotaryEndAngle - rotaryStartAngle);
+        const bool mid = fromCentre && i == 5;
+        g.setColour (Colour (mid ? 0xff9a9a9a : 0xff5c5c5c).withMultipliedAlpha (alpha));
+        g.drawLine (Line<float> (at ((mid ? 15.6f : 18.2f) * k, a), at (21.2f * k, a)), mid ? 1.4f : 1.1f);
+    }
+
+    const float arcR = 15.4f * k;
+    const PathStrokeType arcStroke (jmax (1.5f, 2.6f * k), PathStrokeType::curved, PathStrokeType::rounded);
+    Path track;
+    track.addCentredArc (cx, cy, arcR, arcR, 0.0f, rotaryStartAngle, rotaryEndAngle, true);
+    g.setColour (Colour (0xff333333));
+    g.strokePath (track, arcStroke);
+
+    const float fromAngle = fromCentre ? midAngle : rotaryStartAngle;
+    if (std::abs (toAngle - fromAngle) > 0.01f) {
+        Path value;
+        value.addCentredArc (cx, cy, arcR, arcR, 0.0f, jmin (fromAngle, toAngle), jmax (fromAngle, toAngle), true);
+        g.setColour (slider.findColour (Slider::thumbColourId).withMultipliedAlpha (alpha));
+        g.strokePath (value, arcStroke);
+    }
+
+    const float bodyR = 11.2f * k;
+    g.setColour (Colours::black.withAlpha (0.55f));
+    g.fillEllipse (cx - bodyR, cy - bodyR + 0.8f, bodyR * 2.0f, bodyR * 2.0f);
+    g.setGradientFill (ColourGradient (Colour (0xff626262), cx - bodyR * 0.2f, cy - bodyR * 0.36f,
+                                       Colour (0xff232323), cx + bodyR, cy + bodyR, true));
+    g.fillEllipse (cx - bodyR, cy - bodyR, bodyR * 2.0f, bodyR * 2.0f);
+    g.setColour (Colour (0xff0d0d0d));
+    g.drawEllipse (cx - bodyR, cy - bodyR, bodyR * 2.0f, bodyR * 2.0f, 1.0f);
+
+    const float dotR = jmax (1.4f, 1.9f * k);
+    const auto dot = at (7.4f * k, toAngle);
+    g.setColour (Colour (0xffeafffd).withMultipliedAlpha (alpha));
+    g.fillEllipse (dot.x - dotR, dot.y - dotR, dotR * 2.0f, dotR * 2.0f);
+
+    if (labelled) {
+        g.setFont (Font (9.5f * fontScale));
+        g.setColour (Colour (0xff9aa5a5).withMultipliedAlpha (alpha));
+        g.drawText (slider.getProperties()["knobCaption"].toString(),
+                    juce::Rectangle<float> (area.getX(), area.getY(), area.getWidth(), captionH), Justification::centred, false);
+        g.setFont (Font (10.0f * fontScale));
+        g.setColour (Colour (0xff8f9a9a).withMultipliedAlpha (alpha));
+        g.drawText (slider.getTextFromValue (slider.getValue()),
+                    juce::Rectangle<float> (area.getX(), cy + d * 0.5f, area.getWidth(), valueH), Justification::centred, false);
+    }
+}
 
 void SonoPanSliderLookAndFeel::drawLinearSlider (Graphics& g, int x, int y, int width, int height,
                                        float sliderPos,

@@ -170,17 +170,20 @@ const std::vector<FormSpec>& formSpecs() {
         { 0, "stage_genre",        "Genre",                             2, "Any,Rock/Pop,Jazz/Blues,Funk/Soul/R&B,Country/Folk,Classical/Choral,Electronic,Worship" },
         { 0, "stage_description",  "Description",                       0, nullptr },
         { 0, "stage_names",        "Player names in the listing",       2, "Automatic,Show,Hide" },
-        { 0, nullptr,              "Audio",                             0, nullptr },
-        { 0, "samplerate",         "Sample rate (Hz)",                  2, "44100,48000,88200,96000" },
-        { 0, "blocksize",          "Block size (samples)",              2, "16,32,64,128,256" },   // 16 added (experiment)
-        { 0, nullptr,              "Logging",                           0, nullptr },
-        { 0, "log_file",           "Log file",                     0, nullptr },
-        { 0, nullptr,              "Web page",                          0, nullptr },   
-        { 0, "web_port",           "Web page port",    0, nullptr },
-        { 0, "web_password",       "Web password", 3, nullptr },
-        { 0, "geoip",              "Player locations", 1, nullptr },   
 
-        { 1, nullptr,              "Fan-out & sink buffers",            0, nullptr },
+        // The right column: the ordinary sections first, the advanced group last.
+        { 1, nullptr,              "Audio",                             0, nullptr },
+        { 1, "samplerate",         "Sample rate (Hz)",                  2, "44100,48000,88200,96000" },
+        { 1, "blocksize",          "Block size (samples)",              2, "16,32,64,128,256" },   // 16 added (experiment)
+        { 1, nullptr,              "Logging",                           0, nullptr },
+        { 1, "log_file",           "Log file",                     0, nullptr },
+        { 1, nullptr,              "Web page",                          0, nullptr },   
+        { 1, "web_port",           "Web page port",    0, nullptr },
+        { 1, "web_password",       "Web password", 3, nullptr },
+        { 1, "geoip",              "Player locations", 1, nullptr },   
+
+        { 1, nullptr,              "For advanced users only",           0, nullptr,
+          "Change these only if you know why. The defaults are right for almost every stage." },
         // No WAN sink buffer row: WAN players start at the lowest hold and are measured.
         { 1, "sink_buffer_lan_ms", "LAN sink buffer (ms)", 0, nullptr },   // 
         { 1, "pace_spread",        "Pacer spread (%)",  0, nullptr },
@@ -363,6 +366,20 @@ std::string validate(const HubLaunchArgs& a) {
     if (a.aooSlackBlocks < 0 || a.aooSlackBlocks > 64) return "aoo_slack_blocks must be 0..64";
     if (a.aooBlockqExtra < 1 || a.aooBlockqExtra > 256) return "aoo_blockq_extra must be 1..256";
     return {};
+}
+
+bool saveStagePassword(const juce::File& f, HubLaunchArgs& live, const std::string& password, std::string& err) {
+    const std::string pw = juce::String::fromUTF8(password.c_str()).trim().toStdString();
+    HubLaunchArgs m = live;   // no usable file yet: save what is running
+    if (f.existsAsFile()) {
+        HubLaunchArgs fileModel;
+        std::string e;
+        if (load(f, fileModel, e)) { applyDefaults(fileModel); m = fileModel; }
+    }
+    m.groupPassword = pw;
+    if (!save(f, m, err)) return false;
+    live.groupPassword = pw;
+    return true;
 }
 
 std::vector<std::string> diffKeys(const HubLaunchArgs& x, const HubLaunchArgs& y) {

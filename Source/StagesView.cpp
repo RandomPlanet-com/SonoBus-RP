@@ -13,14 +13,17 @@ namespace {
 
 const char* const kDirectoryBase = "https://stages.randomplanet.com/api/1/";
 
-const juce::Colour kBg(0xff1a1a1a), kHeaderBg(0xff141414), kSel(0xff17302f), kSep(0xff262626), kDetailBg(0xff132524);
-const juce::Colour kText(0xffe4e4e4), kDim(0xff8f8f8f), kAccent(0xff3fb8af);
+const juce::Colour kBg(0xff1a1a1a), kHeaderBg(0xff141414), kSel(0xff1f5c58), kSep(0xff262626), kDetailBg(0xff191d1d);
+const juce::Colour kOpenRow(0xff1e2323), kOpenHere(0xff1d3231), kPanelLine(0xff2a3232), kPanelHead(0xff7f8a8a);
+const juce::Colour kText(0xffe4e4e4), kDim(0xff8f8f8f), kSelDim(0xffd5e6e4), kAccent(0xff3fb8af);
 const juce::Colour kGood(0xff6abe4f), kWarn(0xffd6b03e), kBad(0xffee6666);
+const juce::Colour kHere(0xff5fd26b), kHereEdge(0xff2f6a36), kPrivateBar(0xff8a8a8a);
 
-enum { colOpen = 1, colLock, colStage, colCity, colCountry, colGenre, colPlayers, colPing, colVersion, colAbout, colJoin };
+enum { colOpen = 1, colStage, colAbout, colCity, colCountry, colGenre, colPlayers, colPing, colVersion };
 
 const int kIndent = 22;
 const int kRowHeight = 28;
+const int kPanelIndent = 30;   // where the opened part of a stage starts
 
 // A list nobody touches slows down and stops pinging.
 const int kRefreshMs = 30000, kRetryMs = 15000, kIdleRefreshMs = 120000, kIdleAfterMs = 120000;
@@ -47,8 +50,29 @@ int compareVersions(const juce::String& a, const juce::String& b) {
 juce::String listedFor(juce::int64 since) {
     const juce::int64 s = juce::Time::currentTimeMillis() / 1000 - since;
     if (since <= 0 || s < 3600) return TRANS("under an hour");
+    if (s < 7200) return "1 " + TRANS("hour");
     if (s < 48 * 3600) return juce::String(s / 3600) + " " + TRANS("hours");
     return juce::String(s / 86400) + " " + TRANS("days");
+}
+
+// "6 min", "1 h 12 min"; "-" when the stage did not say
+juce::String onStageFor(int seconds) {
+    if (seconds < 0) return "-";
+    const int m = seconds / 60;
+    if (m < 1) return TRANS("under 1 min");
+    if (m < 60) return juce::String(m) + " min";
+    return juce::String(m / 60) + " h " + juce::String(m % 60).paddedLeft('0', 2) + " min";
+}
+
+int tagWidth(const juce::String& t, float scale) { return juce::Font(11.0f * scale).getStringWidth(t) + 16; }
+
+// A small outlined tag after a name ("you are here", "you").
+void drawTag(juce::Graphics& g, juce::Rectangle<int> r, const juce::String& t, float scale) {
+    g.setColour(kHereEdge);
+    g.drawRoundedRectangle(r.toFloat().reduced(0.5f), (float) r.getHeight() * 0.5f, 1.0f);
+    g.setColour(kHere);
+    g.setFont(juce::Font(11.0f * scale));
+    g.drawText(t, r, juce::Justification::centred, false);
 }
 
 bool isFull(const StagesView::Stage& s) { return s.maxPlayers > 0 && s.count >= s.maxPlayers; }
@@ -188,6 +212,7 @@ private:
         }
         std::vector<Stage> list;
         juce::String newest;
+        const juce::int64 generated = (juce::int64) v["generated"];
         for (const auto& e : *arr) {
             if (list.size() >= 2000) break;
             Stage s;
@@ -218,6 +243,20 @@ private:
                     if (s.instruments.size() >= s.players.size()) break;
                     s.instruments.add(p.toString().substring(0, 24));
                 }
+            // Per player, as the stage last reported it. Older stages and directories send none of these.
+            auto numbers = [&](const char* key, juce::Array<int>& out) {
+                if (const auto* a = e[juce::Identifier(key)].getArray())
+                    for (const auto& x : *a) {
+                        if (out.size() >= s.players.size()) break;
+                        out.add((x.isInt() || x.isInt64() || x.isDouble()) ? (int) juce::jlimit(-1.0, 1.0e9, (double) x) : -1);
+                    }
+            };
+            numbers("on_stage_s", s.playerSeconds);
+            numbers("ping_ms", s.playerPing);
+            numbers("channels", s.playerChannels);
+            const juce::int64 reportAge = juce::jlimit((juce::int64) 0, (juce::int64) 600, generated - (juce::int64) e["updated"]);
+            if (generated > 0 && (juce::int64) e["updated"] > 0)
+                for (auto& sec : s.playerSeconds) if (sec >= 0) sec += (int) reportAge;
             if (s.test) {   // made-up entries carry a made-up ping
                 const juce::var sp = e["sim_ping_ms"];
                 s.pingMs = (sp.isInt() || sp.isInt64() || sp.isDouble()) ? (float) (double) sp : -1.0f;
@@ -313,11 +352,11 @@ private:
 };
 
 //==============================================================================
-// One stage = one row. Opening it shows who is playing, one player per row.
+// One stage = one row. A click selects it, a double-click connects. Opening it shows who is playing.
 class StagesView::StageItem : public juce::TreeViewItem
 {
 public:
-    StageItem(StagesView& o, const Stage& s) : owner(o), stage(s) {}
+    StageItem(StagesView& o, const Stage& s) : owner(o), stage(s) { setDrawsInLeftMargin(true); }
 
     bool mightContainSubItems() override { return true; }
     int getItemHeight() const override { return kRowHeight; }
@@ -336,9 +375,20 @@ public:
 
     void paintItem(juce::Graphics& g, int width, int height) override {
         const int ox = getItemPosition(false).getX();
-        if (isSelected()) { g.setColour(kSel); g.fillRect(0, 0, width, height); }
-        g.setColour(kSep);
-        g.fillRect(0, height - 1, width, 1);
+        const bool here = owner.isHere(stage), sel = isSelected(), open = isOpen();
+        if (sel) {
+            g.setColour(kSel);
+            g.fillRect(-ox, 0, width + ox, height);
+            g.setColour(kAccent);
+            g.fillRect(-ox, 0, 3, height);
+        } else if (open) {
+            g.setColour(here ? kOpenHere : kOpenRow);
+            g.fillRect(-ox, 0, width + ox, height);
+        }
+        if (! open) {
+            g.setColour(kSep);
+            g.fillRect(-ox, height - 1, width + ox, 1);
+        }
 
         const bool full = isFull(stage);
         const float sc = fontScale();
@@ -346,14 +396,17 @@ public:
         auto cell = [&](int col) { return owner.columnRect(col).translated(-ox, 0).withY(0).withHeight(height).reduced(5, 0); };
         auto text = [&](int col, const juce::String& t, juce::Colour c) {
             if (cell(col).getWidth() < 8) return;   // column folded away
+            if (sel && c == kDim) c = kSelDim;
             g.setColour(full ? c.withMultipliedAlpha(0.55f) : c);
             g.setFont(plain);
             g.drawText(t, cell(col), juce::Justification::centredLeft, true);
         };
 
-        if (stage.locked) drawLock(g, cell(colLock), full ? kDim.withMultipliedAlpha(0.6f) : kWarn.withMultipliedAlpha(0.85f));
-
         auto nameArea = cell(colStage);
+        if (stage.locked) {
+            drawLock(g, nameArea.removeFromLeft(14), full ? kDim.withMultipliedAlpha(0.6f) : kWarn.withMultipliedAlpha(0.85f));
+            nameArea.removeFromLeft(5);
+        }
         if (stage.test) {
             const auto tag = nameArea.removeFromRight(36).withSizeKeepingCentre(32, 15);
             g.setColour(kWarn.withAlpha(0.85f));
@@ -361,12 +414,22 @@ public:
             g.setFont(juce::Font(10.0f * sc));
             g.drawText("TEST", tag, juce::Justification::centred, false);
         }
+        if (here) {
+            const juce::String t = TRANS("you are here");
+            const int tw = tagWidth(t, sc);
+            if (nameArea.getWidth() >= tw + 60) {
+                const int nameW = juce::jmin(bold.getStringWidth(stage.name) + 2, nameArea.getWidth() - tw - 8);
+                drawTag(g, juce::Rectangle<int>(nameArea.getX() + nameW + 8, 0, tw, height).withSizeKeepingCentre(tw, 17), t, sc);
+                nameArea.setWidth(nameW);
+            }
+        }
         g.setColour(full ? kText.withMultipliedAlpha(0.55f) : juce::Colours::white);
         g.setFont(bold);
         g.drawText(stage.name, nameArea, juce::Justification::centredLeft, true);
 
+        text(colAbout, stage.about, kDim);
         text(colCity, stage.city, kText);
-        text(colCountry, stage.country, kDim);
+        text(colCountry, stage.country, kText);
         text(colGenre, stage.genre, kText);
         text(colPlayers, stage.maxPlayers > 0 ? juce::String(stage.count) + " / " + juce::String(stage.maxPlayers) : juce::String(stage.count), kText);
 
@@ -385,105 +448,128 @@ public:
                 g.drawText(TRANS("older"), r, juce::Justification::centredLeft, true);
             }
         }
-        text(colAbout, stage.about, kDim);
-
-        const auto button = joinRect(ox, height).toFloat();
-        if (owner.isHere(stage)) {
-            g.setColour(kAccent);
-            g.setFont(juce::Font(12.5f * sc, juce::Font::bold));
-            g.drawText(TRANS("You are here"), button.toNearestInt().expanded(6, 0), juce::Justification::centred, false);
-            return;
-        }
-        const bool can = ! full;
-        const juce::String label = full ? TRANS("Full") : stage.locked ? TRANS("Password") : TRANS("Join");
-        if (can && ! stage.locked) { g.setColour(juce::Colour(0xff1d3b3a)); g.fillRoundedRectangle(button, 4.0f); }
-        g.setColour(! can ? juce::Colour(0xff3a3a3a) : stage.locked ? juce::Colour(0xff6a6a6a) : kAccent);
-        g.drawRoundedRectangle(button, 4.0f, 1.0f);
-        g.setColour(! can ? juce::Colour(0xff6a6a6a) : kText);
-        g.setFont(juce::Font(13.0f * sc));
-        g.drawText(label, button.toNearestInt(), juce::Justification::centred, false);
     }
 
-    void itemClicked(const juce::MouseEvent& e) override {
-        if (joinRect(getItemPosition(false).getX(), kRowHeight).expanded(2).contains(e.getPosition())) join();
-    }
-    void itemDoubleClicked(const juce::MouseEvent& e) override {
-        if (! joinRect(getItemPosition(false).getX(), kRowHeight).expanded(2).contains(e.getPosition())) join();
+    void itemDoubleClicked(const juce::MouseEvent&) override {
+        StagesView& o = owner;
+        const Stage s = stage;   // the row may be rebuilt while a dialog is open
+        o.requestJoin(s);
     }
     void itemOpennessChanged(bool open) override {
         if (owner.mRebuilding) return;
         if (open) owner.mOpen.insert(stage.id); else owner.mOpen.erase(stage.id);
     }
     void itemSelectionChanged(bool selected) override {
-        if (selected && ! owner.mRebuilding) owner.mSelectedId = stage.id;
+        if (owner.mRebuilding) return;
+        if (selected) owner.mSelectedId = stage.id;
+        else if (owner.mSelectedId == stage.id) owner.mSelectedId.clear();
+        owner.updateConnect();
     }
 
 private:
-    juce::Rectangle<int> joinRect(int ox, int height) const {
-        return owner.columnRect(colJoin).translated(-ox, 0).withY(0).withHeight(height).reduced(8, 4);
-    }
-    void join() {
-        StagesView& o = owner;
-        const Stage s = stage;   // the row may be rebuilt while a dialog is open
-        o.requestJoin(s);
-    }
-
     StagesView& owner;
     Stage stage;
 };
 
-// The opened part of a row: one row per player, then the limits and the invite link.
+// The opened part of a stage: a small table of who is playing, then how long it has been listed and the invite link.
 class StagesView::SubItem : public juce::TreeViewItem
 {
 public:
-    enum Kind { player, note, info };
+    enum Kind { header, player, note, info };
 
-    SubItem(StagesView& o, const Stage& s, Kind k, const juce::String& t = {}, const juce::String& t2 = {})
-        : owner(o), stage(s), kind(k), text(t), text2(t2) {}
+    SubItem(StagesView& o, const Stage& s, Kind k, int playerIndex = -1, const juce::String& t = {})
+        : owner(o), stage(s), kind(k), index(playerIndex), text(t) { setDrawsInLeftMargin(true); }
 
     bool mightContainSubItems() override { return false; }
     bool canBeSelected() const override { return false; }
-    juce::String getUniqueName() const override { return stage.id + "/" + juce::String((int) kind) + "/" + text; }
+    juce::String getUniqueName() const override { return stage.id + "/" + juce::String((int) kind) + "/" + juce::String(index); }
     void paintHorizontalConnectingLine(juce::Graphics&, const juce::Line<float>&) override {}
     void paintVerticalConnectingLine(juce::Graphics&, const juce::Line<float>&) override {}
-    int getItemHeight() const override { return kind == info ? 28 : 24; }
+    int getItemHeight() const override { return kind == info ? 32 : kind == header ? 24 : 25; }
 
     void paintItem(juce::Graphics& g, int width, int height) override {
         const int ox = getItemPosition(false).getX();
+        const int full = width + ox;   // the whole row, from the left edge of the list
         g.setColour(kDetailBg);
-        g.fillRect(0, 0, width, height);
+        g.fillRect(-ox, 0, full, height);
+
+        const bool here = owner.isHere(stage);
+        const bool hidden = stage.players.isEmpty() && stage.count > 0;
+        g.setColour(here ? kHere : hidden ? kPrivateBar : kAccent);
+        g.fillRect(kPanelIndent - ox, 0, 3, kind == info ? height - 8 : height);
+
         const float sc = fontScale();
         const juce::Font f(13.5f * sc);
-        g.setFont(f);
-        const int x = owner.columnRect(colStage).getX() - ox + 5;
+        const PlayerColumns c = owner.playerColumns(full);
+        auto at = [&](int x, int w) { return juce::Rectangle<int>(x - ox, 0, juce::jmax(0, w), height); };
+        const auto left = juce::Justification::centredLeft, right = juce::Justification::centredRight;
+
+        if (kind == header) {
+            g.setColour(kPanelHead);
+            g.setFont(juce::Font(10.5f * sc));
+            g.drawText(TRANS("Player").toUpperCase(), at(c.name, c.nameW), left, true);
+            if (c.instW > 0) g.drawText(TRANS("Instrument").toUpperCase(), at(c.inst, c.instW), left, true);
+            g.drawText(TRANS("On stage").toUpperCase(), at(c.since, c.numW), right, true);
+            g.drawText(TRANS("Their ping").toUpperCase(), at(c.ping, c.numW), right, true);
+            g.drawText(TRANS("Sending").toUpperCase(), at(c.send, c.numW), right, true);
+            g.setColour(kPanelLine);
+            g.fillRect(c.name - ox, height - 1, c.right - c.name, 1);
+            return;
+        }
         if (kind == player) {
-            const auto city = owner.columnRect(colCity);
-            const int nameW = city.isEmpty() ? width - x - 12 : city.getX() - ox - x - 6;
-            g.setColour(kText.withMultipliedAlpha(0.92f));
-            juce::String shown = text;
-            if (city.isEmpty() && text2.isNotEmpty()) shown << dot() << text2;
-            g.drawText(shown, x, 0, juce::jmax(40, nameW), height, juce::Justification::centredLeft, true);
-            if (! city.isEmpty() && text2.isNotEmpty()) {
-                g.setColour(kDim);
-                g.drawText(text2, city.getX() - ox + 5, 0, juce::jmax(40, width - (city.getX() - ox) - 16), height, juce::Justification::centredLeft, true);
+            const juce::String name = stage.players[index];
+            auto nameArea = at(c.name, c.nameW);
+            const juce::String me = owner.stageUserName ? owner.stageUserName() : juce::String();
+            if (here && me.isNotEmpty() && name == me.substring(0, 30)) {   // the stage lists the first 30 characters
+                const juce::String t = TRANS("you");
+                const int tw = tagWidth(t, sc);
+                if (nameArea.getWidth() >= tw + 50) {
+                    const int nameW = juce::jmin(f.getStringWidth(name) + 2, nameArea.getWidth() - tw - 8);
+                    drawTag(g, juce::Rectangle<int>(nameArea.getX() + nameW + 8, 0, tw, height).withSizeKeepingCentre(tw, 16), t, sc);
+                    nameArea.setWidth(nameW);
+                }
+            }
+            g.setFont(f);
+            g.setColour(kText);
+            g.drawText(name, nameArea, left, true);
+            if (c.instW > 0) {
+                const bool given = index < stage.instruments.size();
+                const juce::String inst = given ? stage.instruments[index] : juce::String("-");
+                g.setColour(inst.isEmpty() || ! given ? kDim : kText.withMultipliedAlpha(0.85f));
+                g.drawText(inst.isEmpty() ? TRANS("not set") : inst, at(c.inst, c.instW), left, true);
+            }
+            const int secs = index < stage.playerSeconds.size() ? stage.playerSeconds[index] : -1;
+            g.setColour(secs >= 0 ? kText : kDim);
+            g.drawText(onStageFor(secs), at(c.since, c.numW), right, true);
+            const int ping = index < stage.playerPing.size() ? stage.playerPing[index] : -1;
+            g.setColour(pingColour(ping >= 0 ? (float) ping : -1.0f));
+            g.drawText(ping >= 0 ? juce::String(ping) + " ms" : juce::String("-"), at(c.ping, c.numW), right, true);
+            const int ch = index < stage.playerChannels.size() ? stage.playerChannels[index] : 0;
+            g.setColour(kDim);
+            g.drawText(ch > 0 ? juce::String(ch) + " ch" : juce::String("-"), at(c.send, c.numW), right, true);
+            if (index + 1 < stage.players.size()) {
+                g.setColour(kPanelLine.withMultipliedAlpha(0.7f));
+                g.fillRect(c.name - ox, height - 1, c.right - c.name, 1);
             }
             return;
         }
+        g.setFont(f);
         if (kind == note) {
             g.setColour(kDim);
-            g.drawText(text, x, 0, juce::jmax(60, width - x - 12), height, juce::Justification::centredLeft, true);
+            g.drawText(text, c.name - ox, 0, juce::jmax(60, full - c.name - 12), height, left, true);
             return;
         }
         g.setColour(kSep);
-        g.fillRect(0, height - 1, width, 1);
-        const juce::String limits = (stage.maxChannels > 0 ? TRANS("Up to") + " " + juce::String(stage.maxChannels) + " " + TRANS("channels per player") + dot() : juce::String())
-                                  + TRANS("listed for") + " " + listedFor(stage.since);
+        g.fillRect(-ox, height - 1, full, 1);
+        const juce::Font mf(12.5f * sc);
+        g.setFont(mf);
+        const juce::String listed = TRANS("Listed for") + " " + listedFor(stage.since);
         g.setColour(kDim);
-        g.drawText(limits, x, 0, juce::jmax(60, width - x - 12), height - 2, juce::Justification::centredLeft, true);
+        g.drawText(listed, c.name - ox, 0, juce::jmax(60, full - c.name - 12), height - 8, left, true);
         const juce::String linkText = stage.test ? TRANS("Made-up test stage: it cannot be joined.") : TRANS("Copy invite link");
-        link = juce::Rectangle<int>(x + f.getStringWidth(limits) + 18, 0, f.getStringWidth(linkText) + 6, height - 2);
+        link = juce::Rectangle<int>(c.name - ox + mf.getStringWidth(listed) + 16, 0, mf.getStringWidth(linkText) + 6, height - 8);
         g.setColour(stage.test ? kWarn.withMultipliedAlpha(0.8f) : kAccent);
-        g.drawText(linkText, link, juce::Justification::centredLeft, true);
+        g.drawText(linkText, link, left, true);
     }
 
     void itemClicked(const juce::MouseEvent& e) override {
@@ -497,7 +583,8 @@ private:
     StagesView& owner;
     Stage stage;
     Kind kind;
-    juce::String text, text2;
+    int index;
+    juce::String text;
     juce::Rectangle<int> link;
 };
 
@@ -544,20 +631,40 @@ StagesView::StagesView()
     mStatus.setColour(juce::Label::textColourId, kDim);
     addAndMakeVisible(mStatus);
 
+    // One Connect button for the selected row, top right.
+    mConnect.setButtonText(TRANS("Connect"));
+    mConnect.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1f8f86));
+    mConnect.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    mConnect.onClick = [this] { connectSelected(); };
+    mConnect.setEnabled(false);
+    addAndMakeVisible(mConnect);
+    mSelected.setJustificationType(juce::Justification::centredRight);
+    mSelected.setFont(juce::Font(14.0f * fontScale()));
+    mSelected.setColour(juce::Label::textColourId, juce::Colour(0xffcfcfcf));
+    mSelected.setMinimumHorizontalScale(1.0f);
+    addAndMakeVisible(mSelected);
+    mHint.setJustificationType(juce::Justification::centredRight);
+    mHint.setFont(juce::Font(12.5f * fontScale()));
+    mHint.setColour(juce::Label::textColourId, kDim);
+    mHint.setText(TRANS("Double-click a stage to connect"), juce::dontSendNotification);
+    addAndMakeVisible(mHint);
+    mNotice.setJustificationType(juce::Justification::centredLeft);
+    mNotice.setFont(juce::Font(14.0f * fontScale()));
+    mNotice.setColour(juce::Label::textColourId, kWarn);
+    mNotice.setMinimumHorizontalScale(1.0f);
+    addAndMakeVisible(mNotice);
+
     const int fixed = juce::TableHeaderComponent::visible;
-    const int sortOnly = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::sortable;
-    const int normal = sortOnly | juce::TableHeaderComponent::resizable;
+    const int normal = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::sortable | juce::TableHeaderComponent::resizable;
     mHeader.addColumn({}, colOpen, kIndent, kIndent, kIndent, fixed);
-    mHeader.addColumn({}, colLock, 28, 28, 28, sortOnly);
-    mHeader.addColumn(TRANS("Stage"), colStage, 240, 120, -1, normal);
-    mHeader.addColumn(TRANS("City"), colCity, 140, 70, -1, normal);
+    mHeader.addColumn(TRANS("Stage"), colStage, 280, 130, -1, normal);
+    mHeader.addColumn(TRANS("About"), colAbout, 300, 80, -1, normal);
+    mHeader.addColumn(TRANS("City"), colCity, 150, 70, -1, normal);
     mHeader.addColumn(TRANS("Country"), colCountry, 80, 60, -1, normal);
     mHeader.addColumn(TRANS("Genre"), colGenre, 130, 70, -1, normal);
     mHeader.addColumn(TRANS("Players"), colPlayers, 84, 66, -1, normal);
     mHeader.addColumn(TRANS("Ping"), colPing, 90, 66, -1, normal);
     mHeader.addColumn(TRANS("Version"), colVersion, 140, 80, -1, normal);
-    mHeader.addColumn(TRANS("About"), colAbout, 300, 80, -1, normal);
-    mHeader.addColumn({}, colJoin, 104, 104, 104, fixed);
     mHeader.setStretchToFitActive(true);
     mHeader.setPopupMenuActive(false);
     mHeader.setColour(juce::TableHeaderComponent::backgroundColourId, kHeaderBg);
@@ -709,8 +816,11 @@ void StagesView::resized()
     mHeader.setColumnVisible(colGenre, w >= 680);
     mHeader.setColumnVisible(colCity, w >= 560);
 
+    mConnectRow = r.removeFromTop(46);
+    layoutConnectRow();
+
     const bool oneRow = w >= (mKind.isVisible() ? 1400 : 1180);
-    auto top = r.removeFromTop(oneRow ? 48 : 84).reduced(10, 9);
+    auto top = r.removeFromTop(oneRow ? 44 : 80).reduced(10, 7);
     mCountry.setVisible(w >= 620);
     if (oneRow) {
         mSearch.setBounds(top.removeFromLeft(230));  top.removeFromLeft(8);
@@ -755,7 +865,78 @@ void StagesView::timerCallback()
         mWorker->idle = true;
     }
     updateStatus();
+    if (mNotice.getText().isNotEmpty() && juce::Time::getMillisecondCounter() - mNoticeAt > 60000u) showNotice({});
+    const juce::String here = currentStage ? currentStage() : juce::String();
+    if (here != mHereShown) {   // joined or left: the tags and the Connect button follow
+        mHereShown = here;
+        mTree.repaint();
+    }
+    updateConnect();
     repaint(mFooter);
+}
+
+// The columns of the small player table, as x positions from the left edge of the list.
+StagesView::PlayerColumns StagesView::playerColumns(int fullWidth) const
+{
+    const float sc = fontScale();
+    const int gap = 20;
+    PlayerColumns c;
+    c.name = kPanelIndent + 3 + 14;
+    const int avail = juce::jmax(160, fullWidth - c.name - 14);
+    c.numW = juce::roundToInt(84.0f * sc);
+    int flex = avail - 3 * (c.numW + gap);
+    if (flex < 110) {   // a narrow window squeezes the number columns first
+        c.numW = juce::jmax(44, (avail - 110) / 3 - gap);
+        flex = avail - 3 * (c.numW + gap);
+    }
+    const int nameMax = juce::roundToInt(250.0f * sc), instMax = juce::roundToInt(200.0f * sc);
+    c.nameW = juce::jlimit(90, juce::jmax(90, nameMax), flex * 55 / 100);
+    c.instW = juce::jlimit(0, instMax, flex - c.nameW - gap);
+    if (c.instW < 60) {   // no room for the instrument
+        c.instW = 0;
+        c.nameW = juce::jlimit(90, juce::jmax(90, nameMax), flex);
+    }
+    c.inst = c.name + c.nameW + gap;
+    c.since = c.instW > 0 ? c.inst + c.instW + gap : c.inst;
+    c.ping = c.since + c.numW + gap;
+    c.send = c.ping + c.numW + gap;
+    c.right = c.send + c.numW;
+    return c;
+}
+
+void StagesView::layoutConnectRow()
+{
+    auto bar = mConnectRow.reduced(10, 7);
+    if (bar.isEmpty()) return;
+    mConnect.setBounds(bar.removeFromRight(juce::roundToInt(130.0f * fontScale())));
+    bar.removeFromRight(12);
+    const int selW = mSelected.getText().isEmpty() ? 0
+                   : juce::jmin(juce::jmax(0, bar.getWidth() - 10), mSelected.getFont().getStringWidth(mSelected.getText()) + 16);
+    mSelected.setBounds(bar.removeFromRight(selW));
+    const int hintW = mHint.getFont().getStringWidth(mHint.getText()) + 16;
+    const bool showHint = bar.getWidth() >= hintW + (mNotice.getText().isNotEmpty() ? 420 : 8);   // the notice comes first
+    mHint.setVisible(showHint);
+    if (showHint) { bar.removeFromRight(6); mHint.setBounds(bar.removeFromRight(hintW)); }
+    mNotice.setBounds(bar);
+}
+
+// Connect follows the selected row: off with nothing selected and on the stage this player is on.
+void StagesView::updateConnect()
+{
+    const Stage* sel = nullptr;
+    for (const auto& s : mRows) if (s.id == mSelectedId) { sel = &s; break; }
+    const juce::String t = sel != nullptr ? TRANS("Selected:") + " " + sel->name : juce::String();
+    if (mSelected.getText() != t) {
+        mSelected.setText(t, juce::dontSendNotification);
+        layoutConnectRow();
+    }
+    mConnect.setEnabled(sel != nullptr && ! isHere(*sel));
+}
+
+void StagesView::connectSelected()
+{
+    for (const auto& s : mRows)
+        if (s.id == mSelectedId) { const Stage copy = s; touched(); requestJoin(copy); return; }
 }
 
 void StagesView::handleAsyncUpdate()
@@ -833,7 +1014,6 @@ void StagesView::rebuild()
         auto pingKey = [](const Stage& s) { return s.pingMs < 0.0f ? 1.0e9 : (double) s.pingMs; };
         int c = 0;
         switch (col) {
-            case colLock:    c = num(a.locked ? 0 : 1, b.locked ? 0 : 1); break;
             case colStage:   c = a.name.compareNatural(b.name); break;
             case colCity:    c = a.city.compareNatural(b.city); break;
             case colCountry: c = a.country.compareNatural(b.country); break;
@@ -858,18 +1038,29 @@ void StagesView::rebuild()
     mRoot->clearSubItems();
     for (const auto& s : rows) {
         auto* item = new StageItem(*this, s);
-        for (int i = 0; i < s.players.size(); ++i)
-            item->addSubItem(new SubItem(*this, s, SubItem::player, s.players[i], s.instruments[i]));
-        if (s.players.isEmpty())
-            item->addSubItem(new SubItem(*this, s, SubItem::note, s.count > 0 ? TRANS("Names are hidden by the host.") : TRANS("Nobody is here yet.")));
+        if (s.players.isEmpty()) {
+            const juce::String hiddenNote = juce::String(s.count) + " " + (s.count == 1 ? TRANS("player on stage.") : TRANS("players on stage."))
+                                          + " " + TRANS("This stage keeps its player names private.");
+            item->addSubItem(new SubItem(*this, s, SubItem::note, -1, s.count > 0 ? hiddenNote : TRANS("Nobody is here yet.")));
+        } else {
+            item->addSubItem(new SubItem(*this, s, SubItem::header));
+            // Longest on stage first, when the stage says how long.
+            std::vector<int> order;
+            for (int i = 0; i < s.players.size(); ++i) order.push_back(i);
+            if (s.playerSeconds.size() == s.players.size())
+                std::stable_sort(order.begin(), order.end(), [&s](int a, int b) { return s.playerSeconds[a] > s.playerSeconds[b]; });
+            for (int i : order) item->addSubItem(new SubItem(*this, s, SubItem::player, i));
+        }
         item->addSubItem(new SubItem(*this, s, SubItem::info));
         mRoot->addSubItem(item);
         if (mOpen.count(s.id) > 0) item->setOpen(true);
         if (s.id == mSelectedId) item->setSelected(true, false, juce::dontSendNotification);
     }
     mRebuilding = false;
+    mRows = std::move(rows);
     mTree.getViewport()->setViewPosition(0, scrollY);
     updateStatus();
+    updateConnect();
 }
 
 void StagesView::flash(const juce::String& note)
@@ -877,6 +1068,13 @@ void StagesView::flash(const juce::String& note)
     mNote = note;
     mNoteUntil = juce::Time::getMillisecondCounter() + 4000;
     updateStatus();
+}
+
+void StagesView::showNotice(const juce::String& text)
+{
+    mNotice.setText(text, juce::dontSendNotification);
+    mNoticeAt = juce::Time::getMillisecondCounter();
+    layoutConnectRow();
 }
 
 void StagesView::updateStatus()
@@ -921,6 +1119,7 @@ void StagesView::requestJoin(const Stage& s)
     juce::Component::SafePointer<StagesView> safe(this);
     auto go = [safe, req, locked] {
         if (safe == nullptr) return;
+        safe->showNotice({});   // a new try: the last refusal is no longer the news
         if (locked) safe->askPassword(req);
         else if (safe->onJoin) safe->onJoin(req);
     };

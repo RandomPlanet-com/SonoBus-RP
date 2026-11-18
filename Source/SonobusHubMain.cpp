@@ -321,6 +321,7 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     SonobusHubServer hub;
     hs::applyToHub(hub, a);   // Shared with the GUI paths
     if (settingsFile != juce::File()) hub.setSessionsFile(settingsFile.getSiblingFile("hub_sessions.json").getFullPathName().toStdString());   // Recent sessions (+ their players) persist next to hub_settings.json
+    if (settingsFile != juce::File()) hub.setRemovedPlayersFile(settingsFile.getSiblingFile("hub_removed_players.json").getFullPathName().toStdString());   // permanent removals, next to the settings
 
     std::cout << "=== SonoBus RP Hub Server (headless) ===\n"
               << "Server: " << serverHost << ":" << serverPort << "\n"

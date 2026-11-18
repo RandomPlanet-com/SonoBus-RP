@@ -69,6 +69,9 @@ private:
     std::string mUpdateState;
     std::string chatRequest(const std::string& body, bool& ok);
     std::string kickRequest(const std::string& body, bool& ok);   // POST /api/kick
+    std::string unkickRequest(const std::string& body, bool& ok); // POST /api/unkick
+    std::string removedJson() const;                              // GET /api/removed
+    std::string stagePasswordRequest(const std::string& body, bool& ok);   // POST /api/stagepassword
     std::string licensesText() const;
     bool updateReady() const;
     std::string updateLine() const;

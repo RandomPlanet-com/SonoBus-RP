@@ -226,7 +226,7 @@ protected:
             label.setColour(Label::textColourId, Colour(0xc0eeeeee));            
         }
         label.setJustificationType(Justification::centred);
-        label.setMinimumHorizontalScale(0.5);
+        label.setMinimumHorizontalScale(1.0f);
     }
     
     SonoBigTextLookAndFeel sonoSliderLNF;

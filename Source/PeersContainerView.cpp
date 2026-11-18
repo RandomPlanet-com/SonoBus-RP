@@ -65,6 +65,23 @@ void PeerViewInfo::resized()
 
     mainbox.performLayout(localbounds);
 
+    // The channel lines are laid out again when their layout was rebuilt but their size stayed the same
+    if (channelGroups->takeLayoutChanged()) channelGroups->resized();
+
+    // Relayed rows: the Latency text and the mute note go in the slots the row header keeps on its lower line
+    if (hideSendCluster) {
+        const auto origin = channelGroups->getPosition();
+        recvActualBitrateLabel->setBounds(channelGroups->getStatSlotBounds() + origin);
+        if (statusNoteLabel) statusNoteLabel->setBounds(channelGroups->getNoteSlotBounds() + origin);
+    }
+
+    // The tall meter sits at the right of its column at its own width (bottom meters' bar pitch per channel)
+    if (recvMeter && recvMeter->isVisible() && wideForm) {
+        const auto b = recvMeter->getBounds();
+        const int w = jmin(b.getWidth(), kSbMeterPxPerChannel * jmax(1, laidOutMeterChans));
+        recvMeter->setBounds(b.withLeft(b.getRight() - w));
+    }
+
     // Expanded relayed rows: one meter per channel group, right-aligned in the meter column and spanning the group's
     // rows, so every instrument row is the same height. A lone group has the row to itself and runs to the bottom.
     if (groupMeterColumn && channelGroups && groupMeters.size() > 0) {
@@ -76,7 +93,7 @@ void PeerViewInfo::resized()
             auto* m = groupMeters[g];
             if (!m->isVisible() || g >= gbs.size()) continue;
             const auto gb = gbs.getReference(g);
-            const int w = kSbMeterPxPerChannel * (g < groupMeterChans.size() ? groupMeterChans[g] : 1);
+            const int w = jmin(colW, kSbMeterPxPerChannel * (g < groupMeterChans.size() ? groupMeterChans[g] : 1));
             const int y = cgY + gb.getY();
             const int h = jmax(8, visibleGroups == 1 ? getHeight() - y - 2 : gb.getHeight());
             m->setBounds(colX + (colW - w), y, w, h);
@@ -429,13 +446,13 @@ void PeersContainerView::configLabel(Label *label, int ltype)
         label->setFont(12);
         label->setColour(Label::textColourId, dimTextColor);
         label->setJustificationType(Justification::centredRight);        
-        label->setMinimumHorizontalScale(0.3);
+        label->setMinimumHorizontalScale(1.0f);
     }
     else if (ltype == LabelTypeSmall) {
         label->setFont(12);
         label->setColour(Label::textColourId, regularTextColor);
         label->setJustificationType(Justification::centredRight);
-        label->setMinimumHorizontalScale(0.3);
+        label->setMinimumHorizontalScale(1.0f);
     }
     else {
         label->setFont(14);
@@ -460,6 +477,7 @@ void PeersContainerView::resized()
     }
 
     peersBox.performLayout(bounds);
+    fitHubHeader();   // The header line shortens or lengthens with the new width
 
     mPeerViewBounds.clearQuick();
 
@@ -738,14 +756,14 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
     configLabel(pvf->latencyUpLabel.get(), LabelTypeSmall);
     pvf->latencyUpLabel->setJustificationType(Justification::left);
     pvf->latencyUpLabel->setFont(15.0f);                    // Row latency numbers were 12 pt and squeezed
-    pvf->latencyUpLabel->setMinimumHorizontalScale(0.75f);   // 31 px slot, a 3-digit value squeezes instead of showing dots
+    pvf->latencyUpLabel->setMinimumHorizontalScale(1.0f);
     pvf->latencyUpLabel->setAccessible(false);
 
     pvf->latencyDownLabel = std::make_unique<Label>("dlat", "");
     configLabel(pvf->latencyDownLabel.get(), LabelTypeSmall);
     pvf->latencyDownLabel->setJustificationType(Justification::left);
     pvf->latencyDownLabel->setFont(15.0f);
-    pvf->latencyDownLabel->setMinimumHorizontalScale(0.75f);   
+    pvf->latencyDownLabel->setMinimumHorizontalScale(1.0f);   
     pvf->latencyDownLabel->setAccessible(false);
 
     pvf->pingLabel = std::make_unique<Label>("ping");
@@ -773,7 +791,7 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
     pvf->sendActualBitrateLabel = std::make_unique<Label>("sbit");
     configLabel(pvf->sendActualBitrateLabel.get(), LabelTypeSmall);
     pvf->sendActualBitrateLabel->setJustificationType(Justification::centredLeft);
-    pvf->sendActualBitrateLabel->setMinimumHorizontalScale(0.75);
+    pvf->sendActualBitrateLabel->setMinimumHorizontalScale(1.0f);
     pvf->sendActualBitrateLabel->setAccessible(false);
 
     pvf->recvActualBitrateLabel = std::make_unique<SbRichLabel>("rbit");   // Drops coloured, throughput not
@@ -788,17 +806,25 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
     pvf->hubLatLabel = std::make_unique<Label>("hublat");
     configLabel(pvf->hubLatLabel.get(), LabelTypeSmall);
     pvf->hubLatLabel->setJustificationType(Justification::centred);
-    pvf->hubLatLabel->setMinimumHorizontalScale(0.75);
+    pvf->hubLatLabel->setMinimumHorizontalScale(1.0f);
     pvf->hubLatLabel->setAccessible(false);
 
     pvf->hostedDropsLabel = std::make_unique<Label>("rdrops");
     pvf->hostedDropsLabel->setTooltip(TRANS("Blocks the hub lost from this player's uplink (late past the hub's hold, or never arrived)"));
     configLabel(pvf->hostedDropsLabel.get(), LabelTypeSmallDim);
     pvf->hostedDropsLabel->setJustificationType(Justification::centredLeft);
-    pvf->hostedDropsLabel->setMinimumHorizontalScale(0.75);
+    pvf->hostedDropsLabel->setMinimumHorizontalScale(1.0f);
     pvf->hostedDropsLabel->setAccessible(false);
     // Right-click on a row's drops readout resets that row's count.
     pvf->hostedDropsLabel->addMouseListener(this, false);
+
+    pvf->statusNoteLabel = std::make_unique<Label>("rnote");
+    configLabel(pvf->statusNoteLabel.get(), LabelTypeSmall);
+    pvf->statusNoteLabel->setJustificationType(Justification::centredLeft);
+    pvf->statusNoteLabel->setFont(14.0f);
+    pvf->statusNoteLabel->setColour(Label::textColourId, mutedTextColor);
+    pvf->statusNoteLabel->setInterceptsMouseClicks(false, false);
+    pvf->statusNoteLabel->setAccessible(false);
     if (pvf->recvActualBitrateLabel) pvf->recvActualBitrateLabel->addMouseListener(this, false);
 
     pvf->sendUpArrow =   Drawable::createFromImageData(BinaryData::arrowupnarrow_svg, BinaryData::arrowupnarrow_svgSize);
@@ -841,8 +867,10 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
     {   // Hovering a bar of this row's receive meter names that channel of the player
         PeerViewInfo * rowpvf = pvf;
         pvf->recvMeter->nameForChannel = [this, rowpvf](int ch, int /*n*/) -> String {
-            const int i = mPeerViews.indexOf(rowpvf);
-            if (i < 0) return {};
+            // Rows are drawn in display order: resolve the peer this row shows
+            const int di = mPeerViews.indexOf(rowpvf);
+            if (di < 0) return {};
+            const int i = di < (int) mPeerUpdateOrdering.size() ? mPeerUpdateOrdering[di] : di;
             int pos = 0;
             for (int g = 0; g < processor.getRemotePeerChannelGroupCount(i); ++g) {
                 int start = 0, count = 0;
@@ -915,7 +943,7 @@ PeerViewInfo * PeersContainerView::createPeerViewInfo()
             pvf->staticSendQualLabel.get(), pvf->staticBufferLabel.get(),
             pvf->sendQualityLabel.get(), pvf->bufferLabel.get(),
             pvf->sendActualBitrateLabel.get(), pvf->recvActualBitrateLabel.get(),
-            pvf->hostedDropsLabel.get(), pvf->optionsResetDropButton.get(),
+            pvf->hostedDropsLabel.get(), pvf->statusNoteLabel.get(), pvf->optionsResetDropButton.get(),
             pvf->optionsRemoveButton.get(), pvf->optionsBlockButton.get() }) {
         if (c) c->setBufferedToImage(true);
     }
@@ -936,7 +964,7 @@ PendingPeerViewInfo * PeersContainerView::createPendingPeerViewInfo()
     pvf->messageLabel = std::make_unique<Label>("msg", "");
     pvf->messageLabel->setJustificationType(Justification::centredLeft);
     pvf->messageLabel->setFont(13);
-    pvf->messageLabel->setMinimumHorizontalScale(0.8);
+    pvf->messageLabel->setMinimumHorizontalScale(1.0f);
 
     pvf->removeButton = std::make_unique<TextButton>(TRANS("Remove"));
     pvf->removeButton->addListener(this);
@@ -1142,6 +1170,7 @@ void PeersContainerView::rebuildPeerViews()
         pvf->addAndMakeVisible(pvf->recvActualBitrateLabel.get());
         // Child only: visibility is owned by updateLayout (hosted mode + fullmode gate), so P2P never shows it.
         pvf->addChildComponent(pvf->hostedDropsLabel.get());
+        pvf->addChildComponent(pvf->statusNoteLabel.get());   // shown by updatePeerViews when there is a note
 
         pvf->addAndMakeVisible(pvf->sendUpArrow.get());
         pvf->addAndMakeVisible(pvf->recvDownArrow.get());
@@ -1155,11 +1184,11 @@ void PeersContainerView::rebuildPeerViews()
         // relevant round trip is the hub->peer ping shown in the hub-status header and the hub GUI peer table. Hide
         // the per-row latency/ping cluster; keep the rest of fullmode intact.
         const bool inHostedMix = processor.isHostedMixModeEnabled();
-        // Relayed player rows keep the stock latency labels, fed by the hub (/sb/hxlat): no PRESS test, no ping, no
-        // options overlay box.
+        // Relayed player rows show one Latency figure and a light on their receive line (see updatePeerViews):
+        // no stock latency labels, no PRESS test, no ping, no options overlay box.
         const bool relayedLat = inHostedMix && !pvf->infoOnly && !processor.isHubPeer(username);
         const bool showLatCluster = fullmode && !inHostedMix;
-        const bool showLatLabels = fullmode && (!inHostedMix || relayedLat);
+        const bool showLatLabels = showLatCluster;
 
         // Hosted mode: per-row receive-buffer widgets are hidden; the unified header row is the one knob. The jitter
         // meter goes too: it is drawn on bufferLabel's bounds, so it cannot stay without the buffer labels' layout.
@@ -1193,7 +1222,7 @@ void PeersContainerView::rebuildPeerViews()
         pvf->recvOptionsButton->setVisible(fullmode && !relayedLat);   // No "In your mix" overlay box
         pvf->recvButtonImage->setVisible(fullmode && !relayedLat);
         pvf->latActiveButton->setVisible(showLatCluster);
-        pvf->recvMeter->setVisible(relayedLat && !pvf->isNarrow && !processor.getRemotePeerViewExpanded(i));   // All display modes; narrow keeps the inline meter; expanded rows show per-channel meters instead
+        pvf->recvMeter->setVisible(relayedLat && pvf->wideForm && !processor.getRemotePeerViewExpanded(i));   // All display modes; the other forms keep the inline meter; expanded rows show per-channel meters instead
 
         if (pvf->infoOnly) {
             // Info-only rows (HostedMix non-hub peers): the recvMute button stays active and routes through the
@@ -1349,12 +1378,71 @@ void PeersContainerView::updateLayout()
     peersheight += 2;
 
 
+    // One header form for all player rows: the widest that shows every name and output label in full. Names,
+    // outputs and knobs are columns, as wide as the widest of each, so the level sliders start and end together.
+    const bool hostedRows = processor.isHostedMixModeEnabled();
+    int nameCol = 60, destCol = 0, meterCol = 0, inlineMeter = 0, statWidth = 0, headersMin = 0;
+    bool anyWidthKnob = false;
+    for (int di=0; di < mPeerViews.size(); ++di) {
+        PeerViewInfo * pvf = mPeerViews.getUnchecked(di);
+        const int i = di < (int) mPeerUpdateOrdering.size() ? mPeerUpdateOrdering[di] : di;
+        if (processor.isHubPeer(processor.getRemotePeerUserName(i))) continue;
+        const auto m = pvf->channelGroups->getPeerRowMetrics();
+        nameCol = jmax(nameCol, m.nameNeed);
+        destCol = jmax(destCol, m.destNeed);
+        anyWidthKnob = anyWidthKnob || m.widthKnob;
+        if (hostedRows && !pvf->infoOnly) {
+            // Relayed row: tall meter in the right-hand column, status text at the start of the lower line
+            int col = m.meterWidth;
+            if (m.expanded) {
+                col = kSbMeterPxPerChannel;
+                for (int g = 0, n = processor.getRemotePeerChannelGroupCount(i); g < n; ++g) {
+                    int st = 0, ct = 0;
+                    if (processor.getRemotePeerChannelGroupStartAndCount(i, g, st, ct)) col = jmax(col, kSbMeterPxPerChannel * ct);
+                }
+            }
+            meterCol = jmax(meterCol, col);
+            if (pvf->fullMode && statWidth == 0) {
+                const String widest = String::fromUTF8("\xe2\x97\x8f") + "  " + TRANS("Latency") + " 999 ms";
+                statWidth = (int) std::ceil(pvf->recvActualBitrateLabel->getFont().getStringWidthFloat(widest)) + 10;
+            }
+        } else {
+            inlineMeter = jmax(inlineMeter, m.meterWidth + 4);
+        }
+        headersMin = jmax(headersMin, ChannelGroupView::kHeaderIndent + 60 + 6 + m.meterWidth + 2);
+    }
+    const int knobCol = anyWidthKnob ? ChannelGroupsView::kKnobColPair : ChannelGroupsView::kKnobColSingle;
+    const int buttonMin = ChannelGroupsView::kHeaderButtonMin, buttonMax = ChannelGroupsView::kHeaderButtonMax;
+    const int lowerFixed = statWidth + (statWidth > 0 ? 8 : 0) + 6;      // status text, its gap, the gaps between the buttons
+    headersMin = jmax(headersMin, 90 + 6 + knobCol + 2, lowerFixed + 3 * buttonMin + 2);
+
+    // Our insets take 8 px; a wide row also has 1-px margins, a 3-px gap and the meter column with its gaps
+    const int listWidth = getWidth() > 13 ? getWidth() : 600;
+    const int wideLine = listWidth - 13 - (meterCol > 0 ? meterCol + 6 : 0);
+    const int narrowLine = listWidth - 11;
+    // Wide: name, level (160 px at least) and the lower line's text and buttons all end before the knob column
+    const int wideNeed = jmax(ChannelGroupView::kHeaderIndent + nameCol + 6 + 160, lowerFixed + 3 * buttonMax) + 6
+                       + knobCol + (destCol > 0 ? 6 + destCol : 0) + inlineMeter + 2;
+    // Medium: level (240 px at least), output and knobs on one line; under that the output takes a line of its own
+    const int mediumNeed = 240 + 6 + (destCol > 0 ? destCol + 6 : 0) + knobCol + 2;
+    const int besideKnobs = narrowLine - 2 - knobCol - 6;                // lower line when the knobs stand beside it
+
+    int rowForm = ChannelGroupView::HeaderNarrowTall;
+    if (wideLine >= wideNeed)                                            rowForm = ChannelGroupView::HeaderWide;
+    else if (narrowLine >= mediumNeed && besideKnobs >= lowerFixed + 3 * buttonMin) rowForm = ChannelGroupView::HeaderMedium;
+    else if (besideKnobs >= lowerFixed + 3 * buttonMin)                  rowForm = ChannelGroupView::HeaderNarrow;
+
+    const bool narrowRows = rowForm != ChannelGroupView::HeaderWide;
+    const int lowerRoom = rowForm == ChannelGroupView::HeaderNarrowTall ? narrowLine - 2 : besideKnobs;
+    const int buttonWidth = narrowRows ? jlimit(buttonMin, buttonMax, (lowerRoom - lowerFixed) / 3) : buttonMax;
+
     // Main connected peer views
     // Rows are drawn in mPeerUpdateOrdering, so row di shows peer mPeerUpdateOrdering[di]; lay each row out for that
     // peer.
     for (int di=0; di < mPeerViews.size(); ++di) {
         PeerViewInfo * pvf = mPeerViews.getUnchecked(di);
         const int i = di < (int) mPeerUpdateOrdering.size() ? mPeerUpdateOrdering[di] : di;
+        pvf->rowMeterItem = -1;
 
         // HostedMix: hide the SonoBus-Hub row from the peer list; the hub-status header replaces it.
         const String username_for_hide = processor.getRemotePeerUserName(i);
@@ -1438,7 +1526,7 @@ void PeersContainerView::updateLayout()
         pvf->netstatbox.items.add(FlexItem(20, textheight, pvf->pingbox).withMargin(0).withFlex(1));
 
 
-        if (isNarrow) {
+        if (narrowRows) {
             pvf->squalbox.items.clear();
             pvf->squalbox.flexDirection = FlexBox::Direction::column;
             if (!relayedRow) {
@@ -1494,6 +1582,7 @@ void PeersContainerView::updateLayout()
             // visible on rows that show the recv cluster at all.
             pvf->recvActualBitrateLabel->setVisible(hideRowBuf && fullmode && !pvf->infoOnly);
             pvf->recvDownArrow->setVisible(false);
+            if (relayedRow) pvf->recvActualBitrateLabel->setJustificationType(Justification::centredLeft);   // it sits in the row header's slot
 
         }
         else {
@@ -1538,7 +1627,7 @@ void PeersContainerView::updateLayout()
             pvf->recvlabbox.flexDirection = FlexBox::Direction::row;
             if (!relayedRow) pvf->recvlabbox.items.add(FlexItem(15, 10).withFlex(1));
             pvf->recvlabbox.items.add(FlexItem(110, textheight, *pvf->recvActualBitrateLabel).withMargin(0).withFlex(1));   // 100 -> 110
-            pvf->recvlabbox.items.add(FlexItem(0, 10).withFlex(1));
+            if (!relayedRow) pvf->recvlabbox.items.add(FlexItem(0, 10).withFlex(1));   // Relayed rows: the line takes the width
 
 
             pvf->optionsstatbox.items.clear();
@@ -1559,7 +1648,7 @@ void PeersContainerView::updateLayout()
                 pvf->recvstatbox.items.add(FlexItem(100, textheight, pvf->netbufbox).withMargin(0).withFlex(0));
                 pvf->recvstatbox.items.add(FlexItem(115, textheight, pvf->recvlabbox).withMargin(0).withFlex(0));
             } else if (relayedRow) {
-                // Single text line (drops), no centring padding
+                // Single text line (light + Latency), no centring padding
                 pvf->recvstatbox.items.add(FlexItem(115, textheight, pvf->recvlabbox).withMargin(0).withFlex(0));
             } else {
                 // Buffer row hidden in hosted mode: center the receive-bitrate line in the freed space.
@@ -1568,7 +1657,7 @@ void PeersContainerView::updateLayout()
                 pvf->recvstatbox.items.add(FlexItem(2, textheight/2).withMargin(0).withFlex(1));
             }
             // pvf->recvstatbox.items.add(FlexItem(100, textheight, *pvf->recvActualBitrateLabel).withMargin(0).withFlex(0));
-            pvf->recvActualBitrateLabel->setVisible(true);
+            pvf->recvActualBitrateLabel->setVisible(relayedRow ? fullmode : true);
             pvf->recvDownArrow->setVisible(!relayedRow);
 
         }
@@ -1666,7 +1755,7 @@ void PeersContainerView::updateLayout()
         pvf->sendbox.items.clear();
         pvf->sendbox.flexDirection = FlexBox::Direction::row;
 
-        if (isNarrow) {
+        if (narrowRows) {
 
             /*
             pvf->recvbox.items.add(FlexItem(1, 5));
@@ -1688,17 +1777,10 @@ void PeersContainerView::updateLayout()
             pvf->recvbox.items.add(FlexItem(80, minitemheight, pvf->recvstatbox).withMargin(0).withFlex(1));
             // Hosted mode: the hub-status header carries the hub RTT, so netstatbox gives up its P2P flex slot here
             // and the remaining clusters reflow.
+            // Relayed rows carry their Latency figure on the receive line, so no netstatbox either.
             if (!hideRowBuf) {
                 pvf->recvbox.items.add(FlexItem(5, 5));
                 pvf->recvbox.items.add(FlexItem(60, minitemheight, pvf->netstatbox).withMargin(0).withFlex(1).withMaxWidth(130));
-            } else if (relayedRow) {   // (option D)
-                pvf->netstatbox.items.clear();
-                pvf->netstatbox.flexDirection = FlexBox::Direction::column;
-                pvf->netstatbox.items.add(FlexItem(110, textheight, *pvf->staticLatencyLabel).withMargin(0).withFlex(0));   // 60 -> 110 (15-pt numbers)
-                pvf->netstatbox.items.add(FlexItem(110, textheight, pvf->latencylabbox).withMargin(0).withFlex(0));
-                pvf->staticLatencyLabel->setJustificationType(Justification::centred);
-                pvf->recvbox.items.add(FlexItem(5, 5));
-                pvf->recvbox.items.add(FlexItem(120, 2*textheight, pvf->netstatbox).withMargin(0).withFlex(1).withMaxWidth(150));
             }
             pvf->recvbox.items.add(FlexItem(3, 2).withFlex(0));
 
@@ -1714,31 +1796,7 @@ void PeersContainerView::updateLayout()
             if (!hideRowBuf) {
                 pvf->recvbox.items.add(FlexItem(5, 5));
                 pvf->recvbox.items.add(FlexItem(100, minitemheight, pvf->netstatbox).withMargin(0).withFlex(1).withMaxWidth(130));
-            } else if (relayedRow) {
-                // "Latency (ms)  ↑ x.x  ↓ y.y  Ping z" at the stock spot, one line
-                pvf->netstatbox.items.clear();
-                pvf->netstatbox.flexDirection = FlexBox::Direction::row;
-                pvf->netstatbox.items.add(FlexItem(72, textheight, *pvf->staticLatencyLabel).withMargin(0).withFlex(0));   // Even slots: label 72 | 6 | ↑ 40 | 6 | ↓ 40 | 10 | Ping 30 | 4 | value 30 = 240
-                pvf->netstatbox.items.add(FlexItem(72, textheight, pvf->latencylabbox).withMargin(0).withFlex(0));   // Slots 12|23|14|23
-                pvf->netstatbox.items.add(FlexItem(2, 2));   // No extra space before Ping
-                pvf->netstatbox.items.add(FlexItem(30, textheight, *pvf->staticPingLabel).withMargin(0).withFlex(0));   // Their ping at the end
-                pvf->netstatbox.items.add(FlexItem(1, 2));   // "one less space after Ping"
-                pvf->netstatbox.items.add(FlexItem(22, textheight, *pvf->pingLabel).withMargin(0).withFlex(0));   // 28 -> 22, line sits further right
-                pvf->latencyUpLabel->setJustificationType(Justification::centredLeft);   // The number stays next to its arrow
-                pvf->latencyUpLabel->setBorderSize(BorderSize<int>(0, 1, 0, 0));     // Number right next to its arrow
-                pvf->latencyDownLabel->setBorderSize(BorderSize<int>(0, 1, 0, 0));
-                pvf->pingLabel->setMinimumHorizontalScale(0.75f);
-                pvf->latencyDownLabel->setJustificationType(Justification::centredLeft);
-                pvf->staticPingLabel->setBorderSize(BorderSize<int>(0, 2, 0, 1));   // No label padding between "Ping" and its value
-                pvf->pingLabel->setBorderSize(BorderSize<int>(0, 1, 0, 2));
-                pvf->pingLabel->setJustificationType(Justification::centredLeft);   // number right after the word
-                pvf->pingLabel->setFont(pvf->latencyDownLabel->getFont());        // same size as the latency numbers
-                pvf->staticLatencyLabel->setJustificationType(Justification::centredRight);
-                pvf->staticPingLabel->setJustificationType(Justification::centredRight);
-                pvf->staticPingLabel->setVisible(true); pvf->pingLabel->setVisible(true);
-                pvf->recvbox.items.add(FlexItem(5, 5));
-                pvf->recvbox.items.add(FlexItem(199, textheight, pvf->netstatbox).withMargin(0).withFlex(0).withMaxWidth(204));   // Slots 72|72|2|30|1|22 = 199
-            }
+            }   // Relayed rows: the Latency figure sits on the receive line (no netstatbox)
             pvf->recvbox.items.add(FlexItem(3, 2).withFlex(0));
         }
 
@@ -1747,65 +1805,66 @@ void PeersContainerView::updateLayout()
         int chcnt = processor.getRemotePeerRecvChannelCount(i);
         int meterwidth = kSbMeterPxPerChannel * jmax(1, chcnt);   // Same per-channel width as the main meters
         pvf->laidOutMeterChans = chcnt;   // UpdatePeerViews re-lays the row when this goes stale
+        pvf->laidOutName = username_for_hide;   // the name column follows the names
 
         pvf->mainbox.items.clear();
         pvf->mainnarrowbox.items.clear();
 
-        pvf->isNarrow = isNarrow;
+        pvf->isNarrow = narrowRows;
+        pvf->wideForm = !narrowRows;
+        if (pvf->statusNoteLabel && !(relayedRow && fullmode)) pvf->statusNoteLabel->setVisible(false);
 
-        pvf->channelGroups->setNarrowMode(isNarrow, false);
-        // Relayed rows draw the full-height meter outside the channel view. The flag must be set before updateLayout
-        // below, or the row shows two meters.
-        pvf->channelGroups->setRowMeterHidden(relayedRow && !isNarrow);   // minimal (single-row) view too
+        pvf->channelGroups->setNarrowMode(narrowRows, false);
+        // The header form and its columns; relayed rows keep room for the Latency text before the buttons
+        // A wide relayed row's meter column is as wide as its own meter; the row gets the rest, and its Output
+        // button runs up to the meter while the other columns stay where the widest meter puts them
+        int ownMeterCol = meterwidth;
+        if (processor.getRemotePeerViewExpanded(i)) {
+            ownMeterCol = kSbMeterPxPerChannel;
+            for (int g = 0, n = processor.getRemotePeerChannelGroupCount(i); g < n; ++g) {
+                int st = 0, ct = 0;
+                if (processor.getRemotePeerChannelGroupStartAndCount(i, g, st, ct)) ownMeterCol = jmax(ownMeterCol, kSbMeterPxPerChannel * ct);
+            }
+        }
+        const int meterSlack = (relayedRow && !narrowRows) ? jmax(0, meterCol - ownMeterCol) : 0;
+        pvf->channelGroups->setPeerRowLayout(rowForm, nameCol, destCol, knobCol, (relayedRow && fullmode) ? statWidth : 0, buttonWidth, meterSlack);
+        // Wide relayed rows draw the full-height meter outside the channel view. The flag must be set before
+        // updateLayout below, or the row shows two meters.
+        pvf->channelGroups->setRowMeterHidden(relayedRow && !narrowRows);   // minimal (single-row) view too
+        // The channel lines are laid out for the width the row will get (the same figure PeerViewInfo::resized hands
+        // them), so a narrow line that has to wrap is already counted in the row height here.
+        if (getWidth() > 13) pvf->channelGroups->setEstimatedWidth(getWidth() - 13 - (narrowRows ? 0 : 2) + 8);
         pvf->channelGroups->updateLayout(false);
 
         auto changroupminbounds = pvf->channelGroups->getMinimumContentBounds();
 
+        // Relayed rows have their one status line (light + Latency) inside the row header, so nothing follows the
+        // channel lines; other rows keep their statistics block under them.
+        const bool statsBlock = fullmode && !relayedRow;
 
-        if (isNarrow) {
-            pvf->mainnarrowbox.flexDirection = FlexBox::Direction::column;
-            pvf->mainnarrowbox.items.add(FlexItem(2, 3));
-            //pvf->mainnarrowbox.items.add(FlexItem(100, minitemheight, pvf->mainsendbox).withMargin(0).withFlex(0));
-            pvf->mainnarrowbox.items.add(FlexItem(changroupminbounds.getWidth(), changroupminbounds.getHeight(), *pvf->channelGroups).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Auto width = stretched to the row (JUCE never stretches an item with an assigned width)
+        pvf->mainnarrowbox.flexDirection = FlexBox::Direction::column;
+        if (narrowRows) pvf->mainnarrowbox.items.add(FlexItem(2, 3));
+        pvf->mainnarrowbox.items.add(FlexItem(changroupminbounds.getWidth(), changroupminbounds.getHeight(), *pvf->channelGroups).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Auto width = stretched to the row (JUCE never stretches an item with an assigned width)
 
-            if (fullmode) {
-                pvf->mainnarrowbox.items.add(FlexItem(2, 2));
-                pvf->mainnarrowbox.items.add(FlexItem(260, minitemheight, pvf->recvbox).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Stretched
-                //pvf->mainnarrowbox.items.add(FlexItem(2, 4));
-                //pvf->mainnarrowbox.items.add(FlexItem(260, minitemheight, pvf->sendbox).withMargin(0).withFlex(0));
-            }
+        if (statsBlock) {
+            pvf->mainnarrowbox.items.add(FlexItem(2, narrowRows ? 2 : 4));
+            pvf->mainnarrowbox.items.add(FlexItem(narrowRows ? 260 : 150, minitemheight, pvf->recvbox).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Stretched to the row
+        }
 
-            int nbh = 0;
-            for (auto & item : pvf->mainnarrowbox.items) {
-                nbh += item.minHeight;
-            }
+        int nbh = 0;
+        for (auto & item : pvf->mainnarrowbox.items) {
+            nbh += item.minHeight;
+        }
 
-            pvf->mainbox.flexDirection = FlexBox::Direction::row;
-            pvf->mainbox.items.add(FlexItem(3, 2));
-            pvf->mainbox.items.add(FlexItem(150, nbh, pvf->mainnarrowbox).withMargin(0).withFlex(1));
-            pvf->recvMeter->setVisible(false);   // Narrow keeps the inline meter (flag set false above)
+        pvf->mainbox.flexDirection = FlexBox::Direction::row;
+        pvf->mainbox.items.add(FlexItem(3, 2));
+        pvf->mainbox.items.add(FlexItem(150, nbh, pvf->mainnarrowbox).withMargin(0).withFlex(1));
+
+        if (narrowRows) {
+            pvf->recvMeter->setVisible(false);   // These forms keep the inline meter (flag set false above)
             pvf->recvMeter->setRefreshRateHz(0.0f);
+            for (auto * gm : pvf->groupMeters) { gm->setVisible(false); gm->setRefreshRateHz(0.0f); }
         } else {
-            pvf->mainnarrowbox.flexDirection = FlexBox::Direction::column;
-            //pvf->mainnarrowbox.items.add(FlexItem(2, 3));
-
-            //pvf->mainnarrowbox.items.add(FlexItem(100, minitemheight, pvf->mainsendbox).withMargin(0).withFlex(0));
-            pvf->mainnarrowbox.items.add(FlexItem(changroupminbounds.getWidth(), changroupminbounds.getHeight(), *pvf->channelGroups).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Auto width = stretched to the row (JUCE never stretches an item with an assigned width)
-
-            if (fullmode) {
-                pvf->mainnarrowbox.items.add(FlexItem(2, 4));
-                // Relayed rows carry one text line on line 2
-                pvf->mainnarrowbox.items.add(FlexItem(150, relayedRow ? textheight + 4 : minitemheight, pvf->recvbox).withMargin(0).withFlex(0).withWidth((float) FlexItem::notAssigned));   // Stretched to the row, so the latency block sits at the right edge instead of overflowing a 150-px box
-            }
-
-            int nbh = 0;
-            for (auto & item : pvf->mainnarrowbox.items) {
-                nbh += item.minHeight;
-            }
-
-            pvf->mainbox.flexDirection = FlexBox::Direction::row;
-            pvf->mainbox.items.add(FlexItem(3, 2));
-            pvf->mainbox.items.add(FlexItem(150, nbh, pvf->mainnarrowbox).withMargin(0).withFlex(1));
             // The VU meter uses the whole row height: drawn here as a right-hand column spanning both lines; the
             // channel group's inline meter is hidden.
             if (relayedRow) {   // all display modes
@@ -1813,9 +1872,9 @@ void PeersContainerView::updateLayout()
                 {   // Tall grouped meter only while COLLAPSED; expanded rows get ONE meter per channel group
                     // (stereo = two bars side by side, same per-bar width as the top/bottom meters) in the same column.
                     const bool collapsed = !processor.getRemotePeerViewExpanded(i);
-                    pvf->recvMeter->setVisible(collapsed && !isNarrow);
+                    pvf->recvMeter->setVisible(collapsed);
                     int ngroups = 0, maxch = 1;
-                    if (!collapsed && !isNarrow) {
+                    if (!collapsed) {
                         ngroups = processor.getRemotePeerChannelGroupCount(i);
                         for (int g = 0; g < ngroups; ++g) { int st = 0, ct = 0; if (processor.getRemotePeerChannelGroupStartAndCount(i, g, st, ct)) maxch = jmax(maxch, ct); }
                     }
@@ -1840,10 +1899,12 @@ void PeersContainerView::updateLayout()
                         pvf->groupMeterChans.set(g, jmax(1, ct));
                     }
                     for (int g = ngroups; g < pvf->groupMeters.size(); ++g) { pvf->groupMeters[g]->setVisible(false); pvf->groupMeters[g]->setRefreshRateHz(0.0f); }
-                    pvf->mainbox.items.add(FlexItem(4, 2));   // A little air after Ping   // 10 -> 4, closer to the meter
-                    // No shared reserve: each row's block hugs its own meter.
-                    if (collapsed) pvf->mainbox.items.add(FlexItem(meterwidth, nbh, *pvf->recvMeter).withMargin(2).withFlex(0));
-                    else           pvf->mainbox.items.add(FlexItem(kSbMeterPxPerChannel * maxch, nbh, *pvf->groupMeterColumn).withMargin(2).withFlex(0));
+                    // The meter column is as wide as this row's meter; the row's columns allow for the widest
+                    // (meterSlack above), so the controls still end at the same place on every row.
+                    const int natural = collapsed ? meterwidth : kSbMeterPxPerChannel * maxch;
+                    if (collapsed) pvf->mainbox.items.add(FlexItem(natural, nbh, *pvf->recvMeter).withMargin(2).withFlex(0));
+                    else           pvf->mainbox.items.add(FlexItem(natural, nbh, *pvf->groupMeterColumn).withMargin(2).withFlex(0));
+                    pvf->rowMeterItem = pvf->mainbox.items.size() - 1;
                 }
                 pvf->recvMeter->setRefreshRateHz(8.0f);   // was 0 (XXX) → the tall meter painted once and froze
             } else {
@@ -1859,7 +1920,7 @@ void PeersContainerView::updateLayout()
             mch = jmax(mch, (int)item.minHeight);
         }
 
-        if (isNarrow) {
+        if (narrowRows) {
             peersBox.items.add(FlexItem(pw, mch + 3, *pvf).withMargin(0).withFlex(0));
             peersheight += mch + 3;
         } else {
@@ -1868,6 +1929,7 @@ void PeersContainerView::updateLayout()
         }
 
     }
+
 
 
     // Pending connection peerviews
@@ -1899,14 +1961,10 @@ void PeersContainerView::updateLayout()
         totPeersHeight += item.minHeight + item.margin.top + item.margin.bottom;
     }
 
-    if (isNarrow) {
-        peersMinHeight = totPeersHeight;
-        peersMinWidth = 300;
-    }
-    else {
-        peersMinHeight = totPeersHeight;
-        peersMinWidth = 180 + 150 + mincheckheight + 50;
-    }
+    // The narrowest header form's need (the row's 3-px gap, our 5+3 px inset), whatever the form is now, so the
+    // list's minimum width does not move when the form changes
+    peersMinHeight = totPeersHeight;
+    peersMinWidth = jmax(300, headersMin + 3 + 8);
     
 }
 
@@ -1983,7 +2041,8 @@ void PeersContainerView::mouseDown (const MouseEvent& event)
             auto * pvf = mPeerViews.getUnchecked(i);
             if (event.eventComponent == pvf->hostedDropsLabel.get()
                 || (pvf->recvActualBitrateLabel && event.eventComponent == pvf->recvActualBitrateLabel.get())) {
-                processor.resetRemotePeerPacketStats(i);
+                // Row i shows the peer at mPeerUpdateOrdering[i], not peer i.
+                processor.resetRemotePeerPacketStats(i < (int) mPeerUpdateOrdering.size() ? mPeerUpdateOrdering[i] : i);
                 updatePeerViews();
                 return;
             }
@@ -2163,6 +2222,78 @@ static String sbFormatMs(float ms)
     return v + " ms";
 }
 
+bool PeersContainerView::ownInterfaceMs(float & inMs, float & outMs) const
+{
+    if (!JUCEApplicationBase::isStandaloneApp() || !getAudioDeviceManager || !getAudioDeviceManager()) return false;
+    return SonobusAudioProcessor::getAudioInterfaceMs(getAudioDeviceManager()->getCurrentAudioDevice(), inMs, outMs);
+}
+
+void PeersContainerView::fitHubHeader()
+{
+    auto* rl = dynamic_cast<SbRichLabel*>(mHubStatusLabel.get());
+    if (rl == nullptr || !mHubHdr.valid) return;
+    const auto& h = mHubHdr;
+
+    // Shortened in steps until it fits: the format goes first (and REC loses its names), then the server address is
+    // elided, then Link becomes its light alone, then the address goes, then the dividers tighten, then the type
+    // gets smaller. Ping and Latency always stay.
+    struct Shape { String addr; bool fmt = true, recNames = true, linkWord = true; String sep; };
+    const String sepWide = String::fromUTF8("  \xe2\x94\x82  "), sepTight = String::fromUTF8(" \xe2\x94\x82 ");
+    const String ell = String::fromUTF8("\xe2\x80\xa6");
+    const String dot = String::fromUTF8("\xe2\x97\x8f");
+    const Font base = mHubStatusLabel->getFont();
+    const int lw = mHubStatusLabel->getWidth();
+    const float avail = lw > 0 ? (float) (lw - mHubStatusLabel->getBorderSize().getLeft() - 2) : 1.0e6f;
+
+    auto runs = [&](const Shape& s) {
+        Array<std::pair<String, Colour>> r;
+        String head = s.addr;
+        if (h.disc.isNotEmpty()) head << (head.isNotEmpty() ? "  " : "") << h.disc;
+        if (head.isNotEmpty()) r.add({ head + s.sep, h.reg });
+        if (s.fmt) r.add({ String("PCM 16 bit") + s.sep, h.reg });
+        r.add({ h.ping, h.pingCol });
+        r.add({ s.sep + TRANS("Latency") + " ", h.reg });
+        r.add({ h.lat, h.latCol });
+        r.add({ s.sep + (s.linkWord ? TRANS("Link") + " " : String()), h.reg });
+        r.add({ dot, h.linkCol });
+        if (h.rec.isNotEmpty()) r.add({ s.sep + (s.recNames ? h.rec : h.recShort), h.reg });
+        return r;
+    };
+    auto widthOf = [&](const Shape& s, const Font& f) {
+        float w = 0.0f;
+        for (auto& run : runs(s)) w += f.getStringWidthFloat(run.first);
+        return w;
+    };
+    auto fits = [&](const Shape& s) { return widthOf(s, base) <= avail; };
+    // Longest address prefix (at least a few characters) that fits, elided with "…"
+    auto elideAddr = [&](Shape& s) {
+        const String full = h.addr;
+        for (int n = full.length() - 1; n >= 6; --n) {
+            s.addr = full.substring(0, n).trimEnd() + ell;
+            if (fits(s)) return true;
+        }
+        s.addr = full;
+        return false;
+    };
+
+    Shape s; s.addr = h.addr; s.sep = sepWide;
+    if (!fits(s)) { s.fmt = false; s.recNames = false; }
+    if (!fits(s) && !elideAddr(s)) {
+        s.linkWord = false;
+        if (!fits(s) && !elideAddr(s)) s.addr = String();
+    }
+    if (!fits(s)) s.sep = sepTight;
+    Font f = base;
+    if (!fits(s)) {
+        const float need = widthOf(s, base);
+        f = base.withHeight(jmax(11.0f, std::floor(base.getHeight() * avail / jmax(1.0f, need))));
+    }
+
+    AttributedString as; as.setJustification(Justification::centredLeft); as.setWordWrap(AttributedString::none);
+    for (auto& run : runs(s)) as.append(run.first, f, run.second);
+    rl->setRich(as);
+}
+
 void PeersContainerView::updatePeerViews(int specific)
 {
     uint32 nowstampms = Time::getMillisecondCounter();
@@ -2185,6 +2316,7 @@ void PeersContainerView::updatePeerViews(int specific)
         if (hubIdx < 0 || !inSession) {
             htext = (hubIdx < 0 && inSession) ? TRANS("Hub: not connected") : String();
             mLinkJoinMs = 0;   // the Link light starts over at the next join
+            mHubHdr.valid = false;
             // The line paints from the rich copy whenever one exists, so an empty text changed nothing
             if (auto* rl = dynamic_cast<SbRichLabel*>(mHubStatusLabel.get())) rl->clearRich();
             mHubStatusLabel->setColour(Label::textColourId, mutedTextColor);
@@ -2223,22 +2355,25 @@ void PeersContainerView::updatePeerViews(int specific)
             if (mLinkJoinMs == 0) { mLinkJoinMs = linkNow == 0 ? 1 : linkNow; mLinkBase = -1; mHubDropsN = 0; }
             const bool linkSettling = linkNow - mLinkJoinMs < 10000;
             if (! linkSettling && mLinkBase < 0) { mLinkBase = totaldrops; mHubDropsN = 0; }
+            // A counter below its base has restarted (reset, or the player that held the highest count left): take the base again.
+            if (mLinkBase >= 0 && totaldrops < mLinkBase) { mLinkBase = totaldrops; mHubDropsN = 0; }
             const int64_t linkdrops = mLinkBase < 0 ? 0 : jmax((int64_t) 0, totaldrops - mLinkBase);
             const String hsep = String::fromUTF8("  \xe2\x94\x82  "); // "  │  " field divider (was a small dot)
             // The line is built in parts so each field can carry its own colour (SbRichLabel):
             // head (hub, port, format) regular; latency legs + ping coloured like the rows; Mb/s regular; drops coloured by the last minute.
             String headPart, ratePart, dropsPart, recPart;
-            {   // Show which hub, as the player typed it (DNS name or IP), not the fixed hub name
+            {   // The server address as the player typed it (DNS name or IP), not the fixed hub name
                 // + the SIGNALING port (what a friend types), then the format right after the address
                 const String typed = processor.getServerHostAsTyped();
                 const int sport = processor.getServerPortAsTyped();
-                if (typed.isNotEmpty()) headPart << TRANS("Hub") << " " << typed;
+                if (typed.isNotEmpty()) headPart << typed;
                 else                    headPart << processor.getRemotePeerUserName(hubIdx);
                 if (sport > 0) headPart << ":" << sport;
             }
+            const String headAddr = headPart;
             if (!hubconn) headPart << "  " << TRANS("disconnected");
             headPart << hsep << "PCM 16 bit" << hsep;
-            // Two figures and a light. Ping = the network round trip to the hub. Delay = the whole loop the player
+            // Two figures and a light. Ping = the network round trip to the hub. Latency = the whole loop the player
             // feels: that round trip, the buffering on the way (the hub's buffer for this player, this player's
             // receive buffer, one packet) and the audio interface in and out. Link = drops on the way from the hub.
             float netMs = -1.0f, bufMs = -1.0f, ifaceMs = -1.0f, delayMs = -1.0f;
@@ -2251,18 +2386,13 @@ void PeersContainerView::updatePeerViews(int specific)
                 if (to >= 0.0f && from >= 0.0f && netMs >= 0.0f) {
                     const float packetMs = 1000.0f * 32.0f / 48000.0f;   // one audio block on the wire
                     bufMs = jmax(0.0f, to + from - netMs) + packetMs;
-                    if (JUCEApplicationBase::isStandaloneApp() && getAudioDeviceManager && getAudioDeviceManager()) {
-                        if (auto* cad = getAudioDeviceManager()->getCurrentAudioDevice()) {
-                            const double sr = cad->getCurrentSampleRate();   // input + output latency, each with its buffer
-                            if (sr > 0.0) ifaceMs = (float) (1000.0 * (cad->getInputLatencyInSamples() + cad->getOutputLatencyInSamples()
-                                                                       + 2 * cad->getCurrentBufferSizeSamples()) / sr);
-                        }
-                    }
+                    float inMs = 0.0f, outMs = 0.0f;   // input + output latency, each with its buffer
+                    if (ownInterfaceMs(inMs, outMs)) ifaceMs = inMs + outMs;
                     delayMs = netMs + bufMs + jmax(0.0f, ifaceMs);
                 }
             }
             const String upStr = TRANS("Ping") + " " + pingStr + " ms";
-            const String dnStr = hsep + TRANS("Delay") + " ";
+            const String dnStr = hsep + TRANS("Latency") + " ";
             const String pingPart = (delayMs >= 0.0f ? String((recvStr.startsWith("~") ? "~" : "")) + String((int) std::lround(delayMs)) : String("?")) + " ms";
             dropsPart << hsep << TRANS("Link") << " ";
             const String linkDot = String::fromUTF8("\xe2\x97\x8f");
@@ -2278,12 +2408,13 @@ void PeersContainerView::updatePeerViews(int specific)
             htext << headPart << upStr << dnStr << pingPart << ratePart << dropsPart << linkDot << recPart;
             {   // colours
                 const uint32 nowms = Time::getMillisecondCounter();
+                if (mHubDropsN > 0 && linkdrops < mHubDropsC[mHubDropsN - 1]) mHubDropsN = 0;   // Counter restarted: the window starts over
                 if (mHubDropsN == 0 || nowms - mHubDropsT[mHubDropsN - 1] >= 5000) {
                     if (mHubDropsN == 12) { for (int k = 1; k < 12; ++k) { mHubDropsT[k-1] = mHubDropsT[k]; mHubDropsC[k-1] = mHubDropsC[k]; } mHubDropsN = 11; }
                     mHubDropsT[mHubDropsN] = nowms; mHubDropsC[mHubDropsN] = linkdrops; mHubDropsN++;
                 }
                 int64_t recent = 0;
-                for (int k = 0; k < mHubDropsN; ++k) { if (nowms - mHubDropsT[k] <= 60000) { recent = linkdrops - mHubDropsC[k]; break; } }
+                for (int k = 0; k < mHubDropsN; ++k) { if (nowms - mHubDropsT[k] <= 60000) { recent = jmax((int64_t) 0, linkdrops - mHubDropsC[k]); break; } }
                 const Colour reg = hubconn ? regularTextColor : mutedTextColor;
                 auto delaycol = [this](float ms){ return ms <= sbplus::kDelayLoopGreenMs ? latGoodColor : ms <= sbplus::kDelayLoopYellowMs ? latWarnColor : latBadColor; };   // Shared thresholds (SbLatencyColours.h)
                 auto pingcol  = [this](float ms){ return ms <= sbplus::kStagePingGreenMs ? latGoodColor : ms <= sbplus::kStagePingYellowMs ? latWarnColor : latBadColor; };   // same scale as the stage list
@@ -2292,14 +2423,24 @@ void PeersContainerView::updatePeerViews(int specific)
                 const bool haveSelf = processor.getSelfHubLatency(cTo, cFrom, cRtt, cLost);
                 {   // Say why the numbers are '~' (local estimate) when the hub's latency feed is dark
                     const int age = processor.getSelfHubLatencyAgeS();
-                    // Hover: what the Delay is made of, then the drops behind the light. The '~' note is appended
+                    // Hover: what the Latency is made of, then the drops behind the light. The '~' note is appended
                     // when the hub's feed is dark.
                     String tip;
                     if (delayMs >= 0.0f) {
-                        tip << "Delay " << String(delayMs, 1) << " ms\nNetwork " << String(netMs, 1) << " ms\nBuffering " << String(bufMs, 1) << " ms\n"
-                            << (ifaceMs >= 0.0f ? "Audio interface " + String(ifaceMs, 1) + " ms" : String("Audio interface: not known"));
+                        tip << "Latency " << String(delayMs, 1) << " ms\n"
+                            << "Round trip, counted the way Jamulus counts its Overall Delay\n"
+                            << "Network round trip " << String(netMs, 1) << " ms\n";
+                        const float packetMs = 1000.0f * 32.0f / 48000.0f;
+                        const float myRecvMs = processor.getHostedFeedDepthMs();
+                        const float hubBufMs = bufMs - packetMs - myRecvMs;
+                        if (myRecvMs >= 0.0f && hubBufMs >= 0.0f)
+                            tip << "Hub buffer for you " << String(hubBufMs, 1) << " ms\nYour receive buffer " << String(myRecvMs, 1) << " ms\n"
+                                << "One packet " << String(packetMs, 1) << " ms\n";
+                        else
+                            tip << "Buffering " << String(bufMs, 1) << " ms\n";
+                        tip << (ifaceMs >= 0.0f ? "Audio interface " + String(ifaceMs, 1) + " ms" : String("Audio interface: not known"));
                     } else {
-                        tip << "Delay = network + buffering + audio interface";
+                        tip << "Latency = network + buffering + audio interface, round trip";
                     }
                     tip << "\nLink: " << String(recent) << " drops from the hub in the last minute, " << String(linkdrops) << " since you joined";
                     tip = String::fromUTF8(tip.toRawUTF8());
@@ -2313,19 +2454,20 @@ void PeersContainerView::updatePeerViews(int specific)
                         if (shots.isNotEmpty()) File(shots).getChildFile("header.txt").replaceWithText(htext + "\n---\n" + tip + "\n");
                     }
                 }
-                if (auto* rl = dynamic_cast<SbRichLabel*>(mHubStatusLabel.get())) {
-                    AttributedString as; as.setJustification(Justification::centredLeft); as.setWordWrap(AttributedString::none);
-                    const Font f = mHubStatusLabel->getFont();
-                    as.append(headPart, f, reg);
+                {   // The coloured line is fitted to the label's width (fitHubHeader), here and on every resize
                     const Colour est = hubconn ? mutedTextColor : reg;   // '~' local-estimate fields are dimmed
-                    as.append(upStr, f, haveSelf && hubconn && cRtt >= 0.0f ? pingcol(cRtt) : est);
-                    as.append(dnStr, f, reg);
-                    as.append(pingPart, f, haveSelf && hubconn && delayMs >= 0.0f ? delaycol(delayMs) : est);
-                    as.append(ratePart, f, reg);
-                    as.append(dropsPart, f, reg);
-                    as.append(linkDot, f, hubconn && ! linkSettling ? dropcol : mutedTextColor);
-                    as.append(recPart, f, reg);
-                    rl->setRich(as);
+                    mHubHdr.addr = headAddr;
+                    mHubHdr.disc = hubconn ? String() : TRANS("disconnected");
+                    mHubHdr.ping = upStr;
+                    mHubHdr.lat = pingPart;
+                    mHubHdr.rec = recPart.isNotEmpty() ? recPart.fromFirstOccurrenceOf(hsep, false, false) : String();
+                    mHubHdr.recShort = recPart.isNotEmpty() ? String::fromUTF8("\xe2\x97\x8f ") + TRANS("REC") : String();
+                    mHubHdr.reg = reg;
+                    mHubHdr.pingCol = haveSelf && hubconn && cRtt >= 0.0f ? pingcol(cRtt) : est;
+                    mHubHdr.latCol = haveSelf && hubconn && delayMs >= 0.0f ? delaycol(delayMs) : est;
+                    mHubHdr.linkCol = hubconn && ! linkSettling ? dropcol : mutedTextColor;
+                    mHubHdr.valid = true;
+                    fitHubHeader();
                 }
             }
             mHubStatusLabel->setColour(Label::textColourId,
@@ -2496,19 +2638,30 @@ void PeersContainerView::updatePeerViews(int specific)
         processor.getRemotePeerReceiveAudioCodecFormat(i, recvfinfo);
 
         // Peers relayed via the hub have no direct sink stream, so the branch below would report "Other side is
-        // muted" for them. Relayed peers use the hub-mix text.
-        if (pvf->infoOnly || relayedViaHub) {
+        // muted" for them. Relayed rows show a quality light and one Latency figure (drawn in the latency block
+        // below); this part keeps their drop window and notes a mute state for that line.
+        int64_t rowDropped = 0, rowRecent = 0; String rowMuteText;
+        if (relayedViaHub) {
+            const int64_t up = processor.getRemotePeerHubUplinkLost(i);
+            rowDropped = jmax((int64_t) 0, up >= 0 ? up : processor.getRemotePeerPacketsDropped(i));
+            // sliding 60-s window (see PeerViewInfo::dropsSample*); a count below the last sample has restarted
+            if (pvf->dropsSampleN > 0 && rowDropped < pvf->dropsSampleC[pvf->dropsSampleN - 1]) pvf->dropsSampleN = 0;
+            if (pvf->dropsSampleN == 0 || nowstampms - pvf->dropsSampleT[pvf->dropsSampleN - 1] >= 5000) {
+                if (pvf->dropsSampleN == 12) { for (int k = 1; k < 12; ++k) { pvf->dropsSampleT[k-1] = pvf->dropsSampleT[k]; pvf->dropsSampleC[k-1] = pvf->dropsSampleC[k]; } pvf->dropsSampleN = 11; }
+                pvf->dropsSampleT[pvf->dropsSampleN] = nowstampms; pvf->dropsSampleC[pvf->dropsSampleN] = rowDropped; pvf->dropsSampleN++;
+            }
+            for (int k = 0; k < pvf->dropsSampleN; ++k) {
+                if (nowstampms - pvf->dropsSampleT[k] <= 60000) { rowRecent = jmax((int64_t) 0, rowDropped - pvf->dropsSampleC[k]); break; }
+            }
+            if (processor.getHubMixMuteForPeer(processor.getRemotePeerUserName(i))) rowMuteText = TRANS("Muted in your mix");
+            else if (processor.getRemotePeerHubSendMuted(i)) rowMuteText = TRANS("Muted at their end");
+            pvf->recvActualBitrateLabel->setColour(Label::textColourId, regularTextColor);
+        }
+        else if (pvf->infoOnly) {
             String iouname = processor.getRemotePeerUserName(i);
             bool hubmuted = processor.getHubMixMuteForPeer(iouname);
             if (hubmuted) {
                 recvtext = TRANS("Muted in your mix");
-                pvf->recvActualBitrateLabel->setColour(Label::textColourId, mutedTextColor);
-            } else if (relayedViaHub && processor.getRemotePeerHubSendMuted(i)) {
-                // The send-stat label is hidden on relayed rows in the full layout, so the other player's self-mute
-                // (top MUTE or the send icon, relayed by the hub) is shown here, on the always-visible Receive-rate
-                // label. Wording "Muted at their end" mirrors the stock "Muted in your mix"; it is shorter than the
-                // normal rate text, so it does not truncate.
-                recvtext = TRANS("Muted at their end");
                 pvf->recvActualBitrateLabel->setColour(Label::textColourId, mutedTextColor);
             } else {
                 // "drops N", coloured by the last minute's rate (green 0, yellow 1-5, red >5), since the lifetime
@@ -2516,15 +2669,17 @@ void PeersContainerView::updatePeerViews(int specific)
                 // uplink (same for every viewer); the receiver-side count is identical on every row under bundling
                 // and lives in the header.
                 const int64_t up = processor.getRemotePeerHubUplinkLost(i);
-                const int64_t dropped = up >= 0 ? up : processor.getRemotePeerPacketsDropped(i);
+                const int64_t dropped = jmax((int64_t) 0, up >= 0 ? up : processor.getRemotePeerPacketsDropped(i));
                 // sliding 60-s window (see PeerViewInfo::dropsSample*)
+                // A count below the last sample has restarted (reset, rejoin, or the hub's count taking over): the window starts over.
+                if (pvf->dropsSampleN > 0 && dropped < pvf->dropsSampleC[pvf->dropsSampleN - 1]) pvf->dropsSampleN = 0;
                 if (pvf->dropsSampleN == 0 || nowstampms - pvf->dropsSampleT[pvf->dropsSampleN - 1] >= 5000) {
                     if (pvf->dropsSampleN == 12) { for (int k = 1; k < 12; ++k) { pvf->dropsSampleT[k-1] = pvf->dropsSampleT[k]; pvf->dropsSampleC[k-1] = pvf->dropsSampleC[k]; } pvf->dropsSampleN = 11; }
                     pvf->dropsSampleT[pvf->dropsSampleN] = nowstampms; pvf->dropsSampleC[pvf->dropsSampleN] = dropped; pvf->dropsSampleN++;
                 }
                 int64_t recent = 0;
                 for (int k = 0; k < pvf->dropsSampleN; ++k) {
-                    if (nowstampms - pvf->dropsSampleT[k] <= 60000) { recent = dropped - pvf->dropsSampleC[k]; break; }
+                    if (nowstampms - pvf->dropsSampleT[k] <= 60000) { recent = jmax((int64_t) 0, dropped - pvf->dropsSampleC[k]); break; }
                 }
                 // What this player's stream costs you right now, then the drops
                 const double mbps = recvrate * 8.0 * 1e-6;
@@ -2598,10 +2753,11 @@ void PeersContainerView::updatePeerViews(int specific)
         pvf->changeAllRecvFormatButton->setToggleState(processor.getChangingDefaultRecvAudioCodecSetsExisting(), dontSendNotification);
 
         pvf->sendActualBitrateLabel->setText(sendtext, dontSendNotification);
-        if (!(pvf->infoOnly || relayedViaHub) || processor.getHubMixMuteForPeer(processor.getRemotePeerUserName(i))
-            || (relayedViaHub && processor.getRemotePeerHubSendMuted(i)))   // Plain text while "Muted at their end" shows
-            if (auto* rl = dynamic_cast<SbRichLabel*>(pvf->recvActualBitrateLabel.get())) rl->clearRich();   
-        pvf->recvActualBitrateLabel->setText(recvtext, dontSendNotification);
+        if (!relayedViaHub) {   // Relayed rows get their line in the latency block below
+            if (!pvf->infoOnly || processor.getHubMixMuteForPeer(processor.getRemotePeerUserName(i)))
+                if (auto* rl = dynamic_cast<SbRichLabel*>(pvf->recvActualBitrateLabel.get())) rl->clearRich();
+            pvf->recvActualBitrateLabel->setText(recvtext, dontSendNotification);
+        }
 
         // Hosted mode: per-row dropped-packet readout. Lazy UI-thread read of the drop counter the engine already
         // maintains, on this periodic pass; no new timers, no audio-thread involvement. relayedViaHub is the gate:
@@ -2618,44 +2774,71 @@ void PeersContainerView::updatePeerViews(int specific)
         pvf->pingLabel->setText(String::formatted("%d", (int)lrintf(latinfo.pingMs) ), dontSendNotification);
         
         if (relayedViaHub) {
-            // The row shows end-to-end figures, player -> hub -> player, buffers included:
-            //   up   = my audio reaching them  = my leg to the hub (network + the hub's hold on my stream) + the hub's leg to them (network + THEIR receive buffer)
-            //   down = their audio reaching me = their leg to the hub (network + hub hold on their stream) + the hub's leg to me (network + MY receive buffer)
-            //   ping = up + down (the whole round trip through the hub)
-            // Both legs come from the hub's 10-s /sb/hxlat line (ours = the self entry). The hub's own per-leg view stays in the
-            // hover tooltip so a problem can be placed on one side.
+            // Row face: a quality light (this player's drops in the last minute, the header Link light's bands) and
+            // ONE figure, Latency = the round trip you -> hub -> that player -> hub -> you, counted like the header:
+            //   up   = my leg to the hub (network + the hub's hold on my stream) + the hub's leg to them (network + THEIR receive buffer)
+            //   down = their leg to the hub (network + the hub's hold on their stream) + the hub's leg to me (network + MY receive buffer)
+            //   + my audio interface (measured here) + theirs (relayed by the hub when their player reports it).
+            // Legs come from the hub's 10-s /sb/hxlat line (ours = the self entry). Details live in the hover.
             float toHub = -1.0f, fromHub = -1.0f, sTo = -1.0f, sFrom = -1.0f, sRtt = -1.0f; int64_t sLost = -1;
             const bool havePeer = processor.getRemotePeerHubLatency(i, toHub, fromHub);
             const bool haveSelf = processor.getSelfHubLatency(sTo, sFrom, sRtt, sLost);
             const String peerName = processor.getRemotePeerUserName(i);
+            float myIn = 0.0f, myOut = 0.0f;
+            const bool haveMine = ownInterfaceMs(myIn, myOut);
+            const float theirIface = processor.getRemotePeerHubInterfaceMs(i);
+            const bool haveTheirs = theirIface >= 0.0f;
+            float prtt = -1.0f, pup = -1.0f; processor.getRemotePeerHubStats(i, prtt, pup);
+            String figText = "-";
+            Colour figCol = dimTextColor;
             String tip;
             if (havePeer && haveSelf) {
-                const float e2eUp = sTo + fromHub, e2eDn = toHub + sFrom, e2ePing = e2eUp + e2eDn;
-                auto latcol  = [this](float ms){ return ms < sbplus::kLatE2EGreenMs ? latGoodColor : ms < sbplus::kLatE2EYellowMs ? latWarnColor : latBadColor; };
-                auto pingcol = [this](float ms){ return ms < sbplus::kLatE2ERttGreenMs ? latGoodColor : ms < sbplus::kLatE2ERttYellowMs ? latWarnColor : latBadColor; };
-                // Whole milliseconds in the row (tenths stay in the hover tooltip below)
-                pvf->latencyUpLabel->setText(String((int) std::lround(e2eUp)), dontSendNotification);
-                pvf->latencyDownLabel->setText(String((int) std::lround(e2eDn)), dontSendNotification);
-                pvf->latencyUpLabel->setColour(Label::textColourId, latcol(e2eUp));
-                pvf->latencyDownLabel->setColour(Label::textColourId, latcol(e2eDn));
-                pvf->pingLabel->setText(String((int) std::lround(e2ePing)), dontSendNotification);   // Whole ms
-                pvf->pingLabel->setColour(Label::textColourId, pingcol(e2ePing));
-                float prtt = -1.0f, pup = -1.0f; processor.getRemotePeerHubStats(i, prtt, pup);
-                // "Latency to <name> · Latency from <name> · Round-trip ping"
-                tip << "Latency to " << peerName << " " << String(e2eUp, 1) << "\nLatency from " << peerName << " " << String(e2eDn, 1)
-                    << "\nRound-trip ping " << String(e2ePing, 1) << " ms";   // One data point per line
+                const float e2eUp = sTo + fromHub, e2eDn = toHub + sFrom;
+                // One way each: our side splits exactly (input / output); theirs is relayed as one sum, split evenly.
+                const float oneUp = e2eUp + (haveMine ? myIn : 0.0f) + (haveTheirs ? 0.5f * theirIface : 0.0f);
+                const float oneDn = e2eDn + (haveTheirs ? 0.5f * theirIface : 0.0f) + (haveMine ? myOut : 0.0f);
+                const float rowLat = oneUp + oneDn;
+                figText = String((int) std::lround(rowLat)) + " ms";   // Whole milliseconds on the row, tenths in the hover
+                figCol = rowLat < sbplus::kLatE2ERttGreenMs ? latGoodColor : rowLat < sbplus::kLatE2ERttYellowMs ? latWarnColor : latBadColor;
+                tip << "Latency to " << peerName << " and back: " << String(rowLat, 1) << " ms\n"
+                    << "Your audio reaches them in " << String(oneUp, 1) << " ms, theirs reaches you in " << String(oneDn, 1) << " ms\n";
+                const float netMs = (sRtt >= 0.0f && prtt >= 0.0f) ? sRtt + prtt : -1.0f;   // Both links to the hub, there and back
+                if (netMs >= 0.0f && e2eUp + e2eDn >= netMs)
+                    tip << "Network " << String(netMs, 1) << " ms\nHub and receive buffers " << String(e2eUp + e2eDn - netMs, 1) << " ms\n";
+                else
+                    tip << "Network and buffers " << String(e2eUp + e2eDn, 1) << " ms\n";
+                tip << (haveMine ? "Your audio interface " + String(myIn + myOut, 1) + " ms" : String("Your audio interface not known")) << "\n"
+                    << (haveTheirs ? "Their audio interface " + String(theirIface, 1) + " ms" : String("Their audio interface not known")) << "\n";
             } else {
-                pvf->latencyUpLabel->setText("-", dontSendNotification);
-                pvf->latencyDownLabel->setText("-", dontSendNotification);
-                pvf->pingLabel->setText("-", dontSendNotification);
-                pvf->latencyUpLabel->setColour(Label::textColourId, dimTextColor);
-                pvf->latencyDownLabel->setColour(Label::textColourId, dimTextColor);
-                pvf->pingLabel->setColour(Label::textColourId, dimTextColor);
-                tip = TRANS("Waiting for the hub's latency report");
+                tip << TRANS("Waiting for the hub's latency report") << "\n";
             }
-            for (Label* l : { pvf->latencyUpLabel.get(), pvf->latencyDownLabel.get(), pvf->pingLabel.get(), pvf->staticLatencyLabel.get(), pvf->staticPingLabel.get() }) {
-                if (l == nullptr) continue;
-                if (l->getTooltip() != tip) { l->setInterceptsMouseClicks(true, false); l->setTooltip(tip); }   // Make sure the label takes the hover (relayed rows have no latency button over them)
+            tip << "Drops: " << String(rowRecent) << " in the last minute, " << String(rowDropped) << " since they joined\n"
+                << "Their audio to you " << sbplus::rateText(recvrate * 8.0);
+            if (pup >= 0.0f) tip << ", they send " << sbplus::rateText(pup * 1.0e3) << " to the hub";
+            auto* rlab = pvf->recvActualBitrateLabel.get();
+            const String dot = String::fromUTF8("\xe2\x97\x8f");
+            const String latWord = "  " + TRANS("Latency") + " ";
+            // The mute note has its own place after the row's buttons, so they do not move when it comes and goes
+            const String plain = dot + latWord + figText;
+            if (rlab->getText() != plain) rlab->setText(plain, dontSendNotification);
+            if (auto* rl = dynamic_cast<SbRichLabel*>(rlab)) {
+                AttributedString as; as.setJustification(rlab->getJustificationType()); as.setWordWrap(AttributedString::none);
+                const Font f = rlab->getFont();
+                as.append(dot, f, rowRecent < 5 ? latGoodColor : rowRecent <= 20 ? latWarnColor : latBadColor);   // Header Link light bands
+                as.append(latWord, f, regularTextColor);
+                as.append(figText, f, figCol);
+                rl->setRich(as);
+            }
+            if (pvf->statusNoteLabel) {
+                if (pvf->statusNoteLabel->getText() != rowMuteText) pvf->statusNoteLabel->setText(rowMuteText, dontSendNotification);
+                pvf->statusNoteLabel->setVisible(rowMuteText.isNotEmpty() && rlab->isVisible());
+            }
+            if (rlab->getTooltip() != tip) {
+                rlab->setInterceptsMouseClicks(true, false);
+                rlab->setTooltip(tip);
+                // Test aid (SB_UI_SHOTS=<folder>): the row line and its hover text, as text
+                static const String shots = SystemStats::getEnvironmentVariable("SB_UI_SHOTS", {});
+                if (shots.isNotEmpty()) File(shots).getChildFile("row-" + File::createLegalFileName(peerName) + ".txt").replaceWithText(plain + (rowMuteText.isNotEmpty() ? String::fromUTF8("  \xc2\xb7  ") + rowMuteText : String()) + "\n---\n" + tip + "\n");
             }
         }
         else if (latinfo.legacy && !latinfo.isreal) {
@@ -2730,14 +2913,14 @@ void PeersContainerView::updatePeerViews(int specific)
             // Rows are re-ordered in place when peers join or leave, so a tall meter can be left bound to the old
             // row's source and show no level. Rebind on change.
             auto * src = processor.getRemotePeerRecvMeterSource(i);
-            if (src != nullptr && src != pvf->recvMeterSrc) {
-                pvf->recvMeter->bindSource (src);   // The tip meter keeps its own source pointer
-                pvf->recvMeterSrc = src;
+            if (src != nullptr && src != pvf->recvMeter->boundSource()) {
+                pvf->recvMeter->bindSource (src);
             }
             // Rows are re-ordered in place, so a row can keep the meter width of the player that sat there before.
             // Re-lay when the row's channel count no longer matches its layout.
             if (pvf->laidOutMeterChans != processor.getRemotePeerRecvChannelCount(i)) needsUpdateLayout = true;
         }
+        if (pvf->isVisible() && pvf->laidOutName != processor.getRemotePeerUserName(i)) needsUpdateLayout = true;
 
         // The hub row is hidden per row index in updateLayout, so a re-order with the same count can leave the wrong
         // row hidden. Re-lay when a row's hidden state is stale.

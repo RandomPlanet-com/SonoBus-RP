@@ -19,6 +19,7 @@ public:
     struct Stage {
         juce::String id, name, host, city, country, genre, about, version, os;
         juce::StringArray players, instruments;   // one instrument per player, empty when not given
+        juce::Array<int> playerSeconds, playerPing, playerChannels;   // per player: seconds on stage, ping to the stage in ms, channels sent; -1 or absent = not told
         int port = 0, count = 0, maxPlayers = 0, maxChannels = 0;
         juce::int64 since = 0;
         bool locked = false, test = false, older = false;
@@ -33,15 +34,17 @@ public:
     std::function<juce::String()> currentStage;   // the stage this player is in, empty when in none
     std::function<int()> currentPort;             // the connection port of that stage, 0 when unknown
     std::function<juce::String()> userName;
+    std::function<juce::String()> stageUserName;  // the name this player has on the stage it is in
     std::function<juce::String()> userInstrument;
 
     void setActive(bool active);   // the list refreshes only while it is showing
     void setDirectoryMemory(const juce::File& file);   // where a moved directory address is kept between runs
     void setWantTestStages(bool want);                 // also ask the directory for its made-up test stages
     bool isHere(const Stage& s) const;                 // the stage this player is in
-    bool joinByName(const juce::String& name);         // the same as pressing Join on that row
+    bool joinByName(const juce::String& name);         // the same as Connect on that row
     juce::String counters() const;                     // list requests and pings sent so far
     void touched();                                    // someone is using the list: full refresh rate
+    void showNotice(const juce::String& text);         // why a join was refused, kept in view for a while; empty clears it
 
     void mouseMove(const juce::MouseEvent&) override { touched(); }
     void mouseDown(const juce::MouseEvent&) override { touched(); }
@@ -71,18 +74,27 @@ private:
     juce::Rectangle<int> columnRect(int columnId) const;
     void requestJoin(const Stage& s);
     void askPassword(const JoinRequest& req);
+    struct PlayerColumns { int name = 0, nameW = 0, inst = 0, instW = 0, since = 0, ping = 0, send = 0, numW = 0, right = 0; };
+    PlayerColumns playerColumns(int fullWidth) const;
+    void layoutConnectRow();
+    void updateConnect();
+    void connectSelected();
 
     juce::TextEditor mSearch;
     juce::ComboBox mGenre, mCountry, mKind;
     juce::ToggleButton mOpenOnly, mHideFull;
     juce::TextButton mRefresh;
-    juce::Label mStatus;
+    juce::Label mStatus, mSelected, mHint, mNotice;
+    juce::TextButton mConnect;
+    juce::Rectangle<int> mConnectRow;
+    juce::uint32 mNoticeAt = 0;
+    juce::String mHereShown;
     juce::TableHeaderComponent mHeader;
     juce::TreeView mTree;
     std::unique_ptr<juce::TreeViewItem> mRoot;
     juce::Rectangle<int> mFooter;
 
-    std::vector<Stage> mStages;
+    std::vector<Stage> mStages, mRows;   // all stages, and the rows shown
     std::set<juce::String> mOpen;
     juce::String mSelectedId, mNote;
     juce::uint32 mNoteUntil = 0;

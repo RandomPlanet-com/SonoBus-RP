@@ -257,7 +257,7 @@ Label * SuggestNewGroupView::createPeerLabel()
     label->setFont(12);
     label->setColour(Label::textColourId, Colour(0xaaaaaaaa));
     label->setJustificationType(Justification::centredLeft);
-    label->setMinimumHorizontalScale(0.4);
+    label->setMinimumHorizontalScale(1.0f);
     return label;
 }
 

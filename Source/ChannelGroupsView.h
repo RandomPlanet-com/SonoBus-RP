@@ -263,12 +263,51 @@ public:
     std::unique_ptr<Slider> monitorSlider;
     std::unique_ptr<Label>  panLabel;
     std::unique_ptr<Slider> panSlider;
+    std::unique_ptr<Slider> widthSlider;   // player rows: stereo width of a pair, beside its pan knob
     std::unique_ptr<SonoDrawableButton> linkButton;
     std::unique_ptr<SonoDrawableButton> monoButton;
     std::unique_ptr<SonoDrawableButton> destButton;
 
 
     bool singlePanner = true;
+
+    // Player rows: what the pan knob moves
+    enum PanMode { PanNone = 0, PanSingle, PanPair, PanBalance };   // PanBalance: the whole mix of a player with several instruments
+    int panMode = PanNone;
+    bool pairSwapped = false;   // a pair stored right-of-left keeps that order
+
+    // A player's header row, and each instrument row of an expanded player, is laid out by hand in one of these
+    // forms, with the same columns, so every level slider starts and ends at the same place:
+    //   wide       name, level, knobs, output on one line; status and buttons under it
+    //   medium     name and meter; level, output, knobs; status and buttons
+    //   narrow     as medium, the output on a line of its own at the bottom
+    //   narrowTall as narrow, the knobs beside the level only (the status line needs the whole width)
+    enum HeaderForm { HeaderWide = 0, HeaderMedium, HeaderNarrow, HeaderNarrowTall };
+    struct HeaderLayout {
+        bool active = false;
+        int form = HeaderMedium;
+        int nameCol = 110;      // wide: name column, the same on every row
+        int destCol = 0;        // wide and medium: output column, the same on every row (0 = none)
+        int destOwn = 44;       // narrow: this row's output button at its own width
+        int knobCol = 48;       // knob column, the same on every row
+        int statW = 0;          // status text slot at the start of the lower line (0 = none)
+        int buttonW = 52;
+        int meterW = 0;
+        int meterCol = 0;       // wide: room kept for the meter when it is wider than this row's own (0 = its own)
+        int meterSlack = 0;     // wide: how much narrower this row's meter beside it is than the widest (the row is wider)
+        bool showMeter = false;
+        bool showDest = true;
+        bool lower = true;      // the lower line (MUTE, SOLO, FX); off for a channel row inside an instrument
+    };
+    HeaderLayout header;
+    juce::Rectangle<int> statSlot;   // kept free for the owner's status text
+    juce::Rectangle<int> noteSlot;   // what is left of the lower line after the buttons
+    void layoutHeader();
+    static int headerHeight (const HeaderLayout &);
+
+    static constexpr int kHeaderTop = 4, kHeaderLineH = 34, kHeaderLowerH = 26, kHeaderButtonH = 24, kHeaderGap = 2;
+    static constexpr int kHeaderKnobH = kHeaderLineH + kHeaderGap + kHeaderLowerH + 1;
+    static constexpr int kHeaderIndent = 53;   // link button and its gap: where the name and the level start
 
     std::unique_ptr<foleys::LevelMeter> meter;
     std::unique_ptr<foleys::LevelMeter> premeter;
@@ -386,6 +425,23 @@ public:
     void setEstimatedWidth(int estwidth) { mEstimatedWidth = estwidth; }
     int getEstimatedWidth() const { return mEstimatedWidth;}
 
+    // Player rows: the list measures every row, then gives all of them the same form and columns
+    struct PeerRowMetrics {
+        int nameNeed = 0;         // the name in full (expanded: also each instrument's name)
+        int destNeed = 0;         // the output label in full (0 = no output button; expanded: the instruments')
+        int meterWidth = 0;       // the collapsed row's meter
+        bool widthKnob = false;
+        bool expanded = false;
+    };
+    PeerRowMetrics getPeerRowMetrics() const;
+    void setPeerRowLayout(int form, int nameCol, int destCol, int knobCol, int statWidth, int buttonWidth, int meterSlack = 0);
+    juce::Rectangle<int> getStatSlotBounds() const;
+    juce::Rectangle<int> getNoteSlotBounds() const;
+    bool takeLayoutChanged() { const bool f = mLayoutChanged; mLayoutChanged = false; return f; }
+
+    static constexpr int kKnobColSingle = 48, kKnobColPair = 90;
+    static constexpr int kHeaderButtonMin = 40, kHeaderButtonMax = 52;
+
     juce::Rectangle<int> getMinimumContentBounds() const;
 
     void applyToAllSliders(std::function<void(Slider *)> & routine);
@@ -432,10 +488,16 @@ protected:
     int getChanGroupFromIndex(int index);
     juce::Rectangle<int> getBoundsForChanGroup(int chgroup);
     void setPairPanner(ChannelGroupView * pvf, bool stereoPair);
+    // Player rows: pan and width knobs on top of the per-channel pan positions
+    void configKnob(ChannelGroupView * pvf, Slider * slider, bool isWidth);
+    void pairPansFromKnobs(ChannelGroupView * pvf, float & left, float & right) const;
+    void syncPairKnobs(ChannelGroupView * pvf, float left, float right);
+    void applyPairKnobs(ChannelGroupView * pvf, int changroup);
     String outputLabel(int deststart, int destcnt) const;
     void setDestText(ChannelGroupView * pvf, int deststart, int destcnt);
     void setDestLabel(ChannelGroupView * pvf, const String & text);
     int destWidthFor(ChannelGroupView * pvf, int minWidth) const;
+    int destMinWidthFor(ChannelGroupView * pvf, int minWidth) const;   // channel part + "…" only
     bool mDestTextChanged = false;
     int getChanGroupForPoint(Point<int> pos, bool inbetween);
 
@@ -496,6 +558,16 @@ protected:
     bool mPeerMode = false;
     bool mHideRowMeter = false;   
     int mPeerIndex = 0;
+
+    // Player row header, as set by the list
+    int mRowForm = ChannelGroupView::HeaderMedium;
+    int mRowNameCol = 110;
+    int mRowDestCol = 0;
+    int mRowKnobCol = kKnobColSingle;
+    int mRowStatWidth = 0;
+    int mRowButtonWidth = kHeaderButtonMax;
+    int mRowMeterSlack = 0;
+    bool mLayoutChanged = false;
 
     // dragging state
     bool mDraggingActive = false;

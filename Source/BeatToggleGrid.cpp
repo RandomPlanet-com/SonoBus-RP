@@ -458,7 +458,7 @@ void BeatToggleGrid::refreshGrid(bool reset)
             label->setJustificationType(Justification::centred);
             label->setFont(Font(fontsize));
             label->setInterceptsMouseClicks(false, false);
-            label->setMinimumHorizontalScale(0.3);
+            label->setMinimumHorizontalScale(1.0f);
             
             pad->addAndMakeVisible(label);
             pad->label.reset(label);

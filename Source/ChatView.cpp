@@ -510,7 +510,10 @@ void ChatView::mouseDrag (const MouseEvent& event)
 
 void ChatView::addNewChatMessage(const SBChatEvent & mesg, bool refresh)
 {
-    processor.getAllChatEvents().add(mesg);
+    if (processor.sbChatSyncToStage()) showStageChat();
+    SBChatEvent ev(mesg);
+    ev.stage = processor.sbChatStageKey();
+    processor.getAllChatEvents().add(ev);
 
     if (refresh) {
         refreshMessages();
@@ -519,15 +522,30 @@ void ChatView::addNewChatMessage(const SBChatEvent & mesg, bool refresh)
 
 void ChatView::addNewChatMessages(const Array<SBChatEvent> & mesgs, bool refresh)
 {
-    processor.getAllChatEvents().addArray(mesgs);
+    if (processor.sbChatSyncToStage()) showStageChat();
+    const String stage = processor.sbChatStageKey();
+    for (auto ev : mesgs) { ev.stage = stage; processor.getAllChatEvents().add(ev); }
 
     if (refresh) {
         refreshMessages();
     }
 }
 
+void ChatView::checkStage()
+{
+    if (processor.sbChatSyncToStage()) showStageChat();
+}
+
+void ChatView::showStageChat()
+{
+    resetView();
+    refreshAllMessages();
+    mLastChatViewStamp = mLastChatUserMessageStamp;   // lines brought back are not news
+}
+
 void ChatView::refreshMessages()
 {
+    if (processor.sbChatSyncToStage()) { showStageChat(); return; }
     // only new ones since last refresh
     int count = jmin(processor.getAllChatEvents().size(), jmax(0, processor.getAllChatEvents().size() - lastShownCount));
 
@@ -538,10 +556,12 @@ void ChatView::refreshMessages()
 
 void ChatView::refreshAllMessages()
 {
+    if (processor.sbChatSyncToStage()) { showStageChat(); return; }
     // re-render all messages
     lastShownCount = 0;
     mLastChatMessageStamp = 0;
     mLastChatViewStamp = 0;
+    mLastShownEventSec = 0;
 
     mChatTextEditor->clear();
     processNewChatMessages(0, processor.getAllChatEvents().size());
@@ -634,8 +654,14 @@ void ChatView::showMenu(bool show)
 
 void ChatView::clearAll()
 {
-    mChatTextEditor->clear();
     processor.getAllChatEvents().clearQuick();
+    resetView();
+}
+
+void ChatView::resetView()
+{
+    mChatTextEditor->clear();
+    mLastShownEventSec = 0;
     mLastChatMessageStamp = 0;
     mLastChatViewStamp = 0;
     mLastChatUserMessageStamp = 0;
@@ -899,7 +925,9 @@ void ChatView::processNewChatMessages(int index, int count)
             }
         }
 
-        bool showtime = nowtime > mLastChatMessageStamp + 60.0 || nowtime > mLastChatShowTimeStamp + 60.0;
+        // Each line carries its own time, so lines brought back show when they were written.
+        const double evsec = event.stamp.toMilliseconds() * 1e-3;
+        bool showtime = nowtime > mLastChatMessageStamp + 60.0 || nowtime > mLastChatShowTimeStamp + 60.0 || evsec > mLastShownEventSec + 60.0;
         
         Colour usecolor;
 
@@ -928,11 +956,24 @@ void ChatView::processNewChatMessages(int index, int count)
             mChatTextEditor->setColour(TextEditor::textColourId, usecolor);
             mChatTextEditor->setFont(mChatNameFont);
             mChatTextEditor->insertTextAtCaret("==  ");
-            mChatTextEditor->insertTextAtCaret(event.message);
+            if (event.tags == "roster") {
+                // heading carries the time; one name per line, a closing "==" on its own line
+                mChatTextEditor->insertTextAtCaret("Players on Stage as of " + event.stamp.toString(false, true, false));
+                StringArray names = StringArray::fromLines(event.message);
+                for (auto & name : names) {
+                    mChatTextEditor->insertTextAtCaret("\n");
+                    mChatTextEditor->insertTextAtCaret(name);
+                }
+                mChatTextEditor->insertTextAtCaret("\n==");
+            }
+            else {
+                mChatTextEditor->insertTextAtCaret(event.message);
 
-            mChatTextEditor->insertTextAtCaret("      ");
-            mChatTextEditor->insertTextAtCaret(Time::getCurrentTime().toString(false, true, false));
+                mChatTextEditor->insertTextAtCaret("      ");
+                mChatTextEditor->insertTextAtCaret(event.stamp.toString(false, true, false));
+            }
             mLastChatShowTimeStamp = nowtime;
+            mLastShownEventSec = evsec;
 
             mChatTextEditor->insertTextAtCaret("\n");
         }
@@ -943,10 +984,11 @@ void ChatView::processNewChatMessages(int index, int count)
                 mChatTextEditor->insertTextAtCaret(event.from);
 
                 mChatTextEditor->insertTextAtCaret("      ");
-                mChatTextEditor->insertTextAtCaret(Time::getCurrentTime().toString(false, true, false));
+                mChatTextEditor->insertTextAtCaret(event.stamp.toString(false, true, false));
 
                 mChatTextEditor->insertTextAtCaret("\n");
                 mLastChatShowTimeStamp = nowtime;
+                mLastShownEventSec = evsec;
             }
 
             mChatTextEditor->setColour(TextEditor::textColourId, usecolor);
@@ -1049,6 +1091,7 @@ void ChatView::commitChatMessage()
     auto text = mChatSendTextEditor->getText();
     if (text.isEmpty()) return;
 
+    checkStage();
     SBChatEvent event;
     auto privateChat = mChatTabs->getCurrentTabIndex() > 0;
     
@@ -1065,6 +1108,7 @@ void ChatView::commitChatMessage()
     processor.sendChatEvent(event);
 
     event.type = SBChatEvent::SelfType;
+    event.stage = processor.sbChatStageKey();
 
     // process self
 

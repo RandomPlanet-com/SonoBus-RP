@@ -27,6 +27,7 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <optional>
 
 #include "LatencyMeasurer.h"
 #include "Metronome.h"
@@ -577,6 +578,7 @@ static String peerStateCacheMapKey("PeerStateCacheMap");
 static String peerStateCacheKey("PeerStateCache");
 static String peerNameKey("name");
 static String peerLevelKey("level");
+static String peerBalanceKey("balance");
 static String peerMonoPanKey("pan");
 static String peerPan1Key("span1");
 static String peerPan2Key("span2");
@@ -745,6 +747,7 @@ struct SonobusAudioProcessor::RemotePeer {
     std::unique_ptr<LatencyMeasurer> latencyMeasurer;
 
     float gain = 1.0f;
+    float balance = 0.0f;        // left/right balance of the player's whole mix, -1 left .. 1 right, 0 = centre
 
     float buffertimeMs = 0.0f;
     float padBufferTimeMs = 0.0f;
@@ -769,6 +772,7 @@ struct SonobusAudioProcessor::RemotePeer {
     float recvStereoPan[MAX_PANNERS]; // only use 2
     // runtime state
     float _lastgain = 0.0f;
+    float _lastBalance = 0.0f;
     bool connected = false;
     String userName;
     String groupName;
@@ -850,6 +854,7 @@ struct SonobusAudioProcessor::RemotePeer {
     float hubRttMs = -1.0f;       // Hub<->that player round trip (their ping) from /sb/hxlat
     uint32_t sbAdaptEvSeq = 0;    // Last adaptive-depth decision seq logged for this peer's sink (aoo_opt_adapt_events)
     float hubUpKbps = -1.0f;      // That player's uplink rate into the hub, kbit/s, from /sb/hxlat
+    float hubIfaceMs = -1.0f;     // That player's audio interface in + out, ms, from /sb/hxlat; -1 = not known
 
     // Set on every relayed
     // row when the hub connection drops (AOONET_CLIENT_DISCONNECT_EVENT),
@@ -860,6 +865,8 @@ struct SonobusAudioProcessor::RemotePeer {
     // Atomic: written on the event thread and read on the message thread,
     // both under mCoreLock READ (not write) locks.
     std::atomic<bool> hostedFeedStale { false };
+
+    double retiredAtMs = 0.0;   // when the row left the peer list (retired list bound)
 
     ReadWriteLock    sinkLock;
 };
@@ -1111,6 +1118,7 @@ public:
             Thread::sleep(20);
             
             _processor.handleEvents();                       
+            _processor.reapRetiredPeers();   // the bound for retired rows when no editor drains them
         }
         
         DBG("Event thread finishing");
@@ -1222,6 +1230,8 @@ SonobusAudioProcessor::BusesProperties SonobusAudioProcessor::getDefaultLayout()
     return props;
 }
 
+
+namespace sbtap { static const char* tapConf(const char* key); }   // forward decl
 
 //==============================================================================
 SonobusAudioProcessor::SonobusAudioProcessor()
@@ -1462,6 +1472,13 @@ mState (*this, &mUndoManager, "SonoBusAoO",
     
     // audio setup
     mFormatManager.registerBasicFormats();    
+
+    {   // Run-scoped switches, read once before any audio or network thread starts
+        const char* v = sbtap::tapConf("SB_CORE_SNAPSHOT"); mCoreSnapOn = (v && *v) ? atoi(v) != 0 : true;
+        const char* k = sbtap::tapConf("SB_JOIN_RETRY_KEEP"); mJoinRetryKeep = (k && *k) ? atoi(k) != 0 : true;
+        const char* r = sbtap::tapConf("SB_PEER_RETIRE"); mPeerRetireOn = (r && *r) ? atoi(r) != 0 : true;
+        if (mCoreSnapOn) mCoreSnap.store(new CorePeerSnap(), std::memory_order_seq_cst);
+    }
     
     initializeAoo();
 
@@ -1578,6 +1595,93 @@ SonobusAudioProcessor::~SonobusAudioProcessor()
     mTransportSource.removeChangeListener(this);
 
     cleanupAoo();
+
+    delete mCoreSnap.exchange(nullptr, std::memory_order_seq_cst);
+}
+
+std::unique_ptr<SonobusAudioProcessor::CorePeerSnap> SonobusAudioProcessor::publishCoreSnapLocked()
+{
+    if (!mCoreSnapOn) return nullptr;
+    auto * snap = new CorePeerSnap();
+    snap->peers.assign(mRemotePeers.begin(), mRemotePeers.end());
+    return std::unique_ptr<CorePeerSnap>(mCoreSnap.exchange(snap, std::memory_order_seq_cst));
+}
+
+bool SonobusAudioProcessor::waitCoreSnapReaders()
+{
+    if (!mCoreSnapOn) return true;
+    // The callback makes the counter odd before it loads the snapshot and even when done with it.
+    // Even now: any later callback loads the new snapshot. Odd: wait for that one callback to end.
+    const uint64_t s = mCoreSnapAudioSeq.load(std::memory_order_seq_cst);
+    if ((s & 1) == 0) return true;
+    const double t0 = Time::getMillisecondCounterHiRes();
+    int spins = 0;
+    while (mCoreSnapAudioSeq.load(std::memory_order_seq_cst) == s) {
+        if (++spins < 200) {
+            std::this_thread::yield();
+        } else {
+            if (Time::getMillisecondCounterHiRes() - t0 > 2000.0) return false;
+            Thread::sleep(1);
+        }
+    }
+    return true;
+}
+
+// Views (row meters) may still point into a row for up to one refresh after it left the peer list.
+// The rows are parked here. The editor frees them after it rebuilt the rows; when nothing has drained
+// the list for a while (no editor, or its timer is not running, so nothing paints either), the event
+// thread frees rows past the bound. Freed at once on the removing thread when the switch is off.
+static constexpr double kPeerRetireBoundMs = 5000.0;
+
+void SonobusAudioProcessor::retirePeers(OwnedArray<RemotePeer>& removed)
+{
+    if (removed.isEmpty()) return;
+    if (!mPeerRetireOn) { removed.clear(); return; }
+
+    const double now = Time::getMillisecondCounterHiRes();   // after the list change: a rebuild started later cannot bind these
+    const ScopedLock sl (mRetiredLock);
+    while (!removed.isEmpty()) {
+        auto* p = removed.removeAndReturn(0);
+        p->retiredAtMs = now;
+        mRetiredPeers.add(p);
+    }
+    mRetiredCount.store(mRetiredPeers.size(), std::memory_order_relaxed);
+}
+
+void SonobusAudioProcessor::reapRetiredPeers()
+{
+    if (mRetiredCount.load(std::memory_order_relaxed) == 0) return;
+
+    const double now = Time::getMillisecondCounterHiRes();
+    if (now - (double) mRetiredDrainMs.load(std::memory_order_relaxed) < kPeerRetireBoundMs) return;   // an editor is draining
+
+    OwnedArray<RemotePeer> gone;   // freed after the lock is released
+    {
+        const ScopedLock sl (mRetiredLock);
+        for (int i = mRetiredPeers.size(); --i >= 0;) {
+            if (now - mRetiredPeers.getUnchecked(i)->retiredAtMs > kPeerRetireBoundMs) {
+                gone.add(mRetiredPeers.removeAndReturn(i));
+            }
+        }
+        mRetiredCount.store(mRetiredPeers.size(), std::memory_order_relaxed);
+    }
+}
+
+void SonobusAudioProcessor::freeRetiredPeers(double retiredBeforeMs)
+{
+    mRetiredDrainMs.store((int64_t) Time::getMillisecondCounterHiRes(), std::memory_order_relaxed);
+    if (mRetiredCount.load(std::memory_order_relaxed) == 0) return;
+
+    OwnedArray<RemotePeer> gone;   // freed after the lock is released
+    {
+        const ScopedLock sl (mRetiredLock);
+        for (int i = mRetiredPeers.size(); --i >= 0;) {
+            if (mRetiredPeers.getUnchecked(i)->retiredAtMs <= retiredBeforeMs) {
+                gone.add(mRetiredPeers.removeAndReturn(i));
+            }
+        }
+        mRetiredCount.store(mRetiredPeers.size(), std::memory_order_relaxed);
+    }
 }
 
 void SonobusAudioProcessor::moveOldMisplacedFiles()
@@ -1871,7 +1975,14 @@ void SonobusAudioProcessor::cleanupAoo()
         
         mAooDummySource.reset();
         
-        mRemotePeers.clear();
+        {   // Take the rows out of the callback's view before they are freed
+            OwnedArray<RemotePeer> doomed;
+            doomed.swapWith(mRemotePeers);
+            auto oldSnap = publishCoreSnapLocked();
+            if (oldSnap && !waitCoreSnapReaders()) { doomed.clear(false); (void) oldSnap.release(); }
+            doomed.clear();
+        }
+        freeRetiredPeers(Time::getMillisecondCounterHiRes());   // no views are left at this point
 
         mEndpoints.clear();
 
@@ -1919,8 +2030,14 @@ void SonobusAudioProcessor::stopAooServer()
 
 void SonobusAudioProcessor::setCurrentInstrument(const String & instrument)
 {
-    const ScopedLock sl (mInstrumentLock);
-    mCurrentInstrument = instrument.trim().substring(0, 24);
+    bool changed = false;
+    {
+        const ScopedLock sl (mInstrumentLock);
+        const String v = instrument.trim().substring(0, 24);
+        changed = (v != mCurrentInstrument);
+        mCurrentInstrument = v;
+    }
+    if (changed) sbSendVersionToHub();   // the hub's player list and stage listing follow at once
 }
 
 String SonobusAudioProcessor::getCurrentInstrument() const
@@ -2020,6 +2137,7 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
 bool SonobusAudioProcessor::connectToServerUser(const String & host, int port, const String & username, const String & passwd)
 {
     mUserConnectRetriesLeft = 10;
+    mRemovedByHost = false;
     if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] user connect %s:%d as '%s' (connected=%d inflight=%d)\n", host.toRawUTF8(), port, username.toRawUTF8(), mIsConnectedToServer ? 1 : 0, mServerConnectInFlight.get());
     return connectToServer(host, port, username, passwd);
 }
@@ -2075,6 +2193,7 @@ bool SonobusAudioProcessor::disconnectFromServer(bool userRequested)
         mSessionConnectionStamp = 0.0;
 
         mCurrentJoinedGroup.clear();
+        sbChatSetStage({});
     }
 
     {
@@ -2085,6 +2204,61 @@ bool SonobusAudioProcessor::disconnectFromServer(bool userRequested)
 
 
 
+    return true;
+}
+
+void SonobusAudioProcessor::sbChatSetStage(const String & key)
+{
+    const ScopedLock sl (mChatStageLock);
+    mChatStageWanted = key;
+}
+
+String SonobusAudioProcessor::sbChatStageKey() const
+{
+    const ScopedLock sl (mChatStageLock);
+    return mChatStageWanted;
+}
+
+// Leaving a stage puts its chat aside and joining one brings its own chat back. Every line goes to the
+// stage it was written on; lines written on no stage are dropped. Kept: the last lines of the last stages.
+bool SonobusAudioProcessor::sbChatSyncToStage()
+{
+    const String wanted = sbChatStageKey();
+    if (wanted == mChatStageShown) return false;
+    const int keepLines = 200, keepStages = 20;
+
+    Array<SBChatEvent> back;
+    if (wanted.isNotEmpty()) {
+        auto kept = mChatByStage.find(wanted);
+        if (kept != mChatByStage.end()) { back.swapWith(kept->second); mChatByStage.erase(kept); }
+        mChatStageOrder.removeString(wanted);
+    }
+    Array<SBChatEvent> leaving;
+    {
+        const ScopedLock sl (mAllChatEvents.getLock());   // one step for the network thread, which appends under this lock
+        leaving.addArray(mAllChatEvents);
+        mAllChatEvents.clearQuick();
+        mAllChatEvents.addArray(back);
+        if (wanted.isNotEmpty())
+            for (auto & ev : leaving) if (ev.stage == wanted) mAllChatEvents.add(ev);
+    }
+    StringArray touched;
+    for (auto & ev : leaving) {
+        if (ev.stage.isEmpty() || ev.stage == wanted) continue;
+        mChatByStage[ev.stage].add(ev);
+        touched.addIfNotAlreadyThere(ev.stage);
+    }
+    for (auto & key : touched) {
+        auto & list = mChatByStage[key];
+        if (list.size() > keepLines) list.removeRange(0, list.size() - keepLines);
+        mChatStageOrder.removeString(key);
+        mChatStageOrder.add(key);
+    }
+    while (mChatStageOrder.size() > keepStages) {
+        mChatByStage.erase(mChatStageOrder[0]);
+        mChatStageOrder.remove(0);
+    }
+    mChatStageShown = wanted;
     return true;
 }
 
@@ -10373,6 +10547,9 @@ bool SonobusAudioProcessor::handleReceivedPacket(const char * buf, int nbytes, E
 // Hub -> every player when someone mutes/unmutes their send: "/sb/hxsendmutestate s:userName i:muted".
 #define SONOBUS_MSG_HXSENDMUTESTATE "/hxsendmutestate"
 #define SONOBUS_MSG_HXSENDMUTESTATE_LEN 16
+// Hub -> one player at the moment the host removes them: "/sb/hxremoved s:reason".
+#define SONOBUS_MSG_HXREMOVED "/hxremoved"
+#define SONOBUS_MSG_HXREMOVED_LEN 10
 // Hub -> one WAN player: "/sb/fwprobe/req h:token i:udpPort i:serverPort" — probe the hub's ports from outside.
 #define SONOBUS_MSG_FWPROBEREQ "/fwprobe/req"
 #define SONOBUS_MSG_FWPROBEREQ_LEN 12
@@ -10396,6 +10573,7 @@ enum {
     SONOBUS_MSGTYPE_HXLAT,
     SONOBUS_MSGTYPE_HXRECSTATE,
     SONOBUS_MSGTYPE_HXSENDMUTESTATE,   
+    SONOBUS_MSGTYPE_HXREMOVED,
     SONOBUS_MSGTYPE_FWPROBEREQ   
 };
 
@@ -10503,6 +10681,13 @@ static int32_t sonobusOscParsePattern(const char *msg, int32_t n, int32_t & rett
         {
             rettype = SONOBUS_MSGTYPE_HXSENDMUTESTATE;   
             offset += SONOBUS_MSG_HXSENDMUTESTATE_LEN;
+            return offset;
+        }
+        else if (n >= (offset + SONOBUS_MSG_HXREMOVED_LEN)
+            && !memcmp(msg + offset, SONOBUS_MSG_HXREMOVED, SONOBUS_MSG_HXREMOVED_LEN))
+        {
+            rettype = SONOBUS_MSGTYPE_HXREMOVED;
+            offset += SONOBUS_MSG_HXREMOVED_LEN;
             return offset;
         }
         else if (n >= (offset + SONOBUS_MSG_FWPROBEREQ_LEN)
@@ -10666,6 +10851,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             
             if (!isAddressBlocked(endpoint->ipaddr)) {
                 
+                chatevent.stage = sbChatStageKey();
                 mAllChatEvents.add(chatevent);
                 clientListeners.call(&SonobusAudioProcessor::ClientListener::sbChatEventReceived, this, chatevent);
             }
@@ -10822,6 +11008,31 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             sbServePortProbe(endpoint->ipaddr, token, udpPort, serverPort);
             return true;
         }
+        else if (type == SONOBUS_MSGTYPE_HXREMOVED) {
+            // The host removed this player. Only the hub may say so. The reason goes to the window and
+            // nothing rejoins on its own. Control path only.
+            String why;
+            auto it = message.ArgumentsBegin();
+            if (it != message.ArgumentsEnd() && it->IsString()) why = String(CharPointer_UTF8(it->AsString())).substring(0, 200);
+            String group;
+            {
+                const ScopedLock sl (mClientLock);
+                group = mCurrentJoinedGroup;
+            }
+            if (!isHostedMixModeEnabled() || group.isEmpty()) return true;
+            bool fromHub = false;
+            {
+                const ScopedReadLock sl(mCoreLock);
+                for (auto* p : mRemotePeers) {
+                    if (p && p->userName == mHubPeerUsername && p->endpoint && p->endpoint->ipaddr == endpoint->ipaddr) { fromHub = true; break; }
+                }
+            }
+            if (!fromHub) return true;
+            if (mRemovedByHost.exchange(true)) return true;   // The hub says it twice
+            mInitialAutoReconnectDone = true;
+            clientListeners.call(&SonobusAudioProcessor::ClientListener::sbRemovedFromStage, this, group, why);
+            return true;
+        }
         else if (type == SONOBUS_MSGTYPE_HXSENDMUTESTATE) {
             // Immediate send-mute change for one player (the 10-s /sb/hxlat re-asserts it).
             auto it = message.ArgumentsBegin();
@@ -10864,6 +11075,8 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             if (it != message.ArgumentsEnd()) upKbps = (it++)->AsFloat();
             int32_t sendMuted = -1;   // That player muted their send (older hubs omit it)
             if (it != message.ArgumentsEnd()) sendMuted = (it++)->AsInt32();
+            float ifaceMs = -1.0f;   // Their audio interface in + out (older hubs omit it; -1 = not known)
+            if (it != message.ArgumentsEnd() && it->IsFloat()) ifaceMs = (it++)->AsFloat();
             if (who == mCurrentUsername) {   // Our own legs, same model as everyone's rows → header
                 mSelfHubLatToMs = toHub; mSelfHubLatFromMs = fromHub; mSelfHubRttMs = rtt; mSelfHubUplinkLost = uplinkLost;
                 mSelfHubLatStampMs = Time::getMillisecondCounter();
@@ -10879,7 +11092,8 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                     if (uplinkLost >= 0) p->hubUplinkLost = uplinkLost;
                     if (rec >= 0) p->remoteIsRecording = rec != 0;   // lights the stock REC icon; status line names who
                     if (sendMuted >= 0) p->remoteSendMutedViaHub = sendMuted != 0;   
-                    p->hubRttMs = rtt; p->hubUpKbps = upKbps;   
+                    p->hubRttMs = rtt; p->hubUpKbps = upKbps;
+                    p->hubIfaceMs = (ifaceMs >= 0.0f && ifaceMs < 1000.0f) ? ifaceMs : -1.0f;
                     p->hubLatStampMs = Time::getMillisecondCounter();
                     break;
                 }
@@ -11618,6 +11832,38 @@ void SonobusAudioProcessor::sbSendMuteStateToHub()
     }
 }
 
+// Our version, system and instrument, so the hub can show who runs what and what they play.
+// Sent with every 10-s report and at once when the instrument changes. Control path only.
+void SonobusAudioProcessor::sbSendHxver(RemotePeer * hubPeer)
+{
+    if (!hubPeer) return;
+    static const String ver = [](){ const auto i = SonobusPlusVersion::get();
+        return i.version.isNotEmpty() ? i.marketing + " (" + i.version + ")" : i.marketing + " (dev)"; }();
+   #if JUCE_MAC
+    static const char* const os = "Mac";
+   #elif JUCE_WINDOWS
+    static const char* const os = "Windows";
+   #elif JUCE_LINUX
+    static const char* const os = "Linux";
+   #else
+    static const char* const os = "other";
+   #endif
+    const String instrument = getCurrentInstrument();
+    char vb[224];
+    osc::OutboundPacketStream vm(vb, sizeof(vb));
+    try {
+        vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.toRawUTF8() << osc::EndMessage;
+        sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
+    } catch (const osc::Exception&) {}
+}
+
+void SonobusAudioProcessor::sbSendVersionToHub()
+{
+    if (!isHostedMixModeEnabled()) return;
+    const ScopedReadLock sl (mCoreLock);
+    sbSendHxver(sb_findHubPeer(mRemotePeers, mHubPeerUsername));
+}
+
 // Player-assisted hub port check. We are outside the hub's network, so our fresh UDP
 // sockets and TCP connect test the hub's router/firewall the way a new player would. Reply goes to the hub
 // over the normal peer path (hub socket), from which the request came. Rate-limited: one probe per 2 s.
@@ -11653,7 +11899,7 @@ void SonobusAudioProcessor::sbServePortProbe(const String& hubIp, int64 token, i
     }).detach();
 }
 
-void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int bufSize)
+void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int bufSize, float ifaceMs)
 {
     const double now = Time::getMillisecondCounterHiRes();
     if (mSbAudioHealthLastMs <= 0) { mSbAudioHealthLastMs = now; mSbAudioCbLast = mSbAudioCallbacks.load(std::memory_order_relaxed); mSbXrunLast = xrunsTotal; return; }
@@ -11742,31 +11988,12 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
                    << hxAgeS                                                               // Seconds since our last applied /sb/hxlat (-1 never)
                    << hubBufMode                                                           // Our receive-buffer mode for the hub feed, 0 Manual / 1 Auto
                    << (int32_t) (mMainSendMute.get() ? 1 : 0)        // Our send mute, re-asserted every 10 s (send mute ONLY, stock semantics)
-                   << (int32_t) (sbIdleMaskDecodeOn() ? 1 : 0) << osc::EndMessage;          // Capability bits (bit0 = decodes idle-masked blocks) — sent even when muted, so the hub
-                                                                                           // masks its feeds to us although it never sees our own stream
+                   << (int32_t) (sbIdleMaskDecodeOn() ? 1 : 0)       // Capability bits (bit0 = decodes idle-masked blocks) — sent even when muted, so the hub
+                                                                     // masks its feeds to us although it never sees our own stream
+                   << (float) ifaceMs << osc::EndMessage;            // Our audio interface in + out, ms (-1 = not known); older hubs ignore it
                 sendPeerMessage(hubPeer, hm.Data(), (int32_t) hm.Size());
             } catch (const osc::Exception&) {}
-            // Our version and system, so the hub can show who runs what. Re-sent with every report; control path only.
-            {
-                static const String ver = [](){ const auto i = SonobusPlusVersion::get();
-                    return i.version.isNotEmpty() ? i.marketing + " (" + i.version + ")" : i.marketing + " (dev)"; }();
-               #if JUCE_MAC
-                static const char* const os = "Mac";
-               #elif JUCE_WINDOWS
-                static const char* const os = "Windows";
-               #elif JUCE_LINUX
-                static const char* const os = "Linux";
-               #else
-                static const char* const os = "other";
-               #endif
-                const String instrument = getCurrentInstrument();
-                char vb[224];
-                osc::OutboundPacketStream vm(vb, sizeof(vb));
-                try {
-                    vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.toRawUTF8() << osc::EndMessage;
-                    sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
-                } catch (const osc::Exception&) {}
-            }
+            sbSendHxver(hubPeer);   // version, system, instrument: re-sent with every report
         }
     }
     if (isHostedMixModeEnabled() && (++mHxlatTick % 3) == 0) {   // /sb/hxlat feed accounting every 30 s, always on (one line, one small file)
@@ -11813,6 +12040,8 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
                 const uint32_t mx = mSbLockWaitMaxUs.exchange(0, std::memory_order_relaxed);
                 const uint32_t nOver = mSbLockWaitsOver1ms.exchange(0, std::memory_order_relaxed);
                 fprintf(f, "%.3f corelock_wait_max_us %u\n%.3f corelock_waits_gt1ms %u\n", ts, mx, ts, nOver);
+                const uint32_t nBlocked = mSbCoreBlocked.exchange(0, std::memory_order_relaxed);
+                fprintf(f, "%.3f corelock_blocked %u\n%.3f corelock_snapshot %d\n", ts, nBlocked, ts, mCoreSnapOn ? 1 : 0);
             }
             {   // Recv-thread lateness behind the kernel (reset per tick)
                 const uint32_t rmx = mSbRxLatMaxUs.exchange(0, std::memory_order_relaxed), rov = mSbRxLatOver2ms.exchange(0, std::memory_order_relaxed);
@@ -11824,6 +12053,13 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
                 const uint32_t cmx = mSbCbGapMaxUs.exchange(0, std::memory_order_relaxed), cov = mSbCbGapOver2ms.exchange(0, std::memory_order_relaxed);
                 fprintf(f, "%.3f cb_gap_max_us %u\n%.3f cb_gap_gt2ms %u\n", ts, cmx, ts, cov);
                 if (sbDiagOn()) fprintf(stderr, "[SB-CBGAP] max=%u us  >2ms=%u\n", cmx, cov);
+            }
+            {   // Zero runs in the device input (reset per tick, written only when there were any)
+                const uint32_t zr = mSbInputZeroRuns.exchange(0, std::memory_order_relaxed), zf = mSbInputZeroFrames.exchange(0, std::memory_order_relaxed);
+                if (zr > 0) {
+                    fprintf(f, "%.3f input_zero_runs %u\n%.3f input_zero_frames %u\n", ts, zr, ts, zf);
+                    if (sbDiagOn()) fprintf(stderr, "[SB-INZERO] runs=%u frames=%u\n", zr, zf);
+                }
             }
             fclose(f);
         }
@@ -12968,7 +13204,8 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
             if (e->result == 0){
                 DBG("Disconnected from server - " << String::fromUTF8(e->errormsg));
                 
-                if (mCurrentJoinedGroup.isNotEmpty() && mReconnectAfterServerLoss.get() && !mReconnectTimer.isTimerRunning()) {
+                if (mCurrentJoinedGroup.isNotEmpty() && mReconnectAfterServerLoss.get() && !mReconnectTimer.isTimerRunning()
+                    && !mRemovedByHost.load()) {   // A removed player stays put
                     DBG("Starting reconnect timer");
                     mRecoveringFromServerLoss = true;
                     mReconnectTimer.startTimer(1000);
@@ -13032,6 +13269,8 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 DBG("Joined group - " << e->name);
                 const ScopedLock sl (mClientLock);        
                 mCurrentJoinedGroup = CharPointer_UTF8 (e->name);
+                mRemovedByHost = false;
+                sbChatSetStage((mServerEndpoint ? mServerEndpoint->ipaddr.toLowerCase() + ":" + String(mServerEndpoint->port) : String("?")) + "\n" + mCurrentJoinedGroup);
                 sbMarkLaunchRejoin(true);
 
                 mSessionConnectionStamp = Time::getMillisecondCounterHiRes();
@@ -13047,7 +13286,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 const String why = String::fromUTF8(e->errormsg);
                 if (!why.containsIgnoreCase("already a group member")) {
                     const ScopedLock sl (mClientLock);
-                    if (mCurrentJoinedGroup == String(CharPointer_UTF8 (e->name))) mCurrentJoinedGroup.clear();
+                    if (mCurrentJoinedGroup == String(CharPointer_UTF8 (e->name))) { mCurrentJoinedGroup.clear(); sbChatSetStage({}); }
                     // A refused player gets one explanation and stays put: no automatic retries of any kind.
                     mInitialAutoReconnectDone = true;
                     mPendingReconnect = false;
@@ -13067,6 +13306,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
 
                 const ScopedLock sl (mClientLock);        
                 mCurrentJoinedGroup.clear();
+                sbChatSetStage({});
 
                 // assume they are all part of the group, XXX
                 removeAllRemotePeers();
@@ -13312,8 +13552,21 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                                             setRemotePeerSendActive(i, true);
                                                         }
                                                         if (p->oursource) {
-                                                            // Force re-eval of sendChannels via sentinel.
-                                                            p->sendChannels = -1;
+                                                            // Re-evaluate the send channel count. The old way forces a full
+                                                            // source setup (a new stream at the hub) on every retry; the
+                                                            // default forces it only when the source's format does not match
+                                                            // (no format yet, other channel count or rate), else it sets up
+                                                            // only on a real change.
+                                                            bool force = true;
+                                                            if (mJoinRetryKeep) {
+                                                                aoo_format_storage fs;
+                                                                force = !(p->oursource->get_format(fs) > 0
+                                                                          && fs.header.nchannels == p->sendChannels
+                                                                          && fs.header.samplerate == (int32_t) getSampleRate());
+                                                            }
+                                                            if (sbDiagOn()) fprintf(stderr, "[SB-JOINRETRY] peer='%s' sendch=%d %s\n",
+                                                                                    p->userName.toRawUTF8(), p->sendChannels, force ? "forced setup" : "kept");
+                                                            if (force) p->sendChannels = -1;   // sentinel: always differs
                                                             updateRemotePeerSendChannels(i, p);
                                                         }
                                                         break;
@@ -13774,36 +14027,39 @@ void SonobusAudioProcessor::adjustRemoteSendMatrix(int index, bool removed)
 
 bool SonobusAudioProcessor::removeAllRemotePeers()
 {
-    const ScopedReadLock sl (mCoreLock);
-
-    OwnedArray<RemotePeer> removed;
-
-    for (int index = 0; index < mRemotePeers.size(); ++index) {  
-        auto remote = mRemotePeers.getUnchecked(index);
-        
-        commitCacheForPeer(remote);
-
-        if (remote->connected) {
-            disconnectRemotePeer(index);
-        }
-
-        removed.add(remote);
-    }
-
-
+    // Write-first, like the other removers. A read lock upgraded to write waits behind every
+    // reader and turns new readers away meanwhile; two threads upgrading at once never finish.
+    // The nested helpers take the lock again, which is fine on the holding thread.
+    OwnedArray<RemotePeer> removed;   // freed after the lock is released
+    std::unique_ptr<CorePeerSnap> oldSnap;
     {
-        const ScopedWriteLock slw (mCoreLock);
+        const ScopedWriteLock sl (mCoreLock);
+
+        for (int index = 0; index < mRemotePeers.size(); ++index) {
+            auto remote = mRemotePeers.getUnchecked(index);
+
+            commitCacheForPeer(remote);
+
+            if (remote->connected) {
+                disconnectRemotePeer(index);
+            }
+
+            removed.add(remote);
+        }
+
         mRemotePeers.clearQuick(false); // not deleting objects here
-    }
-    
-    // reset matrix
-    for (int i=0; i < MAX_PEERS; ++i) {
-        for (int j=0; j < MAX_PEERS; ++j) {
-            mRemoteSendMatrix[i][j] = false;
+        oldSnap = publishCoreSnapLocked();
+
+        // reset matrix
+        for (int i=0; i < MAX_PEERS; ++i) {
+            for (int j=0; j < MAX_PEERS; ++j) {
+                mRemoteSendMatrix[i][j] = false;
+            }
         }
     }
+    if (oldSnap && !waitCoreSnapReaders()) { removed.clear(false); (void) oldSnap.release(); }
 
-    // they will be cleaned up when removed list goes out of scope
+    retirePeers(removed);
 
     return true;
 }
@@ -13818,10 +14074,11 @@ bool SonobusAudioProcessor::removeRemotePeer(int index, bool sendblock)
     // Callers must not hold the read lock.
     RemotePeer * remote = 0;
     bool ret = false;
-    std::unique_ptr<RemotePeer> removed; // destroyed AFTER the lock scope —
-                                         // peer teardown must not run under
-                                         // the write lock (audio thread
-                                         // readers would wait on it)
+    OwnedArray<RemotePeer> removed; // handed on AFTER the lock scope —
+                                    // peer teardown must not run under
+                                    // the write lock (audio thread
+                                    // readers would wait on it)
+    std::unique_ptr<CorePeerSnap> oldSnap;
     {
         const ScopedWriteLock sl (mCoreLock);
 
@@ -13840,12 +14097,16 @@ bool SonobusAudioProcessor::removeRemotePeer(int index, bool sendblock)
 
             adjustRemoteSendMatrix(index, true);
 
-            removed.reset(remote);
+            removed.add(remote);
 
-            mRemotePeers.remove(index, false); // deletion via removed's dtor, outside the lock
+            mRemotePeers.remove(index, false); // freed via `removed`, outside the lock
+            oldSnap = publishCoreSnapLocked();
 
         }
     }
+    if (oldSnap && !waitCoreSnapReaders()) { removed.clear(false); (void) oldSnap.release(); }
+
+    retirePeers(removed);
 
     return ret;
 }
@@ -13864,6 +14125,27 @@ void SonobusAudioProcessor::setRemotePeerLevelGain(int index, float levelgain)
         remote->gain = levelgain;
         commitCacheForPeer(remote);   // Row fader survives a quit at any moment (hub mode fader is this local gain)
     }
+}
+
+void SonobusAudioProcessor::setRemotePeerBalance(int index, float balance)
+{
+    const ScopedReadLock sl (mCoreLock);
+    if (index < mRemotePeers.size()) {
+        RemotePeer * remote = mRemotePeers.getUnchecked(index);
+        remote->balance = jlimit(-1.0f, 1.0f, balance);
+        commitCacheForPeer(remote);
+    }
+}
+
+float SonobusAudioProcessor::getRemotePeerBalance(int index) const
+{
+    float balance = 0.0f;
+
+    const ScopedReadLock sl (mCoreLock);
+    if (index < mRemotePeers.size()) {
+        balance = mRemotePeers.getUnchecked(index)->balance;
+    }
+    return balance;
 }
 
 float SonobusAudioProcessor::getRemotePeerLevelGain(int index) const
@@ -14063,6 +14345,32 @@ bool SonobusAudioProcessor::getRemotePeerHubLatency(int index, float & toHubMs, 
         return true;
     }
     return false;
+}
+
+float SonobusAudioProcessor::getRemotePeerHubInterfaceMs(int index) const
+{
+    const ScopedReadLock sl (mCoreLock);
+    if (index < mRemotePeers.size()) {
+        auto * remote = mRemotePeers.getUnchecked(index);
+        if (remote->hubLatStampMs == 0 || Time::getMillisecondCounter() - remote->hubLatStampMs > 35000) return -1.0f;
+        return remote->hubIfaceMs;
+    }
+    return -1.0f;
+}
+
+bool SonobusAudioProcessor::getAudioInterfaceMs(AudioIODevice * ad, float & inMs, float & outMs)
+{
+    if (ad == nullptr) return false;
+    const double sr = ad->getCurrentSampleRate();
+    if (sr <= 0.0) return false;
+#if JUCE_IOS
+    const int buf = ad->getCurrentBufferSizeSamples();   // iOS reports the hardware path only, without the IO buffer
+#else
+    const int buf = 0;   // CoreAudio, WASAPI, ASIO, ALSA and JACK already include the buffer in each direction
+#endif
+    inMs  = (float) (1000.0 * (ad->getInputLatencyInSamples() + buf) / sr);
+    outMs = (float) (1000.0 * (ad->getOutputLatencyInSamples() + buf) / sr);
+    return true;
 }
 
 // That player's ping (hub<->them RTT) and uplink rate, from the hub's 1-Hz line
@@ -16195,6 +16503,7 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
 
 
         // now add it, once initialized
+        std::unique_ptr<CorePeerSnap> oldSnap;
         {
             const ScopedWriteLock slw (mCoreLock);
             // The build ran unlocked — if another thread added the same peer (or took our id) meanwhile,
@@ -16208,8 +16517,9 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
             for (auto s : mRemotePeers) {
                 if (s->ourId == newid) { delete retpeer; retpeer = nullptr; break; }
             }
-            if (retpeer) mRemotePeers.add(retpeer);
+            if (retpeer) { mRemotePeers.add(retpeer); oldSnap = publishCoreSnapLocked(); }
         }
+        if (oldSnap && !waitCoreSnapReaders()) (void) oldSnap.release();
         if (!retpeer) {
             return doAddRemotePeerIfNecessary(endpoint, ourId, username, groupname);
         }
@@ -16264,13 +16574,16 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddInfoOnlyPeerIfNe
         retpeer->recvMeterSource.setMaxHoldMS(120);
     }
 
+    std::unique_ptr<CorePeerSnap> oldSnap;
     {
         const ScopedWriteLock slw (mCoreLock);
         for (auto s2 : mRemotePeers) {   // Raced by another add while we built unlocked?
             if ((s2->endpoint == endpoint && s2->infoOnly) || (!username.isEmpty() && s2->userName == username)) { delete retpeer; return s2; }
         }
         mRemotePeers.add(retpeer);
+        oldSnap = publishCoreSnapLocked();
     }
+    if (oldSnap && !waitCoreSnapReaders()) (void) oldSnap.release();
 
     DBG("Added info-only peer: " << username << " (group=" << groupname << ", ourId=" << newid << ")");
 
@@ -16298,6 +16611,7 @@ void SonobusAudioProcessor::commitCacheForPeer(RemotePeer * retpeer)
     newcache.sendFormat = retpeer->formatIndex;
     newcache.numChanGroups = retpeer->numChanGroups;
     newcache.mainGain = retpeer->gain;
+    newcache.mainBalance = retpeer->balance;
     newcache.numMultiChanGroups = retpeer->lastMultiNumChanGroups;
     newcache.modifiedChanGroups = retpeer->modifiedMultiChanGroups;
     newcache.orderPriority = retpeer->orderPriority;
@@ -16365,6 +16679,7 @@ bool SonobusAudioProcessor::findAndLoadCacheForPeer(RemotePeer * retpeer)
         retpeer->formatIndex = cache.sendFormat;
         retpeer->numChanGroups = cache.numChanGroups; // restore this?
         retpeer->gain = cache.mainGain;
+        retpeer->balance = cache.mainBalance;
         retpeer->lastMultiNumChanGroups = cache.numMultiChanGroups;
         retpeer->modifiedChanGroups = retpeer->modifiedMultiChanGroups = cache.modifiedChanGroups;
         retpeer->orderPriority  = cache.orderPriority;
@@ -16419,11 +16734,13 @@ bool SonobusAudioProcessor::removeAllRemotePeersWithEndpoint(EndpointState * end
     // Whole function under the write lock: a read-scan with a nested write upgrade deadlocks when
     // two threads do it concurrently. Inner nested ScopedWriteLocks are safe because JUCE write
     // locks are re-entrant on the same thread. Callers must not hold the read lock.
-    const ScopedWriteLock sl (mCoreLock);
-
     bool didremove = false;
 
+    // Declared before the lock: removed rows are freed after it is released.
     OwnedArray<RemotePeer> removed;
+    std::unique_ptr<CorePeerSnap> oldSnap;
+    {
+    const ScopedWriteLock sl (mCoreLock);
 
     // go from end, so deletions don't mess it up
     for (int i = mRemotePeers.size()-1; i >= 0;  --i) {
@@ -16449,8 +16766,11 @@ bool SonobusAudioProcessor::removeAllRemotePeersWithEndpoint(EndpointState * end
             }
         }
     }
+    if (didremove) oldSnap = publishCoreSnapLocked();
+    }
+    if (oldSnap && !waitCoreSnapReaders()) { removed.clear(false); (void) oldSnap.release(); }
 
-    // remote peers will be deleted when removed list goes out of scope
+    retirePeers(removed);
 
     return didremove;
 }
@@ -16464,6 +16784,7 @@ bool SonobusAudioProcessor::removeStaleSameNamePeers(const String & username, En
     // forever. Pure write lock from the start, and the caller must not hold mCoreLock at all.
     bool didremove = false;
     OwnedArray<RemotePeer> removed;
+    std::unique_ptr<CorePeerSnap> oldSnap;
     {
         const ScopedWriteLock slw (mCoreLock);
         for (int i = mRemotePeers.size(); --i >= 0; ) {
@@ -16474,9 +16795,14 @@ bool SonobusAudioProcessor::removeStaleSameNamePeers(const String & username, En
                 didremove = true;
             }
         }
+        if (didremove) oldSnap = publishCoreSnapLocked();
     }
+    const bool leak = oldSnap && !waitCoreSnapReaders();
+    if (leak) (void) oldSnap.release();
     // Cache commits outside the lock — the rows are owned by `removed` now.
     for (auto* p : removed) commitCacheForPeer(p);
+    if (leak) removed.clear(false);
+    retirePeers(removed);
     return didremove;
 }
 
@@ -16485,10 +16811,12 @@ bool SonobusAudioProcessor::doRemoveRemotePeerIfNecessary(EndpointState * endpoi
     // Whole function under the write lock: a read-scan with a nested write upgrade deadlocks when
     // two threads do it concurrently. Inner nested ScopedWriteLocks are safe because JUCE write
     // locks are re-entrant on the same thread. Callers must not hold the read lock.
-    const ScopedWriteLock sl (mCoreLock);
-
     bool didremove = false;
+    // Declared before the lock: the removed row is freed after it is released.
     OwnedArray<RemotePeer> removed;
+    std::unique_ptr<CorePeerSnap> oldSnap;
+    {
+    const ScopedWriteLock sl (mCoreLock);
 
     int i=0;
     for (auto s : mRemotePeers) {
@@ -16504,7 +16832,12 @@ bool SonobusAudioProcessor::doRemoveRemotePeerIfNecessary(EndpointState * endpoi
         }
         ++i;
     }
-    
+    if (didremove) oldSnap = publishCoreSnapLocked();
+    }
+    if (oldSnap && !waitCoreSnapReaders()) { removed.clear(false); (void) oldSnap.release(); }
+
+    retirePeers(removed);
+
     return didremove;
     
 }
@@ -16791,6 +17124,17 @@ void SonobusAudioProcessor::applyLayoutFormatToPeer(RemotePeer * remote, const V
 
     if (doapply) {
         restoreLayoutFormatForPeer(remote);
+    }
+    else {
+        // Local edits are kept, but a group that has no name still takes the sender's label
+        for (int i=0; i < remote->numChanGroups && i < remote->origNumChanGroups && i < MAX_CHANGROUPS; ++i) {
+            auto & lp = remote->chanGroups[i].params;
+            const auto & op = remote->origChanParams[i];
+            if (lp.name.isEmpty() && op.name.isNotEmpty()
+                && lp.chanStartIndex == op.chanStartIndex && lp.numChannels == op.numChannels) {
+                lp.name = op.name;
+            }
+        }
     }
 }
 
@@ -17242,6 +17586,13 @@ void SonobusAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
 
     mTransportSource.prepareToPlay(currSamplesPerBlock, getSampleRate());
+
+    // SB_INPUT_ZERO_COUNT=0: do not count zero runs in the device input.
+    { const char* v = sbtap::tapConf("SB_INPUT_ZERO_COUNT"); mSbInputZeroCount = (v && *v) ? atoi(v) != 0 : true; }
+    mSbZeroRunMax = (uint32_t) jmax(16, (int) lrint(sampleRate * 0.1));
+    for (auto& z : mSbZeroRun) z = SbZeroRunState{};
+    // SB_SEND_WAKE_EARLY=0: wake the send thread at the end of the audio callback (former behaviour).
+    { const char* v = sbtap::tapConf("SB_SEND_WAKE_EARLY"); mSendWakeEarly = (v && *v) ? atoi(v) != 0 : true; }
 
     //mAooSource->set_format(fmt->header);
     setupSourceFormat(0, mAooDummySource.get());
@@ -17882,6 +18233,30 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         for (int i = 0, n = buffer.getNumSamples(); i < n; ++i)
             if (! std::isfinite(d[i])) { d[i] = 0.0f; mSbNonFiniteInputs.fetch_add(1, std::memory_order_relaxed); }
     }
+    // Input zero runs: a device that misses a cycle hands over exact zeros in the middle of sound, and the
+    // click then looks like a network click. Count the runs of exact zeros that start and end in sounding
+    // audio (both edges above -60 dBFS, 16 samples up to 100 ms; a longer run is a pause). Counting only:
+    // the audio is not touched. A block without a zero, and an all-zero block, take the short way out.
+    if (mSbInputZeroCount) {
+        const int n = buffer.getNumSamples();
+        for (int ch = 0, nin = jmin(getTotalNumInputChannels(), buffer.getNumChannels(), (int) kSbZeroRunMaxCh); ch < nin; ++ch) {
+            const float* d = buffer.getReadPointer(ch);
+            SbZeroRunState& z = mSbZeroRun[ch];
+            int nz = 0;
+            for (int i = 0; i < n; ++i) nz += (d[i] == 0.0f);
+            if (nz == n) { if (z.run < 0x40000000u) z.run += (uint32_t) n; continue; }
+            if (nz == 0 && z.run == 0) { z.edge = std::fabs(d[n - 1]); continue; }
+            for (int i = 0; i < n; ++i) {
+                const float a = std::fabs(d[i]);
+                if (a == 0.0f) { ++z.run; continue; }
+                if (z.run >= 16 && z.run <= mSbZeroRunMax && z.edge >= 0.001f && a >= 0.001f) {
+                    mSbInputZeroRuns.fetch_add(1, std::memory_order_relaxed);
+                    mSbInputZeroFrames.fetch_add(z.run, std::memory_order_relaxed);
+                }
+                z.run = 0; z.edge = a;
+            }
+        }
+    }
     mSbAudioCallbacks.fetch_add(1, std::memory_order_relaxed);   // Audio-health callback count
     mSbAudioFrames.fetch_add((uint64_t) buffer.getNumSamples(), std::memory_order_relaxed);   
 
@@ -18399,25 +18774,54 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
 
     bool hearlatencytest = mHearLatencyTest.get();
+    bool sendWoken = false;   // the send thread was already woken in this block
 
     bool anysoloed = mMainMonitorSolo.get();
 
 
     // push data for going out
     {
-        // Time the read-lock acquisition (see mSbLockWaitMaxUs)
+        // The peer list comes from the published snapshot without any lock, or (SB_CORE_SNAPSHOT=0)
+        // from mRemotePeers under the read lock. Time the acquisition (see mSbLockWaitMaxUs).
         const double lockT0 = Time::getMillisecondCounterHiRes();
-        const ScopedReadLock sl (mCoreLock);
+        struct CoreSnapScope {
+            std::atomic<uint64_t> * seq = nullptr;
+            ~CoreSnapScope() { if (seq) seq->fetch_add(1, std::memory_order_seq_cst); }
+        } snapScope;
+        std::optional<ScopedReadLock> coreRead;
+        struct PeerRange {
+            RemotePeer * const * b = nullptr;
+            RemotePeer * const * e = nullptr;
+            RemotePeer * const * begin() const { return b; }
+            RemotePeer * const * end() const { return e; }
+        } corePeers;
+        bool coreBlocked = false;
+        if (mCoreSnapOn) {
+            mCoreSnapAudioSeq.fetch_add(1, std::memory_order_seq_cst);   // odd: in use
+            snapScope.seq = &mCoreSnapAudioSeq;                           // even again at scope end
+            if (const CorePeerSnap * snap = mCoreSnap.load(std::memory_order_seq_cst)) {
+                corePeers.b = snap->peers.data();
+                corePeers.e = corePeers.b + snap->peers.size();
+            } else {
+                coreBlocked = true;
+            }
+        } else {
+            coreRead.emplace(mCoreLock);
+            corePeers.b = mRemotePeers.begin();
+            corePeers.e = mRemotePeers.end();
+        }
         {
             const uint32_t waitUs = (uint32_t) ((Time::getMillisecondCounterHiRes() - lockT0) * 1000.0);
             uint32_t curMax = mSbLockWaitMaxUs.load(std::memory_order_relaxed);
             while (waitUs > curMax && !mSbLockWaitMaxUs.compare_exchange_weak(curMax, waitUs, std::memory_order_relaxed)) {}
             if (waitUs > 1000) mSbLockWaitsOver1ms.fetch_add(1, std::memory_order_relaxed);
+            if (!mCoreSnapOn && waitUs >= 100) coreBlocked = true;
+            if (coreBlocked) mSbCoreBlocked.fetch_add(1, std::memory_order_relaxed);
         }        
         
         //mAooSource->process( buffer.getArrayOfReadPointers(), numSamples, t);
         
-        for (auto & remote : mRemotePeers)
+        for (auto & remote : corePeers)
         {
             if (remote->infoOnly) continue;
             if (remote->soloed) {
@@ -18430,7 +18834,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
         int rindex = 0;
 
-        for (auto & remote : mRemotePeers)
+        for (auto & remote : corePeers)
         {
             if (remote->infoOnly) {
                 ++rindex;
@@ -18598,6 +19002,12 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
             float tgain = mainBusOutputChannels == 1 && remote->recvChannels > 0 ? 1.0f/(float)remote->recvChannels : 1.0f;
             tgain *= usegain; // handles main solo
 
+            // The player's balance: a left/right gain on its whole mix after the instruments' pans (centre = 1, 1)
+            const float bal = remote->numChanGroups > 1 ? remote->balance : 0.0f, lastbal = remote->_lastBalance;   // players with several instruments only
+            const float balGain[2]     = { bal >= 0.0f ? 1.0f - bal : 1.0f,         bal >= 0.0f ? 1.0f : 1.0f + bal };
+            const float balLastGain[2] = { lastbal >= 0.0f ? 1.0f - lastbal : 1.0f, lastbal >= 0.0f ? 1.0f : 1.0f + lastbal };
+            remote->_lastBalance = bal;
+
 
             for (auto i = 0; i < remote->numChanGroups; ++i)
             {
@@ -18606,7 +19016,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
                 // todo change dest ch target
                 int dstch = remote->chanGroups[i].params.panDestStartIndex;
                 int dstcnt = jmin(totalOutputChannels, remote->chanGroups[i].params.panDestChannels);
-                remote->chanGroups[i].processPan(remote->workBuffer, remote->chanGroups[i].params.chanStartIndex, tempBuffer, dstch, dstcnt, numSamples, adjgain);
+                remote->chanGroups[i].processPan(remote->workBuffer, remote->chanGroups[i].params.chanStartIndex, tempBuffer, dstch, dstcnt, numSamples, adjgain, nullptr, balGain, balLastGain);
 
                 if (doreverb) {
                     remote->chanGroups[i].processReverbSend(remote->workBuffer, remote->chanGroups[i].params.chanStartIndex, remote->chanGroups[i].params.numChannels, mainFxBuffer, 0, fxchannels, numSamples, mainReverbEnabled, false, adjgain);
@@ -18620,7 +19030,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         
         // send out final outputs
         int i=0;
-        for (auto & remote : mRemotePeers)
+        for (auto & remote : corePeers)
         {
             if (remote->infoOnly) {
                 ++i;
@@ -18660,7 +19070,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
                         // No self-exclusion: in hub topology send and recv ride the same peer (the
                         // hub), so excluding it would mute the reflector entirely. Only one end of
                         // a link may run SB_ECHO (else loop).
-                        for (auto & echoremote : mRemotePeers) {
+                        for (auto & echoremote : corePeers) {
                             if (echoremote->infoOnly) continue;
                             const int echochans = jmin(jmin((int)remote->sendChannels, echoremote->workBuffer.getNumChannels()), workBuffer.getNumChannels());
                             for (int channel = 0; channel < echochans; ++channel) {
@@ -18672,7 +19082,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
                 // now add any cross-routed input
                 int j=0;
-                for (auto & crossremote : mRemotePeers)
+                for (auto & crossremote : corePeers)
                 {
                     if (crossremote->infoOnly) { ++j; continue; }
                     if (mRemoteSendMatrix[j][i]) {
@@ -18758,8 +19168,15 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
             ++i;
         }
 
+        // Every outgoing block of this callback is encoded and queued: wake the send thread now, so the
+        // packets do not wait for the output mix, effects, recording and metering that follow.
+        if (mSendWakeEarly) {
+            notifySendThread();
+            sendWoken = true;
+        }
+
         // update last state
-        for (auto & remote : mRemotePeers)
+        for (auto & remote : corePeers)
         {
             if (remote->infoOnly) continue;
             for (int i=0; i < remote->recvChannels; ++i) {
@@ -19110,7 +19527,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
     lastSamplesPerBlock = numSamples;
 
-    notifySendThread();
+    if (!sendWoken) notifySendThread();
     
     mLastWet = wetnow;
     mLastDry = drynow;
@@ -19944,6 +20361,12 @@ void SonobusAudioProcessor::resetDefaultPluginSettings()
 
 void SonobusAudioProcessor::ServerReconnectTimer::timerCallback()
 {
+    if (processor.mRemovedByHost.load()) {   // The host removed this player: no automatic way back
+        processor.mRecoveringFromServerLoss = false;
+        pendingStuckTicks = 0;
+        stopTimer();
+        return;
+    }
     if (!processor.isConnectedToServer() && !processor.mPendingReconnect) {
         pendingStuckTicks = 0;
         processor.reconnectToMostRecent();
@@ -20019,6 +20442,7 @@ ValueTree SonobusAudioProcessor::PeerStateCache::getValueTree() const
     item.setProperty(peerSendFormatKey, sendFormat, nullptr);
     item.setProperty(numChanGroupsKey, numChanGroups, nullptr);
     item.setProperty(peerLevelKey, mainGain, nullptr);
+    item.setProperty(peerBalanceKey, mainBalance, nullptr);
     item.setProperty(peerOrderPriorityKey, orderPriority, nullptr);
     item.setProperty(peerHubMixMutedKey, hubMixMuted, nullptr);    // Row MUTE/SOLO survive quit
     item.setProperty(peerHubMixSoloedKey, hubMixSoloed, nullptr);
@@ -20062,6 +20486,7 @@ void SonobusAudioProcessor::PeerStateCache::setFromValueTree(const ValueTree & i
     numChanGroups = std::max(0, std::min((int) (MAX_CHANGROUPS-1), (int)item.getProperty(numChanGroupsKey, numChanGroups)));
 
     mainGain = item.getProperty(peerLevelKey, mainGain);
+    mainBalance = jlimit(-1.0f, 1.0f, (float) item.getProperty(peerBalanceKey, mainBalance));   // absent in old files -> centre
     orderPriority = item.getProperty(peerOrderPriorityKey, orderPriority);
     hubMixMuted = item.getProperty(peerHubMixMutedKey, hubMixMuted);    // Absent in old files -> false
     hubMixSoloed = item.getProperty(peerHubMixSoloedKey, hubMixSoloed);

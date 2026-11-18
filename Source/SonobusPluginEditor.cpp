@@ -384,6 +384,22 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainUserLabel->setFont(17);   // Was 14
     mMainUserLabel->setEnabled(false);
 
+    // What this player plays, in reach at all times; same stored value as the Connect panel's field
+    mMainInstrumentCombo = std::make_unique<ComboBox>("maininstrument");
+    mMainInstrumentCombo->setEditableText(true);   // the list is a help; anything can be typed
+    mMainInstrumentCombo->addItemList(ConnectView::instrumentChoices(), 1);
+    mMainInstrumentCombo->setTextWhenNothingSelected(TRANS("Your instrument"));
+    mMainInstrumentCombo->setTitle(TRANS("Your instrument"));
+    mMainInstrumentCombo->setTooltip(TRANS("What you play. Others see it in the player list and the Stages list."));
+    mMainInstrumentCombo->getProperties().set("leadText", TRANS("Instrument"));   // small caption on top, value under it
+    mMainInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+    mMainInstrumentCombo->onChange = [this] {
+        processor.setCurrentInstrument(mMainInstrumentCombo->getText());
+        mMainInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+        if (mConnectView) mConnectView->refreshInstrument();
+        fitTopBandToText();
+    };
+
     mMainPeerLabel = std::make_unique<Label>("peers", "");
     mMainPeerLabel->setTitle(TRANS("User Count"));
     mMainPeerLabel->setJustificationType(Justification::centred);
@@ -499,7 +515,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mSendMutedLabel = std::make_unique<Label>("sendmuted", TRANS("SEND MUTED"));
     mSendMutedLabel->setFont(Font(17.0f, Font::bold));
     mSendMutedLabel->setJustificationType(Justification::centred);
-    mSendMutedLabel->setMinimumHorizontalScale(0.6f);
+    mSendMutedLabel->setMinimumHorizontalScale(1.0f);
     mSendMutedLabel->setColour(Label::textColourId, Colour(0xffff5040));
     mSendMutedLabel->setColour(Label::backgroundColourId, Colour::fromFloatRGBA(0.0, 0.0, 0.0, 0.85));
     mSendMutedLabel->setColour(Label::outlineColourId, Colour(0xffff5040));
@@ -927,6 +943,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mConnectView->setWantsKeyboardFocus(true);
     mConnectView->updateServerFieldsFromConnectionInfo();
     mConnectView->addComponentListener(this);
+    mConnectView->onInstrumentChanged = [this] { refreshMainInstrument(); };
 
     // effects
     
@@ -1236,6 +1253,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mTopLevelContainer->addAndMakeVisible(mMainPeerLabel.get());
     mTopLevelContainer->addAndMakeVisible(mMainMessageLabel.get());
     mTopLevelContainer->addAndMakeVisible(mMainUserLabel.get());
+    mTopLevelContainer->addAndMakeVisible(mMainInstrumentCombo.get());
     mTopLevelContainer->addAndMakeVisible(mMainPersonImage.get());
     mTopLevelContainer->addAndMakeVisible(mMainGroupImage.get());
     mTopLevelContainer->addChildComponent(mPeerRecImage.get());
@@ -1436,6 +1454,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     }
     
     processor.addClientListener(this);
+    mRosterGroup = processor.getCurrentJoinedGroup();   // an editor opened while on a stage
     processor.getTransportSource().addChangeListener (this);
 
     // handles registering commands
@@ -1580,6 +1599,13 @@ void SonobusAudioProcessorEditor::updateUseKeybindings()
 void SonobusAudioProcessorEditor::connectionsChanged(ConnectView *comp)
 {
     updateState(false);
+}
+
+void SonobusAudioProcessorEditor::peersRemoved(ConnectView *comp)
+{
+    // Called right after the connect panel dropped every peer: rebuild the rows before anything paints.
+    if (mPeerContainer) mPeerContainer->resetPendingUsers();
+    updatePeerState(true);
 }
 
 void SonobusAudioProcessorEditor::channelLayoutChanged(ChannelGroupsView *comp)
@@ -1816,6 +1842,24 @@ void SonobusAudioProcessorEditor::aooClientPeerChangedState(SonobusAudioProcesso
     triggerAsyncUpdate();    
 }
 
+void SonobusAudioProcessorEditor::sbRemovedFromStage(SonobusAudioProcessor *comp, const String & group, const String & reason)
+{
+    {
+        const ScopedLock sl (clientStateLock);
+        clientEvents.add(ClientEvent(ClientEvent::RemovedEvent, group, false, reason));
+    }
+    triggerAsyncUpdate();
+}
+
+// A refusal by the host is told in the main window, in the chat and in the Connect window if that is open.
+void SonobusAudioProcessorEditor::showStageNotice(const String & group, const String & text)
+{
+    mStageNotice = text;
+    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, group, "", "", "", text));
+    mConnectView->updateServerStatusLabel(text, false);
+    if (auto * list = mConnectView->getStagesView()) list->showNotice(text);
+}
+
 void SonobusAudioProcessorEditor::sbChatEventReceived(SonobusAudioProcessor *comp, const SBChatEvent & mesg)
 {
     haveNewChatEvents = true;
@@ -1876,12 +1920,20 @@ bool SonobusAudioProcessorEditor::updatePeerState(bool force)
 {
     if (!mPeerContainer) return false;
     
-    if (force || mPeerContainer->getPeerViewCount() != processor.getNumberRemotePeers()) {
+    // Retired rows force a rebuild: the views may still point into them until the rows are rebound.
+    const bool retired = processor.hasRetiredPeers();
+
+    if (force || retired || mPeerContainer->getPeerViewCount() != processor.getNumberRemotePeers()) {
+        const double rebuildStartMs = Time::getMillisecondCounterHiRes();
         mPeerContainer->rebuildPeerViews();
         mPeerContainer->updatePeerViews();   // The hub peer row survives
                                              // with no view, so the counts never match and the else-branch below never ran
         updateLayout();
         resized();
+
+        // Rows retired before this rebuild began are bound to nothing now: free them. A row that left
+        // during the rebuild waits for the next one.
+        processor.freeRetiredPeers(rebuildStartMs);
         
         if (patchbayCalloutBox) {
             mPatchMatrixView->updateGridLayout();
@@ -2019,7 +2071,9 @@ void SonobusAudioProcessorEditor::timerCallback(int timerid)
         // Audio health (callbacks vs expected, CoreAudio overloads) every 10 s
         if (JUCEApplicationBase::isStandaloneApp() && getAudioDeviceManager()) {
             if (auto * ad = getAudioDeviceManager()->getCurrentAudioDevice()) {
-                processor.sbAudioHealthTick(ad->getXRunCount(), ad->getCurrentSampleRate(), ad->getCurrentBufferSizeSamples());
+                float inMs = 0.0f, outMs = 0.0f;
+                const float ifaceMs = SonobusAudioProcessor::getAudioInterfaceMs(ad, inMs, outMs) ? inMs + outMs : -1.0f;
+                processor.sbAudioHealthTick(ad->getXRunCount(), ad->getCurrentSampleRate(), ad->getCurrentBufferSizeSamples(), ifaceMs);
             }
         }
 
@@ -2106,6 +2160,7 @@ void SonobusAudioProcessorEditor::timerCallback(int timerid)
             resized();
         }
 
+        mChatView->checkStage();   // chat follows the stage
         mChatButton->setToggleState(mChatView->haveNewSinceLastView(), dontSendNotification);
 
         auto anyrec = processor.isAnyRemotePeerRecording() || processor.isRecordingToFile();
@@ -2197,6 +2252,10 @@ void SonobusAudioProcessorEditor::buttonClicked (Button* buttonThatWasClicked)
             }
             else {
                 processor.disconnectFromServer();
+                // The rows are gone from the processor: take their views down now, in this same
+                // callback, so no meter or row outlives the peer it was bound to.
+                mPeerContainer->resetPendingUsers();
+                updatePeerState(true);
             }
             updateState();
         }
@@ -3437,7 +3496,25 @@ void SonobusAudioProcessorEditor::showConnectPopup(bool flag)
     }
     else {
         mConnectView->setVisible(false);
+        refreshMainInstrument();
     }
+}
+
+void SonobusAudioProcessorEditor::refreshMainInstrument()
+{
+    if (mMainInstrumentCombo && ! mMainInstrumentCombo->hasKeyboardFocus(true)) {
+        mMainInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+        fitTopBandToText();
+    }
+}
+
+void SonobusAudioProcessorEditor::fitTopBandToText()
+{
+    if (! mMainGroupLabel || ! mMainUserLabel || ! mMainInstrumentCombo) return;
+    const String text = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText();
+    if (text == mTopBandText) return;
+    updateLayout();   // stores the text
+    resized();
 }
 
 
@@ -3917,6 +3994,7 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
 
         mMainPeerLabel->setText(userstr, dontSendNotification);
         mMainUserLabel->setText(currConnectionInfo.userName, dontSendNotification);
+        fitTopBandToText();
 
         mMainUserLabel->setEnabled(true);
         mMainPeerLabel->setEnabled(true);
@@ -3944,6 +4022,7 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
     else {
         mMainGroupLabel->setText("", dontSendNotification);
         mMainUserLabel->setText("", dontSendNotification);
+        fitTopBandToText();
 
         mMainUserLabel->setEnabled(false);
         mMainPeerLabel->setEnabled(false);
@@ -3961,7 +4040,8 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
 
         if (processor.getNumberRemotePeers() == 0 /* || !currConnected */ ) {
             String message;
-            message += TRANS("Press Connect button to start.") + "\n\n" + TRANS("Please use headphones if you are using a microphone!");
+            if (mStageNotice.isNotEmpty()) message += mStageNotice + "\n\n" + TRANS("Press Connect button to start.");   // The host's refusal stays until the next try
+            else message += TRANS("Press Connect button to start.") + "\n\n" + TRANS("Please use headphones if you are using a microphone!");
             mMainMessageLabel->setText(message, dontSendNotification);
         } else {
             mMainMessageLabel->setText("", dontSendNotification);
@@ -4122,6 +4202,14 @@ String SonobusAudioProcessorEditor::generateNewUsername(const AooServerConnectio
 }
 
 
+void SonobusAudioProcessorEditor::rosterPost(const String & group, const String & user, bool joined)
+{
+    if (currConnectionInfo.groupIsPublic) return;
+    String mesg;
+    mesg << user << (joined ? TRANS(" - joined stage") : TRANS(" - left stage"));
+    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, group, user, "", "", mesg));
+}
+
 void SonobusAudioProcessorEditor::handleAsyncUpdate()
 {
 
@@ -4144,6 +4232,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
         }
         else if (ev.type == ClientEvent::ConnectEvent) {
             String statstr;
+            mStageNotice.clear();   // A new try: the last refusal is no longer the news
             if (ev.success) {
                 statstr = TRANS("Connected to server");                
             } else {
@@ -4217,6 +4306,16 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             //AccessibilityHandler::postAnnouncement(TRANS("Disconnected"), AccessibilityHandler::AnnouncementPriority::high);
 
 
+            // A lost connection keeps the stage and its list; the next join compares against it.
+            mRosterPending.clear();
+            if (!ev.success && mRosterGroup.isNotEmpty() && mRosterGroup == processor.getCurrentJoinedGroup()) {
+                mRosterKept = true;
+            } else {
+                mRosterGroup.clear();
+                mRosterUsers.clear();
+                mRosterKept = false;
+            }
+
             mPeerContainer->resetPendingUsers();
             updateServerStatusLabel(statstr);
             updatePeerState(true);
@@ -4231,7 +4330,34 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
 
                 showConnectPopup(false);
 
-                mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
+                // A second confirmation of the stage we are already on (a double join at launch) adds nothing.
+                const bool alreadyConfirmed = mRosterGroup == ev.group && !mRosterKept;
+                if (!alreadyConfirmed)
+                    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
+
+                // The players reported before this join was confirmed were already on the stage.
+                StringArray present;
+                for (auto & item : mRosterPending) {
+                    if (item.upToFirstOccurrenceOf("\n", false, false) == ev.group)
+                        present.addIfNotAlreadyThere(item.fromFirstOccurrenceOf("\n", false, false));
+                }
+                const bool resumed = mRosterKept && mRosterGroup == ev.group;
+                const StringArray before = mRosterUsers;
+                mRosterGroup = ev.group;
+                if (!alreadyConfirmed) mRosterUsers = present;
+                mRosterPending.clear();
+                mRosterKept = false;
+
+                if (alreadyConfirmed) {
+                    // nothing more to tell
+                } else if (!resumed) {
+                    if (present.size() > 0 && !currConnectionInfo.groupIsPublic) {
+                        mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "roster",
+                                                                 present.joinIntoString("\n")));
+                    }
+                } else {
+                    for (auto & user : present) if (!before.contains(user)) rosterPost(ev.group, user, true);
+                }
 
                 if (JUCEApplicationBase::isStandaloneApp() && saveSettingsIfNeeded) {
                     DBG("Saving settings");
@@ -4248,24 +4374,46 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
                     mMainMessageLabel->grabKeyboardFocus();
                 }
             } else {
+                mRosterGroup.clear();
+                mRosterUsers.clear();
+                mRosterPending.clear();
+                mRosterKept = false;
 
                 if (processor.getCurrentJoinedGroup().isEmpty()) {
-                    statstr = TRANS("Failed to join stage: ") + ev.message;
-
-                    mConnectView->groupJoinFailed();
-                   #if SONOBUSPLUS_BUILD
-                    showConnectPopup(true);   // A refused rejoin opens the panel (password field shown red)
-                   #endif
-                    
-                    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
-                    
-                    // disconnect
+                    // Leave first, so the lines below stay in view and are not put aside with the stage's chat.
                     processor.disconnectFromServer();
+
+                    if (ev.message.startsWithIgnoreCase("The host removed you")) {
+                        // The host's own words, as they came. Not a password matter, so no red field and no panel.
+                        statstr = ev.message;
+                        showStageNotice(ev.group, statstr);
+                    } else {
+                        statstr = TRANS("Failed to join stage: ") + ev.message;
+
+                        if (ev.message.containsIgnoreCase("password")) mConnectView->groupJoinFailed();   // Red field only for a password error
+                       #if SONOBUSPLUS_BUILD
+                        showConnectPopup(true);   // A refused rejoin opens the panel
+                       #endif
+
+                        mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
+                        if (auto * list = mConnectView->getStagesView()) list->showNotice(statstr);   // The reason shows on the STAGES tab too
+                    }
                 }
                 
             }
             updateServerStatusLabel(statstr, false);
             updateState();
+        }
+        else if (ev.type == ClientEvent::RemovedEvent) {
+            // Told by the hub at the moment of removal: say so and leave cleanly.
+            processor.disconnectFromServer();   // first, so the notice stays in view
+            mRosterGroup.clear(); mRosterUsers.clear(); mRosterPending.clear(); mRosterKept = false;
+            showStageNotice(ev.group, ev.message.isNotEmpty() ? ev.message : TRANS("The host removed you from this stage."));
+            mPeerContainer->resetPendingUsers();
+            updatePeerState(true);
+            updateState();
+            updateLayout();
+            resized();
         }
         else if (ev.type == ClientEvent::GroupLeaveEvent) {
             String statstr;
@@ -4278,6 +4426,8 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             //AccessibilityHandler::postAnnouncement(statstr, AccessibilityHandler::AnnouncementPriority::high);
 
             mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
+
+            if (ev.success) { mRosterGroup.clear(); mRosterUsers.clear(); mRosterPending.clear(); mRosterKept = false; }
 
             mPeerContainer->resetPendingUsers();
             updateServerStatusLabel(statstr);
@@ -4296,10 +4446,14 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
         else if (ev.type == ClientEvent::PeerJoinEvent) {
             DBG("Peer " << ev.user << "joined doing full update");
 
-            if (!currConnectionInfo.groupIsPublic && ev.user != processor.getHubPeerUsername()) {   // The hub is not a person
-                String mesg;
-                mesg << ev.user << TRANS(" - joined stage");
-                mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, ev.user, "", "", mesg));
+            if (ev.user != processor.getHubPeerUsername()) {   // The hub is not a person
+                if (mRosterGroup.isEmpty() || mRosterKept || ev.group != mRosterGroup) {
+                    // Before our own join is confirmed: already on the stage, told once with the join.
+                    mRosterPending.addIfNotAlreadyThere(ev.group + "\n" + ev.user);
+                } else if (!mRosterUsers.contains(ev.user)) {   // The same arrival can be reported more than once
+                    mRosterUsers.add(ev.user);
+                    rosterPost(ev.group, ev.user, true);
+                }
             }
 
             // delay update
@@ -4309,10 +4463,12 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             });
         }
         else if (ev.type == ClientEvent::PeerLeaveEvent) {
-            if (!currConnectionInfo.groupIsPublic && ev.user != processor.getHubPeerUsername()) {   
-                String mesg;
-                mesg << ev.user << TRANS(" - left stage");
-                mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, ev.user, "", "", mesg));
+            if (ev.user != processor.getHubPeerUsername()) {
+                mRosterPending.removeString(ev.group + "\n" + ev.user);
+                if (ev.group == mRosterGroup && mRosterUsers.contains(ev.user)) {   // told once
+                    mRosterUsers.removeString(ev.user);
+                    rosterPost(ev.group, ev.user, false);
+                }
             }
 
             mPeerContainer->peerLeftGroup(ev.group, ev.user);
@@ -5038,12 +5194,24 @@ void SonobusAudioProcessorEditor::updateLayout()
 
 
 
+    // Stage and name lines may elide down to a short stub; the instrument box beside them never goes below this
+    const int stageLabelMin = 40;
+    const int stageBlockMin = iconwidth + 2 + stageLabelMin;
+    const int instrumentMinWidth = 110;   // placeholder and every listed instrument readable, never just "..."
+    // What the stage, the own name and the instrument need to show in full: the band's free space goes to them first
+    mTopBandText = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText();
+    const auto labelNeed = [] (Label & l) { return (int) std::ceil (l.getFont().getStringWidthFloat (l.getText())) + 11; };
+    const int stageBlockNeed = jmax(stageBlockMin, iconwidth + 2 + jmax(labelNeed(*mMainGroupLabel), labelNeed(*mMainUserLabel)));
+    const String instrumentText = mMainInstrumentCombo->getText().isNotEmpty() ? mMainInstrumentCombo->getText()
+                                                                               : mMainInstrumentCombo->getTextWhenNothingSelected();
+    const int instrumentNeed = jmax(instrumentMinWidth, (int) std::ceil (Font (15.0f).getStringWidthFloat (instrumentText)) + 24);
+
     mainGroupBox.items.clear();
     mainGroupBox.flexDirection = FlexBox::Direction::row;
     //mainGroupBox.items.add(FlexItem(24, minitemheight/2, *mMainPeerLabel).withMargin(0).withFlex(0));
     mainGroupBox.items.add(FlexItem(iconwidth, iconheight, *mMainGroupImage).withMargin(0).withFlex(0));
     mainGroupBox.items.add(FlexItem(2, 4));
-    mainGroupBox.items.add(FlexItem(minButtonWidth, minitemheight/2 + 4, *mMainGroupLabel).withMargin(0).withFlex(1));   // Taller rows for the bigger type
+    mainGroupBox.items.add(FlexItem(stageLabelMin, minitemheight/2 + 4, *mMainGroupLabel).withMargin(0).withFlex(1));   // Taller rows for the bigger type
 
 
     mainUserBox.items.clear();
@@ -5051,14 +5219,14 @@ void SonobusAudioProcessorEditor::updateLayout()
     //mainUserBox.items.add(FlexItem(24, 4));
     mainUserBox.items.add(FlexItem(iconwidth, iconheight, *mMainPersonImage).withMargin(0).withFlex(0));
     mainUserBox.items.add(FlexItem(2, 4));
-    mainUserBox.items.add(FlexItem(minButtonWidth, minitemheight/2 + 2, *mMainUserLabel).withMargin(0).withFlex(1));
+    mainUserBox.items.add(FlexItem(stageLabelMin, minitemheight/2 + 2, *mMainUserLabel).withMargin(0).withFlex(1));
 
     mainGroupUserBox.items.clear();
     mainGroupUserBox.flexDirection = FlexBox::Direction::column;
     //mainGroupUserBox.items.add(FlexItem(2, 2));
-    mainGroupUserBox.items.add(FlexItem(minButtonWidth, minitemheight/2 + 4, mainGroupBox).withMargin(0).withFlex(0));
+    mainGroupUserBox.items.add(FlexItem(stageBlockMin, minitemheight/2 + 4, mainGroupBox).withMargin(0).withFlex(0));
     mainGroupUserBox.items.add(FlexItem(2, 2));
-    mainGroupUserBox.items.add(FlexItem(minButtonWidth, minitemheight/2 + 2, mainUserBox).withMargin(0).withFlex(0));
+    mainGroupUserBox.items.add(FlexItem(stageBlockMin, minitemheight/2 + 2, mainUserBox).withMargin(0).withFlex(0));
     mainGroupUserBox.items.add(FlexItem(2, 2));
 
     mainGroupLayoutBox.items.clear();
@@ -5069,9 +5237,21 @@ void SonobusAudioProcessorEditor::updateLayout()
     //mainGroupLayoutBox.items.add(FlexItem(3, 4));
     //mainGroupLayoutBox.items.add(FlexItem(toolwidth, minitemheight, *mChatButton).withMargin(0).withFlex(0) ); //.withMaxWidth(maxPannerWidth));
     mainGroupLayoutBox.items.add(FlexItem(4, 4));
-    mainGroupLayoutBox.items.add(FlexItem(34, minitemheight + 10, *mMainPeerLabel).withMargin(0).withFlex(0));
-    mainGroupLayoutBox.items.add(FlexItem(minButtonWidth, minitemheight + 10, mainGroupUserBox).withMargin(0).withFlex(1));   // +10 px band
-    if (processor.isConnectedToServer() && processor.getCurrentJoinedGroup().isNotEmpty() && !isReallyNarrow) {
+    // The stage and name block is only there while on a stage; without it the instrument box follows the layout buttons
+    const bool stageShown = mMainGroupLabel->getText().isNotEmpty();
+    mMainGroupLabel->setVisible(stageShown);
+    mMainUserLabel->setVisible(stageShown);
+    if (stageShown) {
+        mainGroupLayoutBox.items.add(FlexItem(34, minitemheight + 10, *mMainPeerLabel).withMargin(0).withFlex(0));
+        mainGroupLayoutBox.items.add(FlexItem(stageBlockMin, minitemheight + 10, mainGroupUserBox).withMargin(0).withFlex(1, 1, (float) stageBlockNeed));   // +10 px band
+        mainGroupLayoutBox.items.add(FlexItem(4, 4));
+    }
+    // Instrument box beside the stage and name, as tall as both lines. Both ask for what their text needs and give
+    // way together, down to their minimums, only when the band has no more room
+    mainGroupLayoutBox.items.add(FlexItem(instrumentMinWidth, minitemheight + 10, *mMainInstrumentCombo).withMargin(0).withFlex(0.35f, 1, (float) instrumentNeed).withMaxWidth((float) jmax(160, instrumentNeed)));
+    const bool videoShown = processor.isConnectedToServer() && processor.getCurrentJoinedGroup().isNotEmpty() && !isReallyNarrow;
+    const int connectNeed = 1 + 2 * toolwidth + 4 + (stageShown ? 34 + stageBlockNeed + 4 : 0) + instrumentNeed + (videoShown ? 5 + toolwidth : 0);
+    if (videoShown) {
         mainGroupLayoutBox.items.add(FlexItem(3, 4).withMargin(1).withFlex(0.0));
         mainGroupLayoutBox.items.add(FlexItem(toolwidth, minitemheight, *mVideoButton).withMargin(0).withFlex(0));
         mVideoButton->setVisible(true);
@@ -5131,9 +5311,12 @@ void SonobusAudioProcessorEditor::updateLayout()
 
     } else {
         middleBox.flexDirection = FlexBox::Direction::row;        
-        middleBox.items.add(FlexItem(280, minitemheight*2+18 , connectBox).withMargin(2).withFlex(1.5).withMaxWidth(470));   
+        // The connect side asks for room for the stage, name and instrument box; the input controls keep exactly what
+        // their own row needs (its items plus the 2-px margin), so the connect side takes only their spare room.
+        const int paramsNeed = jmax(choicew + 4, 2*mutew + 16) + 4 + inmeterwidth + 4 + jmax(minSliderWidth, 2*mutew + 16) + 4;
+        middleBox.items.add(FlexItem(280, minitemheight*2+18 , connectBox).withMargin(2).withFlex(1.5, 1, (float) jmax(420, connectNeed)).withMaxWidth((float) jmax(470, connectNeed)));
         middleBox.items.add(FlexItem(1, 1).withMaxWidth(3).withFlex(0.5));
-        middleBox.items.add(FlexItem(minKnobWidth*4 + inmeterwidth*2, minitemheight + minitemheight, paramsBox).withMargin(2).withFlex(4));
+        middleBox.items.add(FlexItem(paramsNeed, minitemheight + minitemheight, paramsBox).withMargin(2).withFlex(4));
 
         midboxminwidth = 0;
         for (auto & item : middleBox.items) {
@@ -5724,7 +5907,9 @@ public:
         String ver = info.marketing.isNotEmpty() ? ("Version " + info.marketing) : String();
         if (info.version.isNotEmpty()) ver += (ver.isNotEmpty() ? String::fromUTF8("  \u00b7  release ") : String("Release ")) + info.version;
         if (ver.isEmpty()) ver = "Development build (" + info.upstreamBase + ")";
-        g.drawFittedText(ver, r.removeFromTop(26), Justification::centredLeft, 1, 0.8f);   // the whole line, never cut off
+        // The whole line, never compressed: a second line when it does not fit
+        const bool verWraps = g.getCurrentFont().getStringWidthFloat(ver) > (float) r.getWidth();
+        SonoLookAndFeel::drawTextNoSqueeze(g, ver, r.removeFromTop(verWraps ? 44 : 26), Justification::centredLeft, 2);
 
         g.setFont(Font(13.0f));
         r.removeFromTop(14);
@@ -5736,7 +5921,7 @@ public:
         r.removeFromTop(18);
         g.setColour(Colour(0xff8a8a8a));
         g.setFont(Font(12.0f));
-        g.drawFittedText("SonoBus RP is an extensively modified version of SonoBus " + info.upstreamBase + " by Jesse Chappell (Sonosaurus). "
+        SonoLookAndFeel::drawTextNoSqueeze(g, "SonoBus RP is an extensively modified version of SonoBus " + info.upstreamBase + " by Jesse Chappell (Sonosaurus). "
                          "Both are free software, licensed under the GNU General Public License v3.",
                          r.removeFromTop(48), Justification::topLeft, 3);
     }

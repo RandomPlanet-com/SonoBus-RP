@@ -182,6 +182,29 @@
                 << (spin ? ", never sleeps" : "") << (pinned ? ", pinned to cpu " + std::to_string(o.pinCpu) : std::string()) << "\n";
   }
 #endif
+// Flush-to-zero for the calling thread: a number too small to matter is taken as zero, so the audio math never
+// drops into the processor's slow path for such numbers. The mode belongs to the thread, so each one sets it at its
+// start. SB_FTZ=0 leaves the threads as they are.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__SSE2__)
+  #include <xmmintrin.h>
+#elif defined(_M_ARM64)
+  #include <float.h>
+#endif
+static int hub_tap_int(const char* name, int def);
+static bool hub_ftz_on() { static const bool on = hub_tap_int("SB_FTZ", 1) != 0; return on; }
+static void hub_flush_denormals() {
+    if (!hub_ftz_on()) return;
+#if defined(__x86_64__) || defined(_M_X64) || defined(__SSE2__)
+    _mm_setcsr(_mm_getcsr() | 0x8040u);   // flush to zero + denormals are zero
+#elif defined(__aarch64__)
+    uint64_t fpcr = 0;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (1ull << 24);                 // FZ
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr));
+#elif defined(_M_ARM64)
+    _control87(_DN_FLUSH, _MCW_DN);
+#endif
+}
 // Recvmsg with the kernel's monotonic receive timestamp (ns, 0 = none).
 // Same semantics as recvfrom (flags 0, source address filled).
 #if defined(_WIN32)
@@ -354,6 +377,7 @@ static std::atomic<uint64_t> gHubSendErrors{0};
 // until peer-timeout removes the peer.
 // Test aid (SbTxHold.h), off unless SB_TEST_TXHOLD is set in the environment or the hub's taps file.
 static std::string hub_tap_str(const char* name, const char* def);
+static int hub_tap_int(const char* name, int def);
 static SbTxHold& hub_txhold() {
     static SbTxHold h;
     static const bool ready = (h.configure(hub_tap_str("SB_TEST_TXHOLD", "").c_str()), true);
@@ -1402,6 +1426,10 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     mSampleRate = sampleRate;
     mBlockSize = blockSize;
     mChannels = channels;
+    // Mute, solo and gain changes of a feed are ramped: a full-scale change takes kHubGainRampMs.
+    // SB_HUB_GAIN_RAMP=0 = the change is a step between two blocks (former behaviour).
+    mGainRampStep = (hub_tap_int("SB_HUB_GAIN_RAMP", 1) == 1)
+        ? 1.0f / (float) std::max(1, (int) std::lround(kHubGainRampMs * 0.001 * (double) sampleRate)) : 0.0f;
     mGroupName = groupName;
     mGroupPassword = groupPassword;   // For Copy Group Link
     mHubUserName = username;
@@ -1661,6 +1689,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         std::cout << "[HUB] Client TCP thread stopped.\n";
     });
 
+    (void) hub_ftz_on();   // read the switch here, before the threads that use it
     // Start network receive thread
     mRecvThread = std::make_unique<std::thread>([this]() { networkRecvThread(); });
 
@@ -2053,6 +2082,7 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
             { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; up.clientInstrument = p->clientInstrument; }
             up.clientDevBuf = p->clientDevBuf.load(std::memory_order_relaxed);
             up.clientDevSr = p->clientDevSr.load(std::memory_order_relaxed);
+            up.clientIfaceMs = p->clientIfaceMs.load(std::memory_order_relaxed);
             up.clientRxPops10s = p->clientRxPops10s.load(std::memory_order_relaxed);
             up.clientXruns10s = p->clientXruns10s.load(std::memory_order_relaxed);
             up.clientLatFeedAgeS = p->clientLatFeedAgeS.load(std::memory_order_relaxed);
@@ -2166,6 +2196,7 @@ void SonobusHubServer::latencyBroadcastTick() {
                          << (int32_t) q->isRecording.load(std::memory_order_relaxed) // That player is recording (older clients ignore it)
                          << q->latUpKbps                                              // Their uplink rate, kbit/s (older clients ignore it)
                          << (int32_t) q->isSendMuted.load(std::memory_order_relaxed) // That player muted its send (older clients ignore it)
+                         << q->clientIfaceMs.load(std::memory_order_relaxed)         // Their audio interface in + out, ms, -1 = not known (older clients ignore it)
                          << osc::EndMessage;
                     for (auto& l : peers) {
                         if (!l || l->addrlen == 0) continue;   // A player gets its OWN entry too (header "you")
@@ -2293,6 +2324,12 @@ static double hub_hold_allow(double def){
 // SB_HUB_HOLD_FOLLOW=1: the hold also grows when the measured target stays a block or more above it for 30 s.
 static bool hub_hold_follow(){
     static const bool v = (hub_tap_int("SB_HUB_HOLD_FOLLOW", 0) == 1);
+    return v;
+}
+// A step down that is taken back within ten minutes doubles the calm time the next one needs.
+// SB_HOLD_FLAP_GUARD=0 = former rules.
+static bool hub_hold_flap_guard(){
+    static const bool v = (hub_tap_int("SB_HOLD_FLAP_GUARD", 1) == 1);
     return v;
 }
 // One-step return of the hold after a stall. SB_HUB_HOLD_FAST_DECAY=0 keeps only the slow steps.
@@ -3427,6 +3464,10 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
                             kv.second->source->set_sinkoption(who->persistentEndpoint, kv.second->clientOurId, aoo_opt_protocol_flags, &wf, sizeof(wf));
                 }
             }
+            if (rm.ArgumentCount() >= 12 && it != rm.ArgumentsEnd() && it->IsFloat()) {   // The player's audio interface latency, in + out (ms)
+                const float im = (it++)->AsFloat();
+                if (im >= 0.0f && im < 1000.0f) who->clientIfaceMs.store(im, std::memory_order_relaxed);
+            }
         } catch (const osc::Exception&) {}
         return;
     }
@@ -4383,6 +4424,7 @@ void SonobusHubServer::pollPeerSourceEvents() {
 //   2) For each peer, compute mix-minus-self (sum of all OTHER peers' audio)
 //   3) Feed each peer's source with their personalized mix
 void SonobusHubServer::audioProcessThread() {
+    hub_flush_denormals();
     const double blockDurationMs = 1000.0 * mBlockSize / mSampleRate;
     const uint64_t blockNs = (uint64_t)(blockDurationMs * 1e6);
 
@@ -5058,6 +5100,7 @@ void SonobusHubServer::audioProcessThread() {
 // the audio thread's Step 1 finished before fan-out, so no concurrent writer.
 void SonobusHubServer::listenerProcessThread(std::shared_ptr<HubPeer> selfPeer) {
     if (!selfPeer) return;
+    hub_flush_denormals();
     const int32_t peerId = selfPeer->id;
     // The RT audio thread waits on these listener threads every block, so their scheduling is the audio
     // deadline: at default QoS, any preemption of a listener thread stalls the audio thread past its
@@ -5200,6 +5243,7 @@ uint64_t SonobusHubServer::listenerPumpFeeds(HubPeer* self, int selfIdx, bool in
         if (j < 0 || !mCurrentSnap[j] || !mCurrentSnap[j]->active) {
             // Sender absent — feed silence to keep the stream alive.
             std::lock_guard<std::mutex> flock(feed->lock);
+            feed->rampCoef = 0.0f;   // a sender that comes back fades in
             int fch = feed->channels;
             if ((int)tlsListenerZeroBuf.size() < blockSize * fch) tlsListenerZeroBuf.assign(blockSize * fch, 0.0f);
             if ((int)tlsListenerZeroPtrs.size() < fch) tlsListenerZeroPtrs.resize(fch);
@@ -5216,8 +5260,14 @@ uint64_t SonobusHubServer::listenerPumpFeeds(HubPeer* self, int selfIdx, bool in
         const HubMixOverride& ov = row[j];
         const bool soloGated = (listenerHasSolo && !ov.soloed);
         const float coef = ov.gain;
+        // Gain ramp: the gain in force moves toward its target at a fixed slope, through the real audio, so a
+        // mute, solo or gain change is a short fade instead of a step. A new feed starts at 0 and fades in.
+        // Costs one compare per feed while nothing changes.
+        const float rampStep = mGainRampStep;
+        const float rampTarget = (ov.muted || soloGated) ? 0.0f : coef;
+        const bool ramping = (rampStep > 0.0f) && (feed->rampCoef != rampTarget);
 
-        if (ov.muted || soloGated || coef == 0.0f) {
+        if (!ramping && (ov.muted || soloGated || coef == 0.0f)) {
             // Muted / solo-gated / zero-gain: pump zeros.
             std::lock_guard<std::mutex> flock(feed->lock);
             int fch = feed->channels;
@@ -5253,7 +5303,7 @@ uint64_t SonobusHubServer::listenerPumpFeeds(HubPeer* self, int selfIdx, bool in
         auto& rptrs = sender->decodedPtrSlots[rslot];
         if ((int)rptrs.size() < fch) continue;   // not yet initialized
 
-        if (coef == 1.0f) {
+        if (!ramping && coef == 1.0f) {
             uint64_t fpStart = hubNowTicks();
             feed->source->process((const aoo_sample**)rptrs.data(),
                                   blockSize, t);
@@ -5266,12 +5316,24 @@ uint64_t SonobusHubServer::listenerPumpFeeds(HubPeer* self, int selfIdx, bool in
                 tlsListenerGainBuf.resize(blockSize * HUB_MAX_CHANNELS_PER_PEER);
             if ((int)tlsListenerGainPtrs.size() < HUB_MAX_CHANNELS_PER_PEER)
                 tlsListenerGainPtrs.resize(HUB_MAX_CHANNELS_PER_PEER);
+            float rampEnd = rampTarget;
             for (int ch = 0; ch < fch; ++ch) {
                 tlsListenerGainPtrs[ch] = tlsListenerGainBuf.data() + ch * blockSize;
                 const float* src = rptrs[ch];   // Published slot (torn-block fix)
                 float* dst = tlsListenerGainPtrs[ch];
-                for (int s = 0; s < blockSize; ++s) dst[s] = src[s] * coef;
+                if (ramping) {
+                    float g = feed->rampCoef;   // every channel takes the same slope
+                    for (int s = 0; s < blockSize; ++s) {
+                        const float d = rampTarget - g;
+                        g = (d > rampStep) ? g + rampStep : (d < -rampStep) ? g - rampStep : rampTarget;
+                        dst[s] = src[s] * g;
+                    }
+                    rampEnd = g;
+                } else {
+                    for (int s = 0; s < blockSize; ++s) dst[s] = src[s] * coef;
+                }
             }
+            if (ramping) feed->rampCoef = rampEnd;
             uint64_t fpStart = hubNowTicks();
             feed->source->process((const aoo_sample**)tlsListenerGainPtrs.data(), blockSize, t);
             if (inlineSend)
@@ -5991,6 +6053,49 @@ void SonobusHubServer::statsWriterThread() {
                         const bool quietForDecay = !hub_hold_decay_gate() || decayTarget <= 0.0
                             || (gw.total > 0 && gw.above[bucketOf(std::max(0.0, decayTarget - marginMs))] <= allowedDecay);
                         if (decayTarget > 0.0 && decayTarget < p->abufCurrentMs - 0.5 && newStalls == 0 && quietForDecay) p->holdDecayWindows++; else p->holdDecayWindows = 0;
+                        if (hub_hold_flap_guard()) {
+                            // Flap guard. A step down that had to be taken back within kHoldFlapRegretMs was a mistake on this
+                            // link: each one doubles the calm time the next step down needs (30 s up to 16 min), counted from
+                            // the last change of the hold. Every hour a step down stands takes one doubling off again. Until
+                            // the calm time is served, the one-step return goes no lower than the hold the last retraction
+                            // chose, so the way back from a stall stays as fast as before.
+                            if (p->holdDownAtMs > 0) {
+                                if (p->abufCurrentMs > p->holdDownToMs + 0.5) {
+                                    if (nowMs - p->holdDownAtMs <= kHoldFlapRegretMs) {
+                                        p->holdFlapLevel = std::min(kHoldFlapMaxLevel, p->holdFlapLevel + 1);
+                                        p->holdFlapBackMs = p->abufCurrentMs;
+                                        std::cout << "[HUB-HOLD] peer='" << p->userName << "' FLAP-GUARD level " << p->holdFlapLevel << ": a step below "
+                                                  << std::fixed << std::setprecision(1) << p->holdFlapBackMs << " ms needs " << (30 << p->holdFlapLevel) << " s of calm\n";
+                                    }
+                                    p->holdDownAtMs = 0;
+                                } else if (p->holdFlapLevel > 0 && (nowMs - p->holdDownAtMs) / kHoldFlapStoodMs > (int64_t) p->holdFlapCredited) {
+                                    p->holdFlapCredited++;
+                                    if (--p->holdFlapLevel == 0) p->holdFlapBackMs = 0.0;
+                                    std::cout << "[HUB-HOLD] peer='" << p->userName << "' FLAP-GUARD level " << p->holdFlapLevel << ": the last step down stood\n";
+                                }
+                            }
+                            const int needFast = 3 << p->holdFlapLevel;                       // 10-s samples
+                            const int needSlow = std::max(kHoldDecayWindows, needFast);
+                            const int64_t sinceChange = nowMs - p->holdLastChangeMs;
+                            const bool proven = p->holdDecayWindows >= needFast && sinceChange >= (int64_t) needFast * 10000;
+                            if (hub_hold_fast_decay() && !decided && decayTarget > 0.0 && sinceChange >= 30000) {
+                                const bool wayBack = !proven && p->holdFlapLevel > 0 && p->holdFlapBackMs > 0.0 && p->holdDecayWindows >= 3;
+                                const double to = proven ? decayTarget : std::max(decayTarget, p->holdFlapBackMs);
+                                if ((proven || wayBack) && p->abufCurrentMs - to >= 2.0) {
+                                    abufApply.push_back({p, to, 9});
+                                    if (proven) { p->holdDecayWindows = 0; p->holdDownAtMs = nowMs; p->holdDownToMs = to; p->holdFlapCredited = 0; }
+                                    decided = true;
+                                }
+                            }
+                            if (!decided && p->holdDecayWindows >= needSlow && sinceChange >= std::max<int64_t>(kHoldDecayGapMs, (int64_t) needSlow * 10000)
+                                && nowMs >= p->holdNoDecayUntilMs) {
+                                std::cout << "[HUB-HOLD] peer='" << p->userName << "' DECAY toward need=" << std::fixed << std::setprecision(1) << decayTarget << " ms\n";
+                                double decayTo = std::max(decayTarget, p->abufCurrentMs / 1.33);
+                                if (holdBlocks) decayTo = std::max(decayTarget, std::min(holdQuant(decayTo), p->abufCurrentMs - blockMs));
+                                abufApply.push_back({p, decayTo, 5});
+                                p->holdDecayWindows = 0; p->holdDownAtMs = nowMs; p->holdDownToMs = decayTo; p->holdFlapCredited = 0;
+                            }
+                        } else {
                         // Fast way back after a stall: a hold 2 ms or more above its target for holdFastWindows samples in a row
                         // (30 s) with no new stall goes to the target in ONE step, one queue reset instead of one every two
                         // minutes. A hold that has to grow again within two minutes of that doubles the wait (up to 4 min);
@@ -6014,6 +6119,7 @@ void SonobusHubServer::statsWriterThread() {
                             if (holdBlocks) decayTo = std::max(decayTarget, std::min(holdQuant(decayTo), p->abufCurrentMs - blockMs));   // at least one block down
                             abufApply.push_back({p, decayTo, 5});
                             p->holdDecayWindows = 0;
+                        }
                         }
                     }
                     p->holdAtCeiling.store(p->abufCommitted && p->abufCurrentMs >= kHoldCeilMs - 0.5, std::memory_order_relaxed);
@@ -6064,6 +6170,7 @@ void SonobusHubServer::statsWriterThread() {
 
 // Receives UDP packets and dispatches them to the appropriate sink or client
 void SonobusHubServer::networkRecvThread() {
+    hub_flush_denormals();   // decoding and concealment run here
 #if defined(__APPLE__)
     // Elevate above default QoS. These threads feed and drain the RT audio path, and default QoS lets
     // background-class work delay them, which shows up as correlated inter-arrival spikes across all
@@ -6876,15 +6983,23 @@ void SonobusHubServer::setStageListingStatus(int state, const std::string& text)
     mStageListingText = text;
 }
 
-bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes) {
+// A timed removal ends by itself; the other two stay until the host lifts them (or, for UntilRestart, the hub restarts).
+static bool hub_removal_over(const SonobusHubServer::RemovedPlayer& b, int64_t now) {
+    return b.kind == SonobusHubServer::RemovalKind::Timed && b.untilMs <= now;
+}
+
+bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes, RemovalKind kind) {
     if (userName.empty()) return false;
     std::string ip;
     bool found = false;
+    struct sockaddr_storage toAddr {};
+    socklen_t toLen = 0;
     {
         std::shared_lock<std::shared_mutex> lk(mPeerMutex);
         for (auto& p : mPeers) {
             if (!p || p->userName != userName) continue;
             found = true;
+            if (p->active && p->addrlen > 0) { std::memcpy(&toAddr, &p->addr, sizeof(toAddr)); toLen = (socklen_t) p->addrlen; }
             char ipBuf[INET6_ADDRSTRLEN] = {0};
             if (p->addr.ss_family == AF_INET) inet_ntop(AF_INET, &((const struct sockaddr_in*)&p->addr)->sin_addr, ipBuf, sizeof(ipBuf));
             else if (p->addr.ss_family == AF_INET6) inet_ntop(AF_INET6, &((const struct sockaddr_in6*)&p->addr)->sin6_addr, ipBuf, sizeof(ipBuf));
@@ -6893,23 +7008,153 @@ bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes)
         }
     }
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    bool savePermanent = kind == RemovalKind::Permanent;
     {
         std::lock_guard<std::mutex> l(mStageMutex);
-        mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const StageBlock& b) { return b.untilMs <= now; }), mStageBlocks.end());
-        if (blockMinutes > 0) mStageBlocks.push_back({ ip, userName, now + (int64_t) blockMinutes * 60000 });
+        mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const RemovedPlayer& b) { return hub_removal_over(b, now); }), mStageBlocks.end());
+        if (kind != RemovalKind::Timed || blockMinutes > 0) {
+            RemovedPlayer e;
+            e.user = userName; e.ip = ip; e.removedAtMs = now; e.kind = kind;
+            e.untilMs = kind == RemovalKind::Timed ? now + (int64_t) blockMinutes * 60000 : 0;
+            // One entry per name: a new removal replaces the old one and keeps its address when the player is gone.
+            for (auto it = mStageBlocks.begin(); it != mStageBlocks.end();) {
+                if (it->user != userName) { ++it; continue; }
+                if (e.ip.empty()) e.ip = it->ip;
+                if (it->kind == RemovalKind::Permanent) savePermanent = true;
+                it = mStageBlocks.erase(it);
+            }
+            mStageBlocks.push_back(std::move(e));
+        }
     }
-    connLog("kick", ip, userName, mGroupName, "removed by the host, kept out " + std::to_string(blockMinutes) + " min");
+    if (savePermanent) removedPlayersSave();
+    connLog("kick", ip, userName, mGroupName, kind == RemovalKind::Permanent ? std::string("removed by the host, kept out permanently")
+                                             : kind == RemovalKind::UntilRestart ? std::string("removed by the host, kept out until the hub restarts")
+                                             : "removed by the host, kept out " + std::to_string(blockMinutes) + " min");
+    // Tell the player why before the connection closes (twice: one lost datagram must not hide it). Control path only.
+    if (toLen > 0 && mSocket >= 0) {
+        std::string why = "The host removed you from this stage.";
+        if (kind == RemovalKind::Timed && blockMinutes > 0) why += " You can rejoin in " + std::to_string(blockMinutes) + (blockMinutes == 1 ? " minute." : " minutes.");
+        char rbuf[384];
+        try {
+            osc::OutboundPacketStream m(rbuf, sizeof(rbuf));
+            m << osc::BeginMessage(SB_HXMSG_DOMAIN "/hxremoved") << why.c_str() << osc::EndMessage;
+            for (int k = 0; k < 2; ++k) ::sendto(mSocket, m.Data(), m.Size(), 0, (const struct sockaddr*)&toAddr, toLen);
+        } catch (const osc::Exception&) {}
+    }
     aoo_sb_kick_user(userName.c_str());
     return found;
+}
+
+std::vector<SonobusHubServer::RemovedPlayer> SonobusHubServer::removedPlayers() const {
+    const int64_t now = hub_now_ms();
+    std::vector<RemovedPlayer> out;
+    std::lock_guard<std::mutex> l(mStageMutex);
+    for (auto it = mStageBlocks.rbegin(); it != mStageBlocks.rend(); ++it) if (!hub_removal_over(*it, now)) out.push_back(*it);
+    return out;
+}
+
+int SonobusHubServer::removedPlayerCount() const {
+    const int64_t now = hub_now_ms();
+    int n = 0;
+    std::lock_guard<std::mutex> l(mStageMutex);
+    for (const auto& b : mStageBlocks) if (!hub_removal_over(b, now)) ++n;
+    return n;
+}
+
+bool SonobusHubServer::allowBack(const std::string& userName, const std::string& ip) {
+    bool found = false, wasPermanent = false;
+    {
+        std::lock_guard<std::mutex> l(mStageMutex);
+        for (auto it = mStageBlocks.begin(); it != mStageBlocks.end();) {
+            if (it->user != userName || it->ip != ip) { ++it; continue; }
+            found = true;
+            if (it->kind == RemovalKind::Permanent) wasPermanent = true;
+            it = mStageBlocks.erase(it);
+        }
+    }
+    if (!found) return false;
+    if (wasPermanent) removedPlayersSave();
+    connLog("allow-back", ip, userName, mGroupName, "allowed back by the host");
+    return true;
+}
+
+// hub_removed_players.json: {"_schema":1,"removed":[{"user":"name","ip":"1.2.3.4","at":ms}, ...]}
+// Permanent removals only, oldest first. Written whole on every change (a rare event).
+void SonobusHubServer::removedPlayersSave() {
+    std::lock_guard<std::mutex> fl(mRemovedFileMutex);
+    if (mRemovedFile.empty()) return;
+    std::ostringstream o; o << "{\"_schema\":1,\"removed\":[\n";
+    {
+        std::lock_guard<std::mutex> l(mStageMutex);
+        bool first = true;
+        for (const auto& b : mStageBlocks) {
+            if (b.kind != RemovalKind::Permanent) continue;
+            o << (first ? "" : ",\n") << " {\"user\":\"" << hub_json_esc(b.user) << "\",\"ip\":\"" << hub_json_esc(b.ip) << "\",\"at\":" << b.removedAtMs << "}";
+            first = false;
+        }
+    }
+    o << "\n]}\n";
+    const std::string tmp = mRemovedFile + ".tmp";
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) {   // the data folder is made by the first settings save; make it here so a removal is never lost
+#if defined(_WIN32)
+        const size_t slash = mRemovedFile.find_last_of("/\\");
+        if (slash != std::string::npos && slash > 0) CreateDirectoryA(mRemovedFile.substr(0, slash).c_str(), nullptr);
+#else
+        const size_t slash = mRemovedFile.find_last_of('/');
+        if (slash != std::string::npos && slash > 0) ::mkdir(mRemovedFile.substr(0, slash).c_str(), 0755);
+#endif
+        f.open(tmp, std::ios::binary | std::ios::trunc);
+    }
+    if (f) { f << o.str(); f.close(); }
+#if defined(_WIN32)
+    // rename() does not replace an existing file on Windows
+    const bool moved = f && MoveFileExA(tmp.c_str(), mRemovedFile.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    const bool moved = f && ::rename(tmp.c_str(), mRemovedFile.c_str()) == 0;
+#endif
+    if (!moved) {
+        ::remove(tmp.c_str());
+        std::cout << "[HUB-REMOVED] could not write " << mRemovedFile << ": permanent removals last only until the hub restarts\n";
+    }
+}
+
+void SonobusHubServer::setRemovedPlayersFile(const std::string& path) {
+    std::vector<RemovedPlayer> loaded;
+    if (!path.empty()) {
+        std::ifstream f(path, std::ios::binary);
+        if (f) {
+            std::stringstream ss; ss << f.rdbuf();
+            std::string arr;
+            for (const auto& kv : hub_json_members(ss.str())) if (kv.first == "removed") arr = kv.second;
+            for (const auto& item : hub_json_items(arr)) {
+                const auto m = hub_json_members(item);
+                RemovedPlayer e;
+                e.user = hub_json_member(m, "user"); e.ip = hub_json_member(m, "ip");
+                e.removedAtMs = atoll(hub_json_member(m, "at").c_str());
+                e.kind = RemovalKind::Permanent;
+                if (!e.user.empty() || !e.ip.empty()) loaded.push_back(std::move(e));
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> fl(mRemovedFileMutex);
+        mRemovedFile = path;
+        std::lock_guard<std::mutex> l(mStageMutex);
+        mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [](const RemovedPlayer& b) { return b.kind == RemovalKind::Permanent; }), mStageBlocks.end());
+        mStageBlocks.insert(mStageBlocks.begin(), loaded.begin(), loaded.end());
+    }
+    if (!loaded.empty()) std::cout << "[HUB-REMOVED] " << loaded.size() << " permanent removal(s) loaded from " << path << "\n";
 }
 
 std::string SonobusHubServer::stageJoinRefusal(const std::string& ipRaw, const std::string& user, int othersInStage) {
     const std::string ip = hub_plain_ip(ipRaw);
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> l(mStageMutex);
-    mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const StageBlock& b) { return b.untilMs <= now; }), mStageBlocks.end());
+    mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const RemovedPlayer& b) { return hub_removal_over(b, now); }), mStageBlocks.end());
     for (const auto& b : mStageBlocks) {
-        if (b.user == user || (!b.ip.empty() && b.ip == ip)) {
+        if ((!b.user.empty() && b.user == user) || (!b.ip.empty() && b.ip == ip)) {
+            if (b.kind != RemovalKind::Timed) return "The host removed you from this stage.";
             const int64_t mins = std::max<int64_t>(1, (b.untilMs - now + 59999) / 60000);
             return "The host removed you from this stage. You can rejoin in " + std::to_string(mins) + (mins == 1 ? " minute." : " minutes.");
         }

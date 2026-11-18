@@ -88,13 +88,13 @@ public:
 
     // HostedMix-only per-row dropped-packet readout. Hidden and not laid out outside hosted mode.
     std::unique_ptr<Label>  hostedDropsLabel;
+    std::unique_ptr<Label>  statusNoteLabel;   // relayed rows: "Muted ..." note after the row's buttons
     std::unique_ptr<Label>  hubLatLabel;   // Relayed-row popup — to/from-hub latency (replaces address + reset-drops)
     // Drops-per-minute is a true sliding window: 12 samples at >=5-s spacing (t, count); "recent" = count now minus
     // the oldest sample inside the last 60 s.
     uint32  dropsSampleT[12] = {0};
     int64_t dropsSampleC[12] = {0};
     int     dropsSampleN = 0;
-    foleys::LevelMeterSource * recvMeterSrc = nullptr;   // Rebind when the row's peer changes
 
     std::unique_ptr<Drawable>  sendUpArrow;
     std::unique_ptr<Drawable>  recvDownArrow;
@@ -121,6 +121,8 @@ public:
     OwnedArray<SbChannelTipMeter> groupMeters;
     Array<int> groupMeterChans;
     int laidOutMeterChans = -1;   // Channel count the row meter was last sized for
+    String laidOutName;           // Player name the row was last laid out for
+    int rowMeterItem = -1;        // Index of the meter column in mainbox (wide relayed rows), -1 = none
     std::unique_ptr<foleys::LevelMeter> sendMeter;
     
     
@@ -175,6 +177,7 @@ public:
     
     bool singlePanner = true;
     bool isNarrow = false;
+    bool wideForm = false;   // the row has its meter in the right-hand column (wide header form)
     bool fullMode = true;
     bool infoOnly = false;
     bool addrClicked = false;
@@ -424,6 +427,14 @@ protected:
     int64_t mHubBytesSentLast = -1, mHubBytesRecvLast = -1; uint32 mHubRateStampMs = 0;   // Our own link's rates were never computed
     uint32 mHubDropsT[12] = {}; int64_t mHubDropsC[12] = {}; int mHubDropsN = 0;   // Drops-from-hub last-minute window
     uint32 mLinkJoinMs = 0; int64_t mLinkBase = -1;   // Link light: join time, and the drop count when its first 10 s ended
+    bool ownInterfaceMs(float & inMs, float & outMs) const;   // Our audio interface, input and output with their buffers (ms)
+    // Hub header fields, kept so the line can be fitted again on a resize without new figures
+    struct HubHeaderParts {
+        bool valid = false;
+        String addr, disc, ping, lat, rec, recShort;
+        Colour reg, pingCol, latCol, linkCol;
+    } mHubHdr;
+    void fitHubHeader();   // Shortens the header line in steps until it fits its label
     
     Colour mutedBySoloColor;
     Colour mutedTextColor;
