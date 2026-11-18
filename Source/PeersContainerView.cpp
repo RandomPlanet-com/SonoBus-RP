@@ -2927,7 +2927,8 @@ void PeersContainerView::updatePeerViews(int specific)
         if (processor.isHostedMixModeEnabled() && pvf->isVisible() == processor.isHubPeer(processor.getRemotePeerUserName(i)))
             needsUpdateLayout = true;
 
-        if (chcnt != pvf->channelGroups->getGroupViewsCount()) {
+        // A row always has at least one channel line, also for a peer without channels (the hub's own row)
+        if (jmax(1, chcnt) != pvf->channelGroups->getGroupViewsCount()) {
             pvf->channelGroups->rebuildChannelViews();
             needsUpdateLayout = true;
         } else {

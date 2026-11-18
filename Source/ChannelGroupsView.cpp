@@ -1131,6 +1131,10 @@ ChannelGroupsView::~ChannelGroupsView()
     if (mEffectsView) {
         mEffectsView->removeListener(this);
     }
+    // An open FX pop-up of this row would stay behind as an empty box
+    if (auto * callout = dynamic_cast<CallOutBox*>(effectsCalloutBox.get())) {
+        callout->dismiss();
+    }
 }
 
 void ChannelGroupsView::configLevelSlider(Slider * slider, bool monmode)

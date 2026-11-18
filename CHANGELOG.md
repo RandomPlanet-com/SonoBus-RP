@@ -2,6 +2,12 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-18
+
+### SonoBus RP 1.3.4
+
+- SonoBus RP 1.3.4: fixes the FX button on player rows, which closed right after opening.
+
 ## 2026-11-17
 
 ### SonoBus RP 1.3.3
