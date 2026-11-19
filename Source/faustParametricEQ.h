@@ -784,6 +784,7 @@ class faustParametricEQ : public faustdsp {
 	FAUSTFLOAT fHslider3;
 	float fRec11[2];
 	FAUSTFLOAT fHslider4;
+	float fRec19[2];
 	float fConst2;
 	float fRec3[3];
 	FAUSTFLOAT fHslider5;
@@ -986,6 +987,24 @@ class faustParametricEQ : public faustdsp {
 		for (int l20 = 0; (l20 < 3); l20 = (l20 + 1)) {
 			fRec17[l20] = 0.0f;
 		}
+		for (int l21 = 0; (l21 < 2); l21 = (l21 + 1)) {
+			fRec19[l21] = 0.0f;
+		}
+	}
+	
+	// Added by hand (not Faust output): puts the control smoothers at the control values,
+	// so a cleared filter starts at its settings.
+	void settleControls() {
+		fRec6[1] = float(fHslider0);
+		fRec9[1] = float(fHslider1);
+		fRec10[1] = float(fHslider2);
+		fRec11[1] = float(fHslider3);
+		fRec19[1] = float(fHslider4);
+		fRec12[1] = float(fHslider5);
+		fRec13[1] = float(fHslider6);
+		fRec14[1] = float(fHslider7);
+		fRec15[1] = float(fHslider8);
+		fRec16[1] = float(fHslider9);
 	}
 	
 	virtual void init(int sample_rate) {
@@ -1087,7 +1106,7 @@ class faustParametricEQ : public faustdsp {
 		float fSlow1 = (0.00100000005f * float(fHslider1));
 		float fSlow2 = (0.00100000005f * float(fHslider2));
 		float fSlow3 = (0.00100000005f * float(fHslider3));
-		float fSlow4 = (fConst1 / float(fHslider4));
+		float fSlow4 = (0.00100000005f * float(fHslider4));
 		float fSlow5 = (0.00100000005f * float(fHslider5));
 		float fSlow6 = (0.00100000005f * float(fHslider6));
 		float fSlow7 = (0.00100000005f * float(fHslider7));
@@ -1115,9 +1134,10 @@ class faustParametricEQ : public faustdsp {
 			float fTemp10 = (1.0f / fTemp9);
 			fRec11[0] = (fSlow3 + (0.999000013f * fRec11[1]));
 			int iTemp11 = (fRec11[0] > 0.0f);
-			float fTemp12 = std::sin((fConst2 * fRec10[0]));
-			float fTemp13 = (fSlow4 * ((fRec10[0] * std::pow(10.0f, (0.0500000007f * std::fabs(fRec11[0])))) / fTemp12));
-			float fTemp14 = (fSlow4 * (fRec10[0] / fTemp12));
+			fRec19[0] = (fSlow4 + (0.999000013f * fRec19[1]));
+			float fTemp12 = (fRec19[0] * std::sin((fConst2 * fRec10[0])));
+			float fTemp13 = (fConst1 * ((fRec10[0] * std::pow(10.0f, (0.0500000007f * std::fabs(fRec11[0])))) / fTemp12));
+			float fTemp14 = (fConst1 * (fRec10[0] / fTemp12));
 			float fTemp15 = (iTemp11 ? fTemp14 : fTemp13);
 			float fTemp16 = (2.0f * (fRec3[1] * (1.0f - (1.0f / faustParametricEQ_faustpower2_f(fTemp9)))));
 			float fTemp17 = (((fTemp10 + fTemp15) / fTemp9) + 1.0f);
@@ -1166,6 +1186,7 @@ class faustParametricEQ : public faustdsp {
 			fRec9[1] = fRec9[0];
 			fRec10[1] = fRec10[0];
 			fRec11[1] = fRec11[0];
+			fRec19[1] = fRec19[0];
 			fRec3[2] = fRec3[1];
 			fRec3[1] = fRec3[0];
 			fRec12[1] = fRec12[0];

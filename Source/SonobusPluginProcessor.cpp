@@ -340,6 +340,8 @@ String SonobusAudioProcessor::paramInputReverbPreDelay  ("inreverbpredelay");
 
 static String recentsCollectionKey("RecentConnections");
 static String recentsItemKey("ServerConnectionInfo");
+static String stagePasswordsKey("StagePasswords");
+static String stagePasswordItemKey("StagePassword");
 
 static String extraStateCollectionKey("ExtraState");
 static String useSpecificUdpPortKey("UseUdpPort");
@@ -550,6 +552,19 @@ static String hostedDiagDeriveStatusChipTextFromEvents(const StringArray & diagn
 static String compressorStateKey("CompressorState");
 static String expanderStateKey("ExpanderState");
 static String limiterStateKey("LimiterState");
+
+// The fade gain on the first channels of a buffer; returns the fade as it stands after this block
+static SonoAudio::FxFade fadeBufferGain (const SonoAudio::FxFade & fade, AudioBuffer<float> & buf, int numChans, int numSamples, bool on)
+{
+    SonoAudio::FxFade f = fade;
+    const int n = jmin(numChans, buf.getNumChannels());
+    for (int ch = 0; ch < n; ++ch) {
+        f = fade;
+        f.gain(buf.getWritePointer(ch), numSamples, on);
+    }
+    if (n <= 0) f.snapTo(on);
+    return f;
+}
 static String eqStateKey("ParametricEqState");
 
 static String lastUsernameKey("lastUsername");
@@ -604,7 +619,7 @@ static String peerHubMixSoloedKey("hxsoloed");  // Persisted row SOLO (hub-mix o
 #define ECHO_SINKSOURCE_ID 12321
 #define DEFAULT_UDP_PORT 11000
 
-#define UDP_OVERHEAD_BYTES 0 // 28
+#define UDP_OVERHEAD_BYTES 28   // IPv4 + UDP headers: rates count what is on the wire, as the hub does
 
 // get sockaddr, IPv4 or IPv6:
 static void *get_in_addr(struct sockaddr *sa)
@@ -1509,7 +1524,7 @@ mState (*this, &mUndoManager, "SonoBusAoO",
 void SonobusAudioProcessor::maybeStartNetbufLogger()
 {
     std::string path;
-    int forceDynResamp = -1;   // SB_DYNRESAMP=<0|1> A/B override
+    int forceDynResamp = -1;   // SB_DYNRESAMP=<0|1>: test switch, forces Dynamic Resampling on or off
     {
         std::ifstream conf(sb_taps_path());
         std::string line;
@@ -1730,6 +1745,7 @@ namespace sbtap { static const char* tapConf(const char* key); }   // forward de
 // Every [SB-*] console diagnostic is gated behind
 // the SB_DIAG=1 tap. Read once per process; a clean install prints nothing.
 static bool sbDiagOn() { static int v = -1; if (v < 0) { const char* d = sbtap::tapConf("SB_DIAG"); v = (d && d[0] == '1') ? 1 : 0; } return v == 1; }   // (defined near EOF)
+bool SonobusAudioProcessor::launchRaceFixOn() { static const bool on = [](){ const char* v = sbtap::tapConf("SB_LAUNCH_RACE_FIX"); return (v && *v) ? atoi(v) != 0 : true; }(); return on; }
 
 void SonobusAudioProcessor::initializeAoo(int udpPort)
 {
@@ -1772,9 +1788,8 @@ void SonobusAudioProcessor::initializeAoo(int udpPort)
     }
 
     // Optionally mark audio datagrams DSCP EF (46, TOS 0xB8) and macOS service type VOICE. Home
-    // routers/WMM honour DSCP on the upstream queue; ISPs may strip it. Default OFF because EF
-    // raised p99 on a high-jitter WAN path; SB_DSCP=1 (env or taps) turns marking on for routers
-    // that want it.
+    // routers/WMM honour DSCP on the upstream queue; ISPs may strip it. Default OFF; SB_DSCP=1
+    // (env or taps) turns marking on for routers that want it.
     if (const char* dopt = sbtap::tapConf("SB_DSCP"); dopt && dopt[0] == '1') {
         int tos_ef = 0xB8;
         if (setsockopt(mUdpSocket->getRawSocketHandle(), IPPROTO_IP, IP_TOS, (const char*)&tos_ef, sizeof(tos_ef)) != 0) {
@@ -2101,12 +2116,13 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
 
     mCurrentUsername = username;
 
+    const bool connectWasInFlight = launchRaceFixOn() && mServerConnectInFlight.get() != 0;
     int32_t retval = mAooClient->connect(host.toRawUTF8(), port, username.toRawUTF8(), passwd.toRawUTF8());
 
     if (retval >= 0) {
         mServerConnectInFlight = 1;
     } else {
-        mServerConnectInFlight = 0;
+        if (!connectWasInFlight) mServerConnectInFlight = 0;   // a refused second call leaves the first one in flight
         DBG("Error connecting to server: " << retval);
         // Connect refuses when
         // the aoo client's internal state machine is still `connected` on a
@@ -2116,7 +2132,9 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
         // `disconnected` so the next reconnect-timer tick can start clean.
         // user-disconnect only acts in state `connected`; handshake/connecting
         // states resolve themselves via their own timeouts.
-        if (!mIsConnectedToServer) {
+        // Not while our own connect is in flight: the library may have finished it before its
+        // CONNECT event was read here, and the disconnect would drop that new session.
+        if (!mIsConnectedToServer && !connectWasInFlight) {
             DBG("Forcing aoo client disconnect to clear stale state");
             mAooClient->disconnect();
         }
@@ -2166,7 +2184,7 @@ void SonobusAudioProcessor::sbMarkLaunchRejoin(bool inRoom)
 
 bool SonobusAudioProcessor::sbLaunchRejoinWanted() const
 {
-    // No file yet (first run of this version) keeps the earlier behaviour: rejoin.
+    // No file yet: rejoin.
     const File f = mSupportDir.getChildFile("launch-rejoin.txt");
     return !(f.existsAsFile() && f.loadFileAsString().startsWithChar('0'));
 }
@@ -2289,6 +2307,26 @@ int SonobusAudioProcessor::getRecentServerConnectionInfos(Array<AooServerConnect
     const ScopedLock sl (mRecentsLock);
     retarray = mRecentConnectionInfos;
     return retarray.size();
+}
+
+static String savedStageKey(const String & host, int port, const String & stage)
+{
+    return host.trim().toLowerCase() + ":" + String(port) + "\n" + stage;
+}
+
+String SonobusAudioProcessor::getSavedStagePassword(const String & host, int port, const String & stage)
+{
+    const ScopedLock sl (mRecentsLock);
+    return mSavedStagePasswords.getValue(savedStageKey(host, port, stage), {});
+}
+
+void SonobusAudioProcessor::setSavedStagePassword(const String & host, int port, const String & stage, const String & password)
+{
+    const ScopedLock sl (mRecentsLock);
+    const String key = savedStageKey(host, port, stage);
+    if (password.isEmpty()) mSavedStagePasswords.remove (StringRef (key));
+    else mSavedStagePasswords.set(key, password);
+    while (mSavedStagePasswords.size() > 50) mSavedStagePasswords.remove ((int) 0);
 }
 
 void SonobusAudioProcessor::clearRecentServerConnectionInfos()
@@ -10344,7 +10382,7 @@ bool SonobusAudioProcessor::handleReceivedPacket(const char * buf, int nbytes, E
                     }
                     mNetStatDispatchMisses.fetch_add(1, std::memory_order_relaxed);
 
-                    // full scan (original behaviour): first sink to accept wins
+                    // full scan: first sink to accept wins
                     for (int pi = 0; pi < mRemotePeers.size(); ++pi) {
                         auto * remote = mRemotePeers.getUnchecked(pi);
                         if (remote->infoOnly) continue;
@@ -12095,7 +12133,7 @@ void SonobusAudioProcessor::reportNetDietStatsIfDue()
         mNetStatSendWakes.load(std::memory_order_relaxed),
         mNetStatSendPasses.load(std::memory_order_relaxed),
         mNetStatDispatchDups.load(std::memory_order_relaxed),
-        mNetStatBundlesRecv.load(std::memory_order_relaxed),   // (hub diet v2)
+        mNetStatBundlesRecv.load(std::memory_order_relaxed),
         mNetStatBundleMsgs.load(std::memory_order_relaxed),
         mNetStatBundleBad.load(std::memory_order_relaxed)
     };
@@ -12343,7 +12381,7 @@ int32_t SonobusAudioProcessor::handleSourceEvents(const aoo_event ** events, int
                             DBG("Invite to echo source adding sink " << e->id);
                         }
                         else if (auto * latpeer = findRemotePeerByLatencyId(es, sourceId)) {
-                            if (latpeer->latencysource) {   // Was echopeer-> (null in this branch) — stock bug
+                            if (latpeer->latencysource) {   // not echopeer: it is null in this branch
                                 latpeer->latencysource->add_sink(es, e->id, endpoint_send);
                                 latpeer->latencysource->start();
                             }
@@ -12443,7 +12481,7 @@ int32_t SonobusAudioProcessor::handleSourceEvents(const aoo_event ** events, int
                     DBG("UnInvite to echo source adding sink " << e->id);
                 }
                 else if (auto * latpeer = findRemotePeerByLatencyId(es, sourceId)) {
-                    if (latpeer->latencysource) {   // Was echopeer-> (null here) — stock bug
+                    if (latpeer->latencysource) {   // not echopeer: it is null here
                         latpeer->latencysource->remove_sink(es, e->id);
                         latpeer->latencysource->stop();
                     }
@@ -13552,11 +13590,10 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                                             setRemotePeerSendActive(i, true);
                                                         }
                                                         if (p->oursource) {
-                                                            // Re-evaluate the send channel count. The old way forces a full
-                                                            // source setup (a new stream at the hub) on every retry; the
-                                                            // default forces it only when the source's format does not match
-                                                            // (no format yet, other channel count or rate), else it sets up
-                                                            // only on a real change.
+                                                            // Re-evaluate the send channel count. A full source setup (a new
+                                                            // stream at the hub) is forced only when the source's format does
+                                                            // not match (no format yet, other channel count or rate), or on
+                                                            // every retry with SB_JOIN_RETRY_KEEP=0.
                                                             bool force = true;
                                                             if (mJoinRetryKeep) {
                                                                 aoo_format_storage fs;
@@ -14416,7 +14453,7 @@ bool SonobusAudioProcessor::getRemotePeerInfoOnly(int index) const
     return false;
 }
 
-// ---- Phase 3: per-listener overrides for the hub mix ------------------------
+// ---- per-listener overrides for the hub mix ------------------------
 
 static SonobusAudioProcessor::RemotePeer * sb_findHubPeer(
     const OwnedArray<SonobusAudioProcessor::RemotePeer> & peers, const String & hubName)
@@ -15025,7 +15062,7 @@ void SonobusAudioProcessor::updateRemotePeerSendChannels(int index, RemotePeer *
     }
     
     if (remote->sendChannels != newchancnt) {
-        {   // Diag: where does the upstream channel count come from (the hub Mac shows 17)
+        {   // Diag: where the upstream channel count comes from
             int ins = 0; for (int cgi=0; cgi < mInputChannelGroupCount && cgi < MAX_CHANGROUPS; ++cgi) ins += mInputChannelGroups[cgi].params.numChannels;
             if (sbDiagOn()) fprintf(stderr, "[SB-SENDCH] peer='%s' %d -> %d | inputs=%d (groups %d) met=%d file=%d sb=%d | override=%d nominal=%d routedToPeer=%d mainOut=%d mainIn=%d sendChansParam=%d\n",
                     remote->userName.toRawUTF8(), remote->sendChannels, newchancnt, ins, mInputChannelGroupCount,
@@ -15072,14 +15109,13 @@ void SonobusAudioProcessor::changeListenerCallback (ChangeBroadcaster* source)
     }
 }
 
-// Hub-relayed feeds underrun at the auto-tuner's ~1-4 ms landing zone, so floor hosted-mix receive
-// buffers at 8 ms (override via SB_FEED_BUF_FLOOR_MS in /tmp/sb_taps.conf; 0 disables). Applies to
-// auto, manual and reset paths, which all flow through setRemotePeerBufferTime.
+// Floor for hosted-mix receive buffers, ms (SB_FEED_BUF_FLOOR_MS in the taps file overrides; 0 disables).
+// Applies to auto, manual and reset paths, which all flow through setRemotePeerBufferTime.
 static float sbFeedBufferFloorMs()
 {
     static float floorMs = -1.0f;
     if (floorMs < 0.0f) {
-        floorMs = 2.67f;   // tested default
+        floorMs = 2.67f;
         if (FILE* cf = sb_taps_fopen()) {
             char line[256];
             while (fgets(line, sizeof(line), cf)) {
@@ -15209,11 +15245,9 @@ bool SonobusAudioProcessor::sbPeerIsWan(const RemotePeer * peer) const
     return !priv;
 }
 
-// Smart Pin limits per path. A high-jitter WAN link can show p99 jitter around 6 ms but burst
-// stalls of 20-75 ms, so a WAN pin must be allowed to cover the bursts; too low a cap forces the
-// governor's hard-full drain and steady underruns. There is no WAN-specific floor: a floor set by
-// the worst link is the wrong rule for a nearby fiber connection, and a high-jitter link gets its
-// depth as a measured outcome.
+// Smart Pin limits per path. A WAN pin must be able to cover burst stalls; too low a cap forces the
+// governor's hard-full drain and steady underruns. No WAN-specific floor: a floor set by the worst
+// link is wrong for a nearby fiber connection.
 float SonobusAudioProcessor::mcpFloorMsFor(const RemotePeer * peer) const   { (void) peer; return mMcpPinFloorMs; }
 float SonobusAudioProcessor::mcpCeilingMsFor(const RemotePeer * peer) const { return sbPeerIsWan(peer) ? 96.0f : 32.0f; }
 float SonobusAudioProcessor::mcpSanityMaxMsFor(const RemotePeer * peer) const { return sbPeerIsWan(peer) ? 80.0f : 24.0f; }
@@ -15227,7 +15261,7 @@ float SonobusAudioProcessor::peerBufferFloorMs(const RemotePeer * peer) const
         floorMs = mcpFloorMsFor(peer);                 // LAN floor / WAN >= 24
     }
     if (isHostedMixModeEnabled()) {
-        floorMs = jmax(floorMs, sbFeedBufferFloorMs()); // hosted feed floor (was bypassed by the decrease path)
+        floorMs = jmax(floorMs, sbFeedBufferFloorMs()); // hosted feed floor
     }
     return floorMs;
 }
@@ -15235,7 +15269,7 @@ float SonobusAudioProcessor::peerBufferFloorMs(const RemotePeer * peer) const
 // LAN-isochronous receive depth, per peer (LAN only).
 //   SB_AOO_ISO_LAN_BLOCKS=<n>  (taps file / env, read once): every LAN peer's
 //   sink is pinned to n blocks (no slack, no ms ratchet/escalation); WAN peers
-//   keep the Smart Pin. n=2 is too shallow.
+//   keep the Smart Pin.
 int SonobusAudioProcessor::sbIsoLanBlocks() const
 {
     static const int n = [](){ const char* v = sbtap::tapConf("SB_AOO_ISO_LAN_BLOCKS"); return v ? jlimit(0, 8, atoi(v)) : 3; }();   // default 3
@@ -15254,7 +15288,7 @@ int SonobusAudioProcessor::sbIsoBlocksFor(const RemotePeer * peer) const
     return sbPeerIsWan(peer) ? (sbAdaptWan() ? 0 : sbIsoWanBlocks()) : (sbAdaptLan() ? 0 : sbIsoLanBlocks());   // LAN adaptive takes precedence over fixed iso
 }
 // WAN ADAPTIVE receive depth — SB_AOO_ADAPT_WAN=1 (taps/env, read once) puts every
-// WAN peer's sink under the JackTrip-style adaptive policy inside aoo (sink.cpp adapt_*): the depth
+// WAN peer's sink under the adaptive policy inside aoo (sink.cpp adapt_*): the depth
 // follows measured arrival jitter (fast up, slow down) plus a glitch-budget headroom that decays;
 // grow = PLC refill, shrink = one splice. LAN peers keep iso/canonical. The ms pin/ratchet/escalation
 // are bypassed for these peers (the sink ignores ms changes once adaptive).
@@ -15359,7 +15393,7 @@ float SonobusAudioProcessor::applyPeerSinkBufferMs(RemotePeer * peer, float buff
 
 void SonobusAudioProcessor::loadMcpTaps()
 {
-    //   SB_MCP_FLOOR_MS=<2..24>  pin floor (default 8)
+    //   SB_MCP_FLOOR_MS=<2..24>  pin floor (default 2.67)
     //   SB_MCP_RESET_PIN=1       discard every persisted pin this launch -> fresh MEASURE from the floor
     if (const char* fl = sbtap::tapConf("SB_MCP_FLOOR_MS"); fl && *fl) {
         const float v = (float) atof(fl);
@@ -15781,7 +15815,7 @@ int64_t SonobusAudioProcessor::getRemotePeerBytesSent(int index) const
 }
 
 // Relayed rows share the hub endpoint, so endpoint->recvBytes is everyone's traffic.
-// The AOO sink counts wire bytes per source stream (aoo_opt_rx_bytes, wraps at 2^32 — callers diff successive reads).
+// The AOO sink counts wire bytes per source stream (aoo_opt_rx_bytes, wraps at 2^32; callers diff successive reads).
 int64_t SonobusAudioProcessor::getRemotePeerStreamBytesReceived(int index) const
 {
     const ScopedReadLock sl (mCoreLock);
@@ -15790,6 +15824,20 @@ int64_t SonobusAudioProcessor::getRemotePeerStreamBytesReceived(int index) const
         if (remote->oursink && remote->endpoint && remote->remoteSourceId >= 0) {
             int32_t b = 0;
             if (remote->oursink->get_sourceoption(remote->endpoint, remote->remoteSourceId, aoo_opt_rx_bytes, &b, sizeof(b)) > 0)
+                return (int64_t)(uint32_t) b;
+        }
+    }
+    return 0;
+}
+
+int64_t SonobusAudioProcessor::getRemotePeerStreamPayloadBytesReceived(int index) const
+{
+    const ScopedReadLock sl (mCoreLock);
+    if (index < mRemotePeers.size()) {
+        RemotePeer * remote = mRemotePeers.getUnchecked(index);
+        if (remote->oursink && remote->endpoint && remote->remoteSourceId >= 0) {
+            int32_t b = 0;
+            if (remote->oursink->get_sourceoption(remote->endpoint, remote->remoteSourceId, aoo_opt_rx_payload_bytes, &b, sizeof(b)) > 0)
                 return (int64_t)(uint32_t) b;
         }
     }
@@ -16352,7 +16400,7 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
             // runaway. Discard it and re-MEASURE instead of resurrecting it; re-measuring costs 45
             // quiet seconds.
             // The taps
-            //   SB_MCP_FLOOR_MS=<2..24>  pin floor (default 8)
+            //   SB_MCP_FLOOR_MS=<2..24>  pin floor (default 2.67)
             //   SB_MCP_RESET_PIN=1       discard every persisted pin -> fresh MEASURE from the floor
             // are read once in loadMcpTaps() (constructor) so the cache and unified state loaders
             // honour them too.
@@ -16424,7 +16472,7 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
         // cost: none, copies are sent in parallel. Bandwidth scales with the copy count. Must come
         // after setup()/buffersize/packetsize (matching the hub's order); setting it in the
         // RemotePeer constructor before setup() leaves the source half-initialized on first
-        // connect. SB_UP_RED=N (1..4) forces a value for A/B; SB_UP_RED1=1 means 1.
+        // connect. SB_UP_RED=N (1..4) forces a value (test switch); SB_UP_RED1=1 means 1.
         {
             int red = 1;   // Default: 1 copy on LAN and WAN (one copy halves the tail and the bandwidth)
             // env or /tmp/sb_taps.conf (same mechanism as every other tap)
@@ -17533,6 +17581,8 @@ void SonobusAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     mMainReverb->setSampleRate(sampleRate);
     mMReverb.setSampleRate(sampleRate);
     mInputReverb.setSampleRate(sampleRate);
+    mMainReverbFade.prepare(sampleRate);
+    mInputReverbFade.prepare(sampleRate);
 
     mZitaReverb.init(sampleRate);
     mZitaReverb.buildUserInterface(&mZitaControl);
@@ -17591,7 +17641,7 @@ void SonobusAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     { const char* v = sbtap::tapConf("SB_INPUT_ZERO_COUNT"); mSbInputZeroCount = (v && *v) ? atoi(v) != 0 : true; }
     mSbZeroRunMax = (uint32_t) jmax(16, (int) lrint(sampleRate * 0.1));
     for (auto& z : mSbZeroRun) z = SbZeroRunState{};
-    // SB_SEND_WAKE_EARLY=0: wake the send thread at the end of the audio callback (former behaviour).
+    // SB_SEND_WAKE_EARLY=0: wake the send thread at the end of the audio callback.
     { const char* v = sbtap::tapConf("SB_SEND_WAKE_EARLY"); mSendWakeEarly = (v && *v) ? atoi(v) != 0 : true; }
 
     //mAooSource->set_format(fmt->header);
@@ -18459,7 +18509,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         }
     }
 
-    bool doinreverb = inReverbEnabled || mLastInputReverbEnabled;
+    bool doinreverb = mInputReverbFade.running(inReverbEnabled);
     int revfxchannels = 2;
 
     if (doinreverb) {
@@ -18540,7 +18590,13 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
     // MAIN EFFECTS BUS
     bool mainReverbEnabled = mMainReverbEnabled.get();
-    bool doreverb = mainReverbEnabled || mLastMainReverbEnabled;
+    // Reverb on, off or another model: faded over a few ms. A new model comes in once the old one has faded out.
+    if (mLastReverbModel != (ReverbModel) mMainReverbModel.get() && mMainReverbFade.isOff()) {
+        mLastReverbModel = (ReverbModel) mMainReverbModel.get();
+    }
+    const bool reverbOn = mainReverbEnabled && mLastReverbModel == (ReverbModel) mMainReverbModel.get();
+    const bool reverbStart = reverbOn && mMainReverbFade.isOff();
+    bool doreverb = mMainReverbFade.running(reverbOn);
     bool hasmainfx = doreverb;
     int fxchannels = 2;
 
@@ -18745,17 +18801,20 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
     // process and mix in input reverb into sendworkbuffer (if sending mono or stereo)
     if (doinreverb) {
 
-        if (inReverbEnabled != mLastInputReverbEnabled && inReverbEnabled) {
+        if (inReverbEnabled && mInputReverbFade.isOff()) {
             mInputReverb.reset();
+        }
+
+        // faded in at the reverb's input and out at its output
+        const bool inRevFading = mInputReverbFade.fading(inReverbEnabled);
+        if (inRevFading) {
+            fadeBufferGain(mInputReverbFade, inputRevBuffer, 2, numSamples, inReverbEnabled);
         }
 
         mInputReverb.process((float **)inputRevBuffer.getArrayOfWritePointers(), (float **)inputRevBuffer.getArrayOfWritePointers(), numSamples);
 
-        if (inReverbEnabled != mLastInputReverbEnabled ) {
-            float sgain = inReverbEnabled ? 0.0f : 1.0f;
-            float egain = inReverbEnabled ? 1.0f : 0.0f;
-
-            inputRevBuffer.applyGainRamp(0, numSamples, sgain, egain);
+        if (inRevFading) {
+            mInputReverbFade = fadeBufferGain(mInputReverbFade, inputRevBuffer, 2, numSamples, inReverbEnabled);
         }
 
         if (sendCh == 1 || sendCh == 2) {
@@ -18766,7 +18825,6 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         }
     }
 
-    mLastInputReverbEnabled = inReverbEnabled;
 
 
     // send meter post panning (and post file and met)
@@ -19214,47 +19272,10 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
 
     // TODO other main FX
-    if (mainReverbEnabled != mLastMainReverbEnabled) {
-
-        float sgain = mainReverbEnabled ? 0.0f : 1.0f;
-        float egain = mainReverbEnabled ? 1.0f : 0.0f;
-        
-        if (mainReverbEnabled) {
-            mMainReverb->reset();
-            mMReverb.reset();
-            mZitaReverb.instanceClear();
-        }
-
-        /*
-        for (int channel = 0; channel < mainBusOutputChannels; ++channel) {
-            // others
-            mainFxBuffer.addFromWithRamp(channel, 0, tempBuffer.getReadPointer(channel), numSamples, sgain, egain);
-
-            // input
-            if (inrevdirect) {
-                mainFxBuffer.addFromWithRamp(channel, 0, inputBuffer.getReadPointer(channel), numSamples, sgain, egain);
-            } else {
-                mainFxBuffer.addFromWithRamp(channel, 0, buffer.getReadPointer(channel), numSamples, sgain, egain);                
-            }
-        }
-         */
-    }
-    else if (mainReverbEnabled){
-
-        /*
-        for (int channel = 0; channel < mainBusOutputChannels; ++channel) {
-            // others
-            mainFxBuffer.addFrom(channel, 0, tempBuffer, channel, 0, numSamples);
-
-            // input
-            if (inrevdirect) {
-                mainFxBuffer.addFrom(channel, 0, inputBuffer, channel, 0, numSamples);
-            } else {
-                mainFxBuffer.addFrom(channel, 0, buffer, channel, 0, numSamples);                
-            }
-        }
-         */
-
+    if (reverbStart) {
+        mMainReverb->reset();
+        mMReverb.reset();
+        mZitaReverb.instanceClear();
     }
     
     
@@ -19274,18 +19295,18 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
             mReverbParamsChanged = false;
         }
         
-        if (mLastReverbModel != mMainReverbModel.get()) {
-            mMReverb.reset();
-            mMainReverb->reset();
-            mZitaReverb.instanceClear();
+        // faded in at the reverb's input and out at its output
+        const bool reverbFading = mMainReverbFade.fading(reverbOn);
+        if (reverbFading) {
+            fadeBufferGain(mMainReverbFade, mainFxBuffer, 2, numSamples, reverbOn);
         }
         
-        if (mMainReverbModel.get() == ReverbModelMVerb) {
+        if (mLastReverbModel == ReverbModelMVerb) {
             if (mainBusOutputChannels > 1) {            
                 mMReverb.process((float **)mainFxBuffer.getArrayOfWritePointers(), (float **)mainFxBuffer.getArrayOfWritePointers(), numSamples);
             } 
         }
-        else if (mMainReverbModel.get() == ReverbModelZita) {
+        else if (mLastReverbModel == ReverbModelZita) {
             if (mainBusOutputChannels > 1) {            
                 mZitaReverb.compute(numSamples, (float **)mainFxBuffer.getArrayOfWritePointers(), (float **)mainFxBuffer.getArrayOfWritePointers());
             }
@@ -19297,18 +19318,11 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
                 mMainReverb->processMono(mainFxBuffer.getWritePointer(0), numSamples);
             }            
         }
+
+        if (reverbFading) {
+            mMainReverbFade = fadeBufferGain(mMainReverbFade, mainFxBuffer, 2, numSamples, reverbOn);
+        }
     }
-
-    if (mLastHasMainFx != hasmainfx) {
-        float sgain = hasmainfx ? 0.0f : 1.0f;
-        float egain = hasmainfx ? 1.0f : 0.0f;
-
-        mainFxBuffer.applyGainRamp(0, numSamples, sgain, egain);
-    } 
-
-    mLastHasMainFx = hasmainfx;
-    mLastMainReverbEnabled = mainReverbEnabled;
-    mLastReverbModel = (ReverbModel) mMainReverbModel.get();
     
     // add from main FX
     if (hasmainfx) {
@@ -19643,6 +19657,20 @@ void SonobusAudioProcessor::getStateInformationWithOptions(MemoryBlock& destData
         tempstate.removeChild(recentsTree, nullptr);
     }
 
+    ValueTree pwTree = tempstate.getOrCreateChildWithName(stagePasswordsKey, nullptr);
+    if (includecache) {
+        const ScopedLock sl (mRecentsLock);
+        pwTree.removeAllChildren(nullptr);
+        for (int k = 0; k < mSavedStagePasswords.size(); ++k) {
+            ValueTree item(stagePasswordItemKey);
+            item.setProperty("key", mSavedStagePasswords.getAllKeys()[k], nullptr);
+            item.setProperty("password", mSavedStagePasswords.getAllValues()[k], nullptr);
+            pwTree.appendChild(item, nullptr);
+        }
+    } else {
+        tempstate.removeChild(pwTree, nullptr);
+    }
+
     ValueTree extraTree = tempstate.getOrCreateChildWithName(extraStateCollectionKey, nullptr);
     // update state with our recents info
     extraTree.removeAllChildren(nullptr);
@@ -19874,6 +19902,15 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
                     AooServerConnectionInfo info;
                     info.setFromValueTree(child);
                     mRecentConnectionInfos.add(info);
+                }
+            }
+            ValueTree pwTree = mState.state.getChildWithName(stagePasswordsKey);
+            if (pwTree.isValid()) {
+                const ScopedLock sl (mRecentsLock);
+                mSavedStagePasswords.clear();
+                for (auto child : pwTree) {
+                    const String key = child.getProperty("key").toString(), pw = child.getProperty("password").toString();
+                    if (key.isNotEmpty() && pw.isNotEmpty()) mSavedStagePasswords.set(key, pw);
                 }
             }
         }
@@ -20309,6 +20346,10 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
                         if (mInitialAutoReconnectDone.load()) return;
                         if (isConnectedToServer()) return;
                         if (!getAutoReconnectToLast()) return;
+                        if (launchRaceFixOn() && mServerConnectInFlight.get() != 0) {   // a connect is under way: never start a second one
+                            if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] fresh init chain: connect in flight -> skip auto-reconnect\n");
+                            return;
+                        }
                         if (mLaunchConnectRequested.load()) {   // -c/-g on the command line owns the launch
                             if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] fresh init chain: launch connect requested -> skip auto-reconnect\n");
                             return;
@@ -20411,7 +20452,7 @@ bool SonobusAudioProcessor::reconnectToMostRecent()
             if (!started) {
                 // No attempt is in flight, so no CONNECT
                 // event will clear this flag — leaving it set gates the
-                // reconnect timer forever (hub-restart no-rejoin wedge).
+                // reconnect timer forever.
                 mPendingReconnect = false;
             }
             return started;

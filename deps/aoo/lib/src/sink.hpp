@@ -174,7 +174,7 @@ public:
     void adapt_events(aoo_adapt_events& out) const;
     // Late arrivals of the last 60 s, measured against the stream's own schedule (aoo_opt_late_window).
     void late_window(aoo_late_window& out);
-    int32_t get_rx_pops() const { return (int32_t) rx_pops_pub_.load(std::memory_order_relaxed); }   // Current depth target (blocks), lock-free   // lock-free
+    int32_t get_rx_pops() const { return (int32_t) rx_pops_pub_.load(std::memory_order_relaxed); }   // lock-free
 
     int32_t get_current_salt() const { return salt_; }
     
@@ -199,6 +199,7 @@ public:
     std::string fmt_codec_; std::vector<char> fmt_settings_;
     std::atomic<uint64_t> masked_blocks_rx_{0};
     std::atomic<uint64_t> rx_bytes_{0};   // Wire bytes of this stream (data packets), see aoo_opt_rx_bytes
+    std::atomic<uint64_t> rx_payload_bytes_{0};   // Audio payload bytes only, see aoo_opt_rx_payload_bytes
 
     int32_t handle_ping(const sink& s, time_tag tt);
 
@@ -291,13 +292,12 @@ private:
     // Target-scaled thresholds, all computed in do_update() (rebuild time,
     // writer lock) and only READ on the network thread. Plain PODs, no
     // allocation, never touched by the audio thread.
-    bool    governor_v4_ = false;            // SB_AOO_GOV_V4 != 0 (default on); false = v3 exactly
+    bool    governor_v4_ = false;            // SB_AOO_GOV_V4 != 0 (default on); false = fixed thresholds
     bool    governor_v4_logged_ = false;     // 'governor_v4' evlog emitted once per rebuild
     int32_t governor_slack_blocks_ = 0;      // blocks of committed depth ABOVE the ms pin (target includes it)
     int32_t iso_blocks_ = 0;                 // SB_AOO_ISO_BLOCKS > 0 = LAN-isochronous: FIXED depth in blocks, no slack, ms ignored
     // ─── WAN ADAPTIVE receive depth (aoo_opt_adapt / SB_AOO_ADAPT_*) ───
-    // JackTrip-Regulator-style policy:
-    // per-packet arrival lateness vs a linear schedule -> 125 ms window max/sd ->
+    // Policy: per-packet arrival lateness vs a linear schedule -> 125 ms window max/sd ->
     // asymmetric EWMA (fast up, tau down) -> target every 1 s; grow = PLC refill,
     // shrink = one governor splice; glitch-budget headroom with decay. ALL of it
     // runs on the network thread inside handle_data(); plain PODs, no allocation,
@@ -334,7 +334,7 @@ private:
     double  adapt_hist_slice_t0_ = -1, adapt_last_arrival_ = -1;
     int32_t adapt_last_seq_ = -1;
     bool    adapt_zero_armed_ = false;   // LAN zero tolerance armed (after warm-up + arm window)
-    int32_t adapt_zero_floor_ = 0;       // Grow-only need floor since arming   // sequence of the last fresh block binned
+    int32_t adapt_zero_floor_ = 0;       // Grow-only need floor since arming
     int32_t adapt_hist_blocks_ = 0;          // latest histogram-derived need (blocks), for logging
     // STALL vs MODERATE split, the hub's rule. A gap longer than max(2 x depth, depth + 10 ms) is a
     // STALL: it is kept out of the need histogram unless stalls RECUR (> 2/min over the last 2 min);
@@ -381,9 +381,9 @@ private:
     void    drift_level_tick(double now, int32_t depth, int32_t target);
     void    drift_publish(){ drift_ratio_.store(1.0 + (drift_ppm_ + drift_trim_ppm_) * 1e-6, std::memory_order_relaxed); }
     int32_t drift_dirty_sec_ = 0;            // drains/recoveries this second -> skip the estimator
-    // V2: windowed least-squares slope (one correction per window, hub-lock style)
+    // Windowed least-squares slope (one correction per window, as the hub's clock lock)
     double  drift_win_t0_ = -1;  int32_t drift_n_ = 0;
-    int32_t drift_win_drained_ = 0;   // (v2.1, unused by v2.2 — kept for the evlog)
+    int32_t drift_win_drained_ = 0;   // not used by the estimator; kept for the evlog
     // Rate from sequence vs consumption (the hub clock-lock method): immune to drains, refills and jitter bursts
     int64_t drift_frames_ = 0;        // sink frames consumed for this source (process() calls × frames)
     bool    adapt_lan_profile_ = false;   // LAN adaptive profile (floor 3 / max 12 blocks, warm-up 15 s)
@@ -632,10 +632,10 @@ private:
                                   const osc::ReceivedMessage& msg);
 
     int32_t handle_data_message(void *endpoint, aoo_replyfn fn,
-                                const osc::ReceivedMessage& msg);
+                                const osc::ReceivedMessage& msg, int32_t wiresize = 0);
 
     int32_t handle_compact_data_message(void *endpoint, aoo_replyfn fn,
-                                        const osc::ReceivedMessage& msg);
+                                        const osc::ReceivedMessage& msg, int32_t wiresize = 0);
 
     int32_t handle_ping_message(void *endpoint, aoo_replyfn fn,
                                 const osc::ReceivedMessage& msg);

@@ -46,9 +46,7 @@ struct SimpleDeviceManagerInputLevelMeter final : public Component,
             if (! std::isfinite (newLevel)) newLevel = 0.0f;
             if (! std::isfinite (level)) level = 0.0f;
 
-            // The 0.005 gate let a tiny last value
-            // stick (the cube-root display curve turns 0.0004 into a whole block). Repaint whenever the lit-block count
-            // would change, and always on the way to silence.
+            // Repaint whenever the lit-block count (cube-root display curve) would change, and always on the way to silence.
             auto blocks = [] (float v) { return v <= 0.0f ? 0 : roundToInt (7.0f * (float) std::exp (std::log (v) / 3.0)); };
             if (std::abs (level - newLevel) > 0.005f || blocks (level) != blocks (newLevel) || (newLevel <= 0.0f && level > 0.0f))
             {
@@ -230,6 +228,41 @@ struct AudioDeviceSetupDetails
 
 static String getNoDeviceString()   { return "<< " + TRANS ("none") + " >>"; }
 
+// Field label column: 35% of the width, wider when a label beside a field needs it (narrow windows).
+// Labels beside the channel lists wrap instead and do not count.
+static int getFieldLabelColumn (Component& root, int width)
+{
+    int need = 0;
+
+    const auto measure = [&need] (Component& parentComp)
+    {
+        for (auto* c : parentComp.getChildren())
+            if (auto* l = dynamic_cast<Label*> (c))
+                if (l->isAttachedOnLeft() && l->getAttachedComponent() != nullptr
+                     && dynamic_cast<ListBox*> (l->getAttachedComponent()) == nullptr)
+                    need = jmax (need, roundToInt (l->getLookAndFeel().getLabelFont (*l).getStringWidthFloat (l->getText()) + 0.5f)
+                                         + l->getLookAndFeel().getLabelBorderSize (*l).getLeftAndRight());
+    };
+
+    measure (root);
+    for (auto* c : root.getChildren())   // the settings panel's own rows
+        measure (*c);
+
+    return jlimit (roundToInt ((float) width * 0.35f), jmax (roundToInt ((float) width * 0.35f), width / 2), need);
+}
+
+// A device name or value that does not fit its combo box shows whole in the hover
+static void setComboTooltipsWhereCut (Component& parentComp)
+{
+    for (auto* c : parentComp.getChildren())
+        if (auto* box = dynamic_cast<ComboBox*> (c))
+        {
+            const auto text = box->getText();
+            const Font f (jmin (16.0f, (float) box->getHeight() * 0.9f));
+            box->setTooltip (f.getStringWidthFloat (text) > (float) (box->getWidth() - 30 - 10) ? text : String());
+        }
+}
+
 //==============================================================================
 class AudioDeviceSettingsPanel : public Component,
                                  private ChangeListener
@@ -262,9 +295,14 @@ public:
 
     void resized() override
     {
-        Rectangle<int> r (proportionOfWidth (0.35f), 0, proportionOfWidth (0.6f), 3000);
+        const int labelColumn = getFieldLabelColumn (parent, getWidth());   // shared with the device type row
+        Rectangle<int> r (labelColumn, 0, proportionOfWidth (0.6f) - (labelColumn - proportionOfWidth (0.35f)), 3000);
 
+       #if JUCE_IOS || JUCE_ANDROID
         const int maxListBoxHeight = 75; // 100;
+       #else
+        const int maxListBoxHeight = 190;   // about eight channels before the list scrolls
+       #endif
         const int h = parent.getItemHeight();
         const int space = h / 4;
 #if (JUCE_IOS || JUCE_ANDROID)
@@ -273,9 +311,7 @@ public:
         const int listRowHeight = jmin (22, h);
 #endif
 
-        // The meter borrows the Test button's width, but that
-        // width is only computed in the OUTPUT row below, so on the very first layout it was 0 → an invisible meter
-        // until the next device change re-laid the panel. Size the Test button first.
+        // The meter borrows the Test button's width, which the output row below sets: size the Test button first.
         if (testButton != nullptr)
             testButton->changeWidthToFitText (h);
 
@@ -405,6 +441,7 @@ public:
         }
 
         setSize (getWidth(), r.getY());
+        setComboTooltipsWhereCut (*this);
     }
 
     void updateConfig (bool updateOutputDevice, bool updateInputDevice, bool updateSampleRate, bool updateBufferSize)
@@ -1244,7 +1281,8 @@ void AudioDeviceSelectorComponent::setItemHeight (int newItemHeight)
 
 void AudioDeviceSelectorComponent::resized()
 {
-    Rectangle<int> r (proportionOfWidth (0.35f), 15, proportionOfWidth (0.6f), 3000);
+    const int labelColumn = getFieldLabelColumn (*this, getWidth());   // shared with the settings panel rows
+    Rectangle<int> r (labelColumn, 15, proportionOfWidth (0.6f) - (labelColumn - proportionOfWidth (0.35f)), 3000);
     auto space = itemHeight / 4;
 
     if (deviceTypeDropDown != nullptr)
@@ -1280,6 +1318,7 @@ void AudioDeviceSelectorComponent::resized()
 
     r.removeFromTop (itemHeight);
     setSize (getWidth(), r.getY());
+    setComboTooltipsWhereCut (*this);
 }
 
 void AudioDeviceSelectorComponent::updateDeviceType()

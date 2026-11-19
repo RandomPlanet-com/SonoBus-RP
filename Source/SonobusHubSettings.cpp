@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP — Hub Server settings persistence (see SonobusHubSettings.h).
 
+#include "SonobusHubCompat.h"
 #include "SonobusHubSettings.h"
 #include <cctype>
 #include "SonobusHubServer.h"
@@ -173,7 +174,7 @@ const std::vector<FormSpec>& formSpecs() {
         // The right column: the ordinary sections first, the advanced group last.
         { 1, nullptr,              "Audio",                             0, nullptr },
         { 1, "samplerate",         "Sample rate (Hz)",                  2, "44100,48000,88200,96000" },
-        { 1, "blocksize",          "Block size (samples)",              2, "16,32,64,128,256" },   // 16 added (experiment)
+        { 1, "blocksize",          "Block size (samples)",              2, "16,32,64,128,256" },
         { 1, nullptr,              "Logging",                           0, nullptr },
         { 1, "log_file",           "Log file",                     0, nullptr },
         { 1, nullptr,              "Web page",                          0, nullptr },   
@@ -184,7 +185,7 @@ const std::vector<FormSpec>& formSpecs() {
         { 1, nullptr,              "For advanced users only",           0, nullptr,
           "Change these only if you know why. The defaults are right for almost every stage." },
         // No WAN sink buffer row: WAN players start at the lowest hold and are measured.
-        { 1, "sink_buffer_lan_ms", "LAN sink buffer (ms)", 0, nullptr },   // 
+        { 1, "sink_buffer_lan_ms", "LAN sink buffer (ms)", 0, nullptr },
         { 1, "pace_spread",        "Pacer spread (%)",  0, nullptr },
         { 1, "redundancy_wan",     "WAN redundancy (copies)",           2, "1,2,3,4" },
         { 1, "aoo_drain",          "Depth governor",            1, nullptr },
@@ -203,33 +204,59 @@ Tier tierForKey(const std::string& key) {
 
 static juce::File homeDir() { return juce::File::getSpecialLocation(juce::File::userHomeDirectory); }
 
-juce::File dataDir() {
+static juce::File& instanceDirRef() { static juce::File d; return d; }
+
+static juce::File defaultDataDir() {
 #if JUCE_MAC
     return homeDir().getChildFile("Library/Application Support/SonoBus RP Hub");
+#elif JUCE_WINDOWS
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("SonoBus RP Hub");
 #else
     return homeDir().getChildFile(".config/SonoBus RP Hub");
 #endif
 }
 
+juce::File dataDir() {
+    if (instanceDirRef() != juce::File()) return instanceDirRef();
+    return defaultDataDir();
+}
+
+bool useSettingsFolderAsDataDir(const juce::File& settingsFile) {
+    const juce::File dir = settingsFile.getParentDirectory();
+    if (settingsFile == juce::File() || dir == defaultDataDir()) return false;   // default folder: one hub per machine
+    instanceDirRef() = dir;
+    return true;
+}
+
+bool hasOwnDataDir() { return instanceDirRef() != juce::File(); }
+
 juce::File defaultFile() { return dataDir().getChildFile("hub_settings.json"); }
 
-juce::File defaultLogFile() {
+static juce::File machineLogFile() {
 #if JUCE_MAC
     return homeDir().getChildFile("Library/Logs/SonoBus RP Hub/hub.log");
 #else
-    return dataDir().getChildFile("hub.log");
+    return defaultDataDir().getChildFile("hub.log");
 #endif
+}
+
+juce::File defaultLogFile() {
+    if (hasOwnDataDir()) return dataDir().getChildFile("hub.log");   // each instance logs into its own folder
+    return machineLogFile();
 }
 
 void applyDefaults(HubLaunchArgs& a) {
     if (a.logFile.find("/SonoBus-Plus/hub/") != std::string::npos) a.logFile.clear();   // that folder has moved
+    // A settings file copied from the main hub names the main log; an instance with its own folder never shares it.
+    if (hasOwnDataDir() && juce::File::isAbsolutePath(juce::String::fromUTF8(a.logFile.c_str()))
+        && juce::File(juce::String::fromUTF8(a.logFile.c_str())) == machineLogFile()) a.logFile.clear();
     if (a.logFile.empty()) a.logFile = defaultLogFile().getFullPathName().toStdString();
 }
 
 // One-time move from the folder older hubs used.
 void migrateOldDataDir() {
     const juce::File oldDir = homeDir().getChildFile("SonoBus-Plus").getChildFile("hub");
-    const juce::File newDir = dataDir();
+    const juce::File newDir = defaultDataDir();
     if (!oldDir.isDirectory() || newDir.exists()) return;
     newDir.getParentDirectory().createDirectory();
     // A hub running from inside the old folder must not move itself, so only its data goes.
@@ -265,8 +292,8 @@ const char* tipFor(const std::string& key) {
         { "samplerate",         "The sample rate of the session. Every player follows the hub." },
         { "blocksize",          "Audio block size. Smaller blocks mean lower latency and a heavier load on every machine." },
         { "log_file",           "Where the hub writes its log. It starts a new file when this one reaches 50 MB." },
-        { "web_port",           "Port for the hub's web status page. 0 turns the page off." },
-        { "web_password",       "Password for changing settings from the web page." },
+        { "web_port",           "Port for the hub's web page. 0 turns the page off. The page also needs a Web password." },
+        { "web_password",       "Password for the hub's web page. Without one the web page stays off." },
         { "location",           "The stage's city, shown on the web page and in the stage directory. Required to list the stage." },
         { "geoip",              "Shows each outside player's city and state. Their public IP address is sent to ip-api.com for the lookup." },
         { "sink_buffer_lan_ms", "How much audio the hub holds for each player on your local network. Blank uses the default of 1.33 ms." },
@@ -325,6 +352,19 @@ bool setValueFromString(HubLaunchArgs& a, const std::string& key, const juce::St
         else if constexpr (std::is_same_v<M, BoolM>) { bool v; if (!parseBoolText(text, v)) return false; a.*m = v; return true; }
         else return false;
     }, b->member);
+}
+
+std::string publicAddressProblem(const std::string& hostRaw) {
+    const std::string host = juce::String::fromUTF8(hostRaw.c_str()).trim().toStdString();
+    if (host.empty()) return {};
+    int a = 0, b = 0, c = 0, d = 0; char extra = 0;
+    const bool literal = std::sscanf(host.c_str(), "%d.%d.%d.%d%c", &a, &b, &c, &d, &extra) == 4
+                         && a >= 0 && a <= 255 && b >= 0 && b <= 255 && c >= 0 && c <= 255 && d >= 0 && d <= 255;
+    const bool inside = literal ? (a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) || a == 127 || (a == 169 && b == 254) || a == 0)
+                                : juce::String(host).equalsIgnoreCase("localhost");
+    if (!inside) return {};
+    return "Public address " + host + " is an address inside a private network, so players outside your network cannot reach it. "
+           "Leave the field empty (the hub finds its public address itself) or enter your public internet address or domain name.";
 }
 
 std::string validate(const HubLaunchArgs& a) {
@@ -480,12 +520,12 @@ void applySinkEnv(HubLaunchArgs& a, const std::set<std::string>& cliKeys, std::s
             // reflect it into the model so the GUI shows the effective value.
             a.*(ek.member) = atoi(cur);
             envKeys.insert(ek.key);
-            fprintf(stderr, "[HUB-SETTINGS] %s=%s (launch env)\n", ek.env, cur);
+            fprintf(stdout, "[HUB-SETTINGS] %s=%s (launch env)\n", ek.env, cur);
             continue;
         }
         const std::string v = std::to_string(a.*(ek.member));
         setenv(ek.env, v.c_str(), 1);
-        fprintf(stderr, "[HUB-SETTINGS] %s=%s (%s)\n", ek.env, v.c_str(), cliPinned ? "cli" : "settings");
+        fprintf(stdout, "[HUB-SETTINGS] %s=%s (%s)\n", ek.env, v.c_str(), cliPinned ? "cli" : "settings");
     }
 }
 
@@ -499,6 +539,7 @@ void applyToHub(SonobusHubServer& hub, const HubLaunchArgs& a) {
     hub.setOpusBitrate(a.opusBitrate);
     hub.setRunLocalServer(true, a.localServerPort);   // Always the built-in server
     if (!a.publicAddressHost.empty()) hub.setPublicAddressOverride(a.publicAddressHost, a.publicAddressPort);
+    if (const std::string problem = publicAddressProblem(a.publicAddressHost); !problem.empty()) std::cerr << "[HUB-SETTINGS] WARNING: " + problem + "\n";
     hub.setPortCheckHelper(a.portCheckHelper);   
     if (!a.lanSubnetCidr.empty()) hub.setLanSubnet(a.lanSubnetCidr);
     hub.setSinkBufferMs(a.sinkBufferMs);          // Latency tuning
@@ -508,8 +549,8 @@ void applyToHub(SonobusHubServer& hub, const HubLaunchArgs& a) {
     hub.setPaceSpreadPct(a.paceSpread);
     hub.setPaceMinSlotUs(a.paceMinSlotUs);
     hub.setCutThrough(a.cutThrough);              // Cut-through emission
-    hub.setInlineListeners(a.inlineListeners);    // (rt-split A)
-    hub.setBundling(a.bundle);                    // Hub diet v2
+    hub.setInlineListeners(a.inlineListeners);
+    hub.setBundling(a.bundle);
     hub.setBundleMtu(a.bundleMtu);
     hub.setRedundancy(a.redundancyLan, a.redundancyWan);   // Per-peer redundancy
     hub.setDscp(a.dscp);
@@ -597,14 +638,61 @@ void rotateLogIfLarge(const std::string& path) {
     logFile.moveFileTo(juce::File(logFile.getFullPathName() + ".1"));
 }
 
+namespace {
+// One thread's unfinished line. Written out, with a line end, if the thread ends first.
+struct ThreadLine {
+    std::string text;
+    ~ThreadLine() { if (!text.empty()) { text += '\n'; fwrite(text.data(), 1, text.size(), stdout); } }
+};
+class LineLogBuf : public std::streambuf {
+public:
+    explicit LineLogBuf(bool flushEachLine) : mFlush(flushEachLine) {}
+protected:
+    int_type overflow(int_type c) override {
+        if (!traits_type::eq_int_type(c, traits_type::eof())) { const char ch = traits_type::to_char_type(c); put(&ch, 1); }
+        return traits_type::not_eof(c);
+    }
+    std::streamsize xsputn(const char* p, std::streamsize n) override { put(p, n); return n; }
+    int sync() override { return fflush(stdout) == 0 ? 0 : -1; }
+private:
+    void put(const char* p, std::streamsize n) {
+        thread_local ThreadLine line;
+        std::string& t = line.text;
+        t.append(p, (size_t) n);
+        const auto end = t.rfind('\n');
+        if (end == std::string::npos) return;
+        fwrite(t.data(), 1, end + 1, stdout);   // one locked write: whole lines only
+        if (mFlush) fflush(stdout);
+        t.erase(0, end + 1);
+    }
+    const bool mFlush;
+};
+}
+
+void installLineLog() {
+    // Never destroyed: threads may still log while the program shuts down.
+    static LineLogBuf* out = new LineLogBuf(false);
+    static LineLogBuf* err = new LineLogBuf(true);   // an error line reaches the file at once
+    std::cout.rdbuf(out);
+    std::cerr.rdbuf(err);
+    std::cerr.unsetf(std::ios::unitbuf);   // the line end flushes, not every piece
+}
+
 void redirectLogFile(const std::string& path) {
     if (path.empty()) return;
     juce::File(juce::String::fromUTF8(path.c_str())).getParentDirectory().createDirectory();
     rotateLogIfLarge(path);
     // `open`-launched apps have no tty, so [HUB-JIT]/[HUB-ABUF]
     // telemetry would vanish without this. Line-buffered so tail -f works.
+#if defined(_WIN32)
+    if (freopen(path.c_str(), "a", stdout)) setvbuf(stdout, NULL, _IOFBF, 1 << 16);   // see hub_start_log_flusher
+    // Everything the hub prints goes through stdout (see installLineLog). stderr keeps its own buffer for the few
+    // direct writers (the audio library's event lines); the flusher writes both out as whole lines.
+    if (freopen(path.c_str(), "a", stderr)) setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+#else
     if (freopen(path.c_str(), "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
     if (freopen(path.c_str(), "a", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+#endif
     std::cout << "[HUB] logging to " << path << "\n";
 }
 
@@ -645,9 +733,36 @@ std::vector<std::string> relaunchArgv(const std::vector<std::string>& argv, long
 bool relaunchProcess(const std::vector<std::string>& argvIn, std::string& err) {
     err.clear();
 #ifdef _WIN32
-    (void)argvIn;
-    err = "relaunch not implemented on Windows";
-    return false;
+    const juce::String exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+    if (exe.isEmpty()) { err = "cannot resolve current executable path"; return false; }
+    // One command line with the usual quoting rules (backslashes doubled only in front of a quote).
+    auto quote = [](const juce::String& arg) {
+        if (arg.isNotEmpty() && !arg.containsAnyOf(" \t\"")) return arg;
+        juce::String out = "\"";
+        int slashes = 0;
+        for (auto c : arg) {
+            if (c == '\\') { ++slashes; continue; }
+            if (c == '"') out << juce::String::repeatedString("\\", slashes * 2 + 1) << "\"";
+            else out << juce::String::repeatedString("\\", slashes) << juce::String::charToString(c);
+            slashes = 0;
+        }
+        return out + juce::String::repeatedString("\\", slashes * 2) + "\"";
+    };
+    juce::String cmd = quote(exe);
+    for (size_t i = 1; i < argvIn.size(); ++i) cmd << " " << quote(juce::String::fromUTF8(argvIn[i].c_str()));
+    std::cout << "[HUB] relaunch: " << cmd << "\n";
+    std::wstring wcmd(cmd.toWideCharPointer());
+    STARTUPINFOW si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    // Nothing is inherited: the new process binds the same ports once this one is gone.
+    if (!CreateProcessW(exe.toWideCharPointer(), &wcmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        err = "CreateProcess failed, error " + std::to_string((unsigned long) GetLastError());
+        return false;
+    }
+    std::cout << "[HUB] relaunched as pid " << (unsigned long) pi.dwProcessId << "\n";
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 #else
     const std::string exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
                                 .getFullPathName().toStdString();

@@ -47,6 +47,29 @@ static String layoutGroupsKey("Layout");
 
 using namespace SonoAudio;
 
+// Runs an effect in place. While it is being switched, the direct and the processed signal are crossfaded.
+// bufs holds the effect's two channels; the first nbufs of them carry audio.
+template <typename Compute>
+static void processFaded (FxFade & fade, bool on, float * const * bufs, int nbufs, int numSamples, Compute && compute)
+{
+    int done = 0;
+    while (done < numSamples && fade.fading(on)) {
+        const int n = jmin((int) FxFade::chunk, numSamples - done);
+        float dry[2][FxFade::chunk];
+        float * seg[2] = { bufs[0] + done, bufs[1] + done };
+        for (int b = 0; b < nbufs; ++b) FloatVectorOperations::copy(dry[b], seg[b], n);
+        compute(seg, n);
+        FxFade f = fade;
+        for (int b = 0; b < nbufs; ++b) { f = fade; f.mix(seg[b], dry[b], n, on); }
+        fade = f;
+        done += n;
+    }
+    if (on && done < numSamples) {
+        float * seg[2] = { bufs[0] + done, bufs[1] + done };
+        compute(seg, numSamples - done);
+    }
+}
+
 ChannelGroup::ChannelGroup()
 {
 }
@@ -66,11 +89,7 @@ void ChannelGroup::copyParametersFrom(const ChannelGroup& other)
 
 void ChannelGroupParams::setToDefaults(bool isplugin)
 {
-    // default expander params
-    expanderParams.thresholdDb = -60.0f;
-    expanderParams.releaseMs = 200.0f;
-    expanderParams.attackMs = 1.0f;
-    expanderParams.ratio = 2.0f;
+    expanderParams = gateDefaultParams();
 
     if (compressorParams.automakeupGain) {
         // makeupgain = (-thresh -  abs(thresh/ratio))/2
@@ -143,6 +162,44 @@ void ChannelGroup::init(double sampRate)
     //for(int i=0; i < mInputLimiterControl.getParamsCount(); i++){
     //    DBG(mInputLimiterControl.getParamAddress(i));
     //}
+
+    compressorZones.knee = compressorControl->getParamZone("/compressor/knee");
+    compressorZones.threshold = compressorControl->getParamZone("/compressor/threshold");
+    compressorZones.ratio = compressorControl->getParamZone("/compressor/ratio");
+    compressorZones.attack = compressorControl->getParamZone("/compressor/attack");
+    compressorZones.release = compressorControl->getParamZone("/compressor/release");
+    compressorZones.makeupGain = compressorControl->getParamZone("/compressor/makeup_gain");
+    compressorOutputLevel = compressorControl->getParamZone("/compressor/outgain");
+
+    expanderZones.knee = expanderControl->getParamZone("/expander/knee");
+    expanderZones.threshold = expanderControl->getParamZone("/expander/threshold");
+    expanderZones.ratio = expanderControl->getParamZone("/expander/ratio");
+    expanderZones.attack = expanderControl->getParamZone("/expander/attack");
+    expanderZones.release = expanderControl->getParamZone("/expander/release");
+    expanderOutputGain = expanderControl->getParamZone("/expander/gain");
+
+    limiterZones.threshold = limiterControl->getParamZone("/compressor/threshold");
+    limiterZones.ratio = limiterControl->getParamZone("/compressor/ratio");
+    limiterZones.attack = limiterControl->getParamZone("/compressor/attack");
+    limiterZones.release = limiterControl->getParamZone("/compressor/release");
+
+    static const char * const eqPaths[10] = {
+        "/parametric_eq/low_shelf/gain", "/parametric_eq/low_shelf/transition_freq",
+        "/parametric_eq/para1/peak_gain", "/parametric_eq/para1/peak_frequency", "/parametric_eq/para1/peak_q",
+        "/parametric_eq/para2/peak_gain", "/parametric_eq/para2/peak_frequency", "/parametric_eq/para2/peak_q",
+        "/parametric_eq/high_shelf/gain", "/parametric_eq/high_shelf/transition_freq" };
+    for (int j=0; j < 2; ++j) {
+        for (int k=0; k < 10; ++k) {
+            eqZones[j][k] = eqControl[j]->getParamZone(eqPaths[k]);
+        }
+    }
+
+    compressorFade.prepare(sampleRate);
+    expanderFade.prepare(sampleRate);
+    eqFade.prepare(sampleRate);
+    limiterFade.prepare(sampleRate);
+    monitorDelayFade.prepare(sampleRate);
+    monitorDelayTimeFade.prepare(sampleRate);
 
     commitCompressorParams();
     commitExpanderParams();
@@ -243,24 +300,39 @@ void ChannelGroup::processBlock (AudioBuffer<float>& frombuffer,
     // these all operate ONLY when the channel group has 1 or 2 channels (and when the effects have been initialized)
     if (params.numChannels > 0 && params.numChannels <= 2 && compressor)
     {
+        // the effect's two channels (mono: the second one is a silent dummy)
+        float * bufs[2] = { nullptr, nullptr };
+        int nbufs = 0;
+        if (tobufNumChan - destStartChan > 1 && numchan == 2 && destNumChans >= 2) {
+            bufs[0] = tobuffer.getWritePointer(destStartChan);
+            bufs[1] = tobuffer.getWritePointer(destStartChan+1);
+            nbufs = 2;
+        } else if (destStartChan < tobufNumChan) {
+            bufs[0] = tobuffer.getWritePointer(destStartChan);
+            bufs[1] = silentBuffer.getWritePointer(0);
+            nbufs = 1;
+        }
+
+        // Each effect: switched on, it starts from a cleared state; on and off are crossfaded with the direct signal.
+
         // apply input expander
         if (expanderParamsChanged) {
             commitExpanderParams();
             expanderParamsChanged = false;
         }
-        if (_lastExpanderEnabled || params.expanderParams.enabled) {
-            if (tobufNumChan - destStartChan > 1 && numchan == 2 && destNumChans >= 2) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), tobuffer.getWritePointer(destStartChan+1)};
-                expander->compute(numSamples, bufs, bufs);
-                if (params.expanderParams.enabled && params.expanderParams.gate) applyHardGate(bufs, 2, numSamples);   
-            } else if (destStartChan < tobufNumChan) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), silentBuffer.getWritePointer(0) }; // just a silent dummy buffer
-                expander->compute(numSamples, bufs, bufs);
-                if (params.expanderParams.enabled && params.expanderParams.gate) applyHardGate(bufs, 1, numSamples);   
+        const bool expanderOn = params.expanderParams.enabled;
+        const bool hardGate = expanderOn && params.expanderParams.gate;
+        if (nbufs > 0 && expanderFade.running(expanderOn)) {
+            if (expanderOn && expanderFade.isOff()) {
+                expander->instanceClear();
+                gateGain = 1.0f; gateOpen = true; gateHoldLeft = 0;
             }
+            processFaded(expanderFade, expanderOn, bufs, nbufs, numSamples, [&](float ** seg, int n) {
+                expander->compute(n, seg, seg);
+                if (hardGate || gateGain < 1.0f) applyHardGate(seg, nbufs, n, hardGate);
+            });
         }
-        if (!params.expanderParams.enabled || !params.expanderParams.gate) { gateGain = 1.0f; gateOpen = true; gateHoldLeft = 0; gateStatePub.store(-1, std::memory_order_relaxed); }
-        _lastExpanderEnabled = params.expanderParams.enabled;
+        if (!hardGate) gateStatePub.store(-1, std::memory_order_relaxed);
 
 
         // apply input compressor
@@ -268,16 +340,13 @@ void ChannelGroup::processBlock (AudioBuffer<float>& frombuffer,
             commitCompressorParams();
             compressorParamsChanged = false;
         }
-        if (_lastCompressorEnabled || params.compressorParams.enabled) {
-            if (tobufNumChan - destStartChan > 1 && numchan == 2 && destNumChans >= 2) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), tobuffer.getWritePointer(destStartChan+1)};
-                compressor->compute(numSamples, bufs, bufs);
-            } else if (destStartChan < tobufNumChan) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), silentBuffer.getWritePointer(0) }; // just a silent dummy buffer
-                compressor->compute(numSamples, bufs, bufs);
-            }
+        const bool compressorOn = params.compressorParams.enabled;
+        if (nbufs > 0 && compressorFade.running(compressorOn)) {
+            if (compressorOn && compressorFade.isOff()) compressor->instanceClear();
+            processFaded(compressorFade, compressorOn, bufs, nbufs, numSamples, [&](float ** seg, int n) {
+                compressor->compute(n, seg, seg);
+            });
         }
-        _lastCompressorEnabled = params.compressorParams.enabled;
 
 
         // apply input EQ
@@ -285,19 +354,20 @@ void ChannelGroup::processBlock (AudioBuffer<float>& frombuffer,
             commitEqParams();
             eqParamsChanged = false;
         }
-        if (_lastEqEnabled || params.eqParams.enabled) {
-            if (tobufNumChan - destStartChan > 1 && numchan == 2 && destNumChans >= 2) {
-                // only 2 channels support for now... TODO
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), tobuffer.getWritePointer(destStartChan+1)};
-                eq[0]->compute(numSamples, &bufs[0], &bufs[0]);
-                eq[1]->compute(numSamples, &bufs[1], &bufs[1]);
-            } else if (destStartChan < tobufNumChan) {
-                float *inbuf = tobuffer.getWritePointer(destStartChan);
-                float *outbuf = tobuffer.getWritePointer(destStartChan);
-                eq[0]->compute(numSamples, &inbuf, &outbuf);
+        const bool eqOn = params.eqParams.enabled;
+        if (nbufs > 0 && eqFade.running(eqOn)) {
+            if (eqOn && eqFade.isOff()) {
+                for (int j=0; j < 2; ++j) {
+                    eq[j]->instanceClear();
+                    eq[j]->settleControls();
+                }
             }
+            // only 2 channels support for now... TODO
+            processFaded(eqFade, eqOn, bufs, nbufs, numSamples, [&](float ** seg, int n) {
+                eq[0]->compute(n, &seg[0], &seg[0]);
+                if (nbufs > 1) eq[1]->compute(n, &seg[1], &seg[1]);
+            });
         }
-        _lastEqEnabled = params.eqParams.enabled;
 
 
         // apply input limiter
@@ -305,16 +375,13 @@ void ChannelGroup::processBlock (AudioBuffer<float>& frombuffer,
             commitLimiterParams();
             limiterParamsChanged = false;
         }
-        if (_lastLimiterEnabled || params.limiterParams.enabled) {
-            if (tobufNumChan - destStartChan > 1 && numchan == 2 && destNumChans >= 2) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), tobuffer.getWritePointer(destStartChan+1)};
-                limiter->compute(numSamples, bufs, bufs);
-            } else if (destStartChan < tobufNumChan) {
-                float *bufs[2] = { tobuffer.getWritePointer(destStartChan), silentBuffer.getWritePointer(0) }; // just a silent dummy buffer
-                limiter->compute(numSamples, bufs, bufs);
-            }
+        const bool limiterOn = params.limiterParams.enabled;
+        if (nbufs > 0 && limiterFade.running(limiterOn)) {
+            if (limiterOn && limiterFade.isOff()) limiter->instanceClear();
+            processFaded(limiterFade, limiterOn, bufs, nbufs, numSamples, [&](float ** seg, int n) {
+                limiter->compute(n, seg, seg);
+            });
         }
-        _lastLimiterEnabled = params.limiterParams.enabled;
     }
     
     // apply to reverb buffer
@@ -415,77 +482,77 @@ void ChannelGroup::processMonitor (AudioBuffer<float>& frombuffer, int fromStart
         monitorDelayParamsChanged = false;
     }
 
-    bool domondelay = _monitorDelayActive.load();
-    int mondelayfade = 0;
+    const bool domondelay = _monitorDelayActive.load();
 
     auto * usefrombuffer = &frombuffer;
     auto useFromStartChan = fromStartChan;
     auto useFromNumChan = fromNumChan;
 
-    if (domondelay || _monitorDelayLastActive != domondelay) {
+    if (monitorDelayFade.running(domondelay)) {
         const ScopedTryLock lock(_monitorDelayLock);
-        if (lock.isLocked()) {
+        // should match dest num channels, but we need to make sure of it
+        if (lock.isLocked() && monitorDelayLine && params.numChannels == _monitorDelayChans && numSamples <= delayWorkBuffer.getNumSamples()) {
 
-            // transition between delayed and not
-            if (_monitorDelayLastActive != domondelay) {
-                if (domondelay) {
-                    monitorDelayLine->reset();
-                    mondelayfade = 1; // fade in
-                }
-                else {
-                    mondelayfade = -1; // fade out
-                }
+            if (domondelay && monitorDelayFade.isOff()) {
+                // a fresh start
+                _monitorDelayTimeChanged = false;
+                _monitorDelayTimeChanging = false;
+                monitorDelayLine->reset();
+                monitorDelayLine->setDelay(_monitorDelayTimeSamples);
+                monitorDelayTimeFade.snapTo(true);
             }
-
-            if (domondelay) {
-                if (_monitorDelayTimeChanged.load() && !_monitorDelayTimeChanging) {
-                    _monitorDelayTimeChanged = false;
-                    mondelayfade = -1.0f; // fade out
-                    _monitorDelayTimeChanging = true;
-                }
-                else if (_monitorDelayTimeChanging) {
-                    // already faded out, now apply new delay time
-                    _monitorDelayTimeChanging = false;
+            else if (_monitorDelayTimeChanging) {
+                if (monitorDelayTimeFade.isOff()) {
+                    // faded out, now apply the new delay time and fade back in
                     monitorDelayLine->setDelay(_monitorDelayTimeSamples);
-                    mondelayfade = 1; // fade in
+                    _monitorDelayTimeChanging = false;
+                }
+            }
+            else if (domondelay && _monitorDelayTimeChanged.load()) {
+                _monitorDelayTimeChanged = false;
+                _monitorDelayTimeChanging = true;
+            }
+
+            const bool timeOn = !_monitorDelayTimeChanging;
+            const bool fading = monitorDelayFade.fading(domondelay);
+            const int nch = jmin(params.numChannels, delayWorkBuffer.getNumChannels(), fromNumChan - fromStartChan);
+            FxFade inFade = monitorDelayFade, outFade = monitorDelayFade, timeFade = monitorDelayTimeFade;
+
+            // going in: faded with the switch, so the delayed signal starts from silence
+            for (int chan = 0; chan < nch; ++chan) {
+                delayWorkBuffer.copyFrom(chan, 0, frombuffer.getReadPointer(fromStartChan + chan), numSamples);
+                if (fading) {
+                    inFade = monitorDelayFade;
+                    inFade.gain(delayWorkBuffer.getWritePointer(chan), numSamples, domondelay);
                 }
             }
 
-            if ((domondelay || mondelayfade != 0)) {
-                // should match dest num channels, but we need to make sure of it
-                if (params.numChannels == _monitorDelayChans) {
-                    auto delayinoutBlock = dsp::AudioBlock<float>(delayWorkBuffer).getSubsetChannelBlock(0, (size_t)params.numChannels).getSubBlock(0, numSamples);
+            auto delayinoutBlock = dsp::AudioBlock<float>(delayWorkBuffer).getSubsetChannelBlock(0, (size_t)params.numChannels).getSubBlock(0, numSamples);
+            monitorDelayLine->process(dsp::ProcessContextReplacing<float>(delayinoutBlock));
 
-                    // apply it going in
-                    for (int srcchan = fromStartChan, chan = 0; chan < delayWorkBuffer.getNumChannels() && srcchan < fromStartChan + params.numChannels && srcchan < fromNumChan; ++srcchan, ++chan) {
-                        if (mondelayfade != 0) {
-                            delayWorkBuffer.copyFromWithRamp(chan, 0, frombuffer.getReadPointer(srcchan), numSamples,
-                                mondelayfade > 0 ? 0.0f : 1.0f, mondelayfade > 0 ? 1.0f : 0.0f);
-                            //tobuffer.applyGainRamp(0, numSamples, mondelayfade > 0 ? 0.0f : 1.0f, mondelayfade > 0 ? 1.0f : 0.0f);
-                        }
-                        else {
-                            delayWorkBuffer.copyFrom(chan, 0, frombuffer.getReadPointer(srcchan), numSamples);
-                        }
-                    }
-
-                    monitorDelayLine->process(dsp::ProcessContextReplacing<float>(delayinoutBlock));
-
-                    // apply it coming out
-                    for (int chan = 0; chan < params.numChannels && chan < delayWorkBuffer.getNumChannels(); ++chan) {
-                        if (mondelayfade != 0) {
-                            delayWorkBuffer.applyGainRamp(chan, 0, numSamples, mondelayfade > 0 ? 0.0f : 1.0f, mondelayfade > 0 ? 1.0f : 0.0f);
-                        }
-                    }
-
-                    usefrombuffer = &delayWorkBuffer;
-                    useFromStartChan = 0;
-                    useFromNumChan = jmin(params.numChannels, delayWorkBuffer.getNumChannels());
+            // coming out: crossfade between the direct and the delayed signal
+            for (int chan = 0; chan < nch; ++chan) {
+                float * delayed = delayWorkBuffer.getWritePointer(chan);
+                if (!timeOn || !monitorDelayTimeFade.isOn()) {
+                    timeFade = monitorDelayTimeFade;
+                    timeFade.gain(delayed, numSamples, timeOn);
+                }
+                if (fading) {
+                    outFade = monitorDelayFade;
+                    outFade.mix(delayed, frombuffer.getReadPointer(fromStartChan + chan), numSamples, domondelay);
                 }
             }
 
-            _monitorDelayLastActive = domondelay;
+            if (nch > 0) {
+                monitorDelayFade = outFade;
+                monitorDelayTimeFade = timeFade;
+            } else {
+                monitorDelayFade.snapTo(domondelay);
+            }
 
-            
+            usefrombuffer = &delayWorkBuffer;
+            useFromStartChan = 0;
+            useFromNumChan = nch;
         }
     }
 
@@ -719,6 +786,11 @@ void ChannelGroupParams::setFromValueTree(const ValueTree & channelGroupTree)
     ValueTree expanderTree = channelGroupTree.getChildWithName(expanderStateKey);
     if (expanderTree.isValid()) {
         expanderParams.setFromValueTree(expanderTree);
+        // a gate saved unused with the compressor's start values gets the gate's own
+        if (!expanderParams.enabled && expanderParams.thresholdDb == -16.0f && expanderParams.ratio == 2.0f
+            && expanderParams.attackMs == 10.0f && expanderParams.releaseMs == 80.0f) {
+            expanderParams = gateDefaultParams();
+        }
     }
     ValueTree limiterTree = channelGroupTree.getChildWithName(limiterStateKey);
     if (limiterTree.isValid()) {
@@ -790,18 +862,13 @@ void ChannelGroup::commitAllParams()
 void ChannelGroup::commitCompressorParams()
 {
     if (!compressorControl) return;
-    compressorControl->setParamValue("/compressor/Bypass", params.compressorParams.enabled ? 0.0f : 1.0f);
-    compressorControl->setParamValue("/compressor/knee", 2.0f);
-    compressorControl->setParamValue("/compressor/threshold", params.compressorParams.thresholdDb);
-    compressorControl->setParamValue("/compressor/ratio", params.compressorParams.ratio);
-    compressorControl->setParamValue("/compressor/attack", params.compressorParams.attackMs * 1e-3);
-    compressorControl->setParamValue("/compressor/release", params.compressorParams.releaseMs * 1e-3);
-    compressorControl->setParamValue("/compressor/makeup_gain", params.compressorParams.makeupGainDb);
-
-    float * tmp = compressorControl->getParamZone("/compressor/outgain");
-    if (tmp != compressorOutputLevel) {
-        compressorOutputLevel = tmp; // pointer
-    }
+    const auto & z = compressorZones;
+    if (z.knee) *z.knee = 2.0f;
+    if (z.threshold) *z.threshold = params.compressorParams.thresholdDb;
+    if (z.ratio) *z.ratio = params.compressorParams.ratio;
+    if (z.attack) *z.attack = params.compressorParams.attackMs * 1e-3f;
+    if (z.release) *z.release = params.compressorParams.releaseMs * 1e-3f;
+    if (z.makeupGain) *z.makeupGain = params.compressorParams.makeupGainDb;
 }
 
 
@@ -809,17 +876,20 @@ void ChannelGroup::commitCompressorParams()
 // threshold opens the gate inside that block (attackMs ramp on the samples in hand). After holdMs under threshold the
 // gain ramps down over releaseMs and the output becomes exact zeros, which the idle-channel mask leaves out of the
 // packet. Audio thread only; no allocation.
-void ChannelGroup::applyHardGate(float* const* bufs, int nbufs, int numSamples)
+void ChannelGroup::applyHardGate(float* const* bufs, int nbufs, int numSamples, bool active)
 {
-    const float thr = juce::Decibels::decibelsToGain(params.expanderParams.thresholdDb);
-    float peak = 0.0f;
-    for (int b = 0; b < nbufs; ++b) for (int i = 0; i < numSamples; ++i) peak = jmax(peak, std::abs(bufs[b][i]));
-    const int holdSamples = (int)(jmax(0.0f, params.expanderParams.holdMs) * 1e-3 * gateSampleRate);
-    if (peak > thr) { gateOpen = true; gateHoldLeft = holdSamples; }
-    else if (gateHoldLeft > 0) { gateHoldLeft -= numSamples; }
-    else { gateOpen = false; }
+    if (active) {
+        const float thr = juce::Decibels::decibelsToGain(params.expanderParams.thresholdDb);
+        float peak = 0.0f;
+        for (int b = 0; b < nbufs; ++b) for (int i = 0; i < numSamples; ++i) peak = jmax(peak, std::abs(bufs[b][i]));
+        const int holdSamples = (int)(jmax(0.0f, params.expanderParams.holdMs) * 1e-3 * gateSampleRate);
+        if (peak > thr) { gateOpen = true; gateHoldLeft = holdSamples; }
+        else if (gateHoldLeft > 0) { gateHoldLeft -= numSamples; }
+        else { gateOpen = false; }
+    }
+    else { gateOpen = true; gateHoldLeft = 0; }   // switched off while closed: back up over the attack time
     const float target = gateOpen ? 1.0f : 0.0f;
-    gateStatePub.store((gateOpen || gateGain > 0.0f) ? 1 : 0, std::memory_order_relaxed);   // Indicator (closed only once fully silent)
+    if (active) gateStatePub.store((gateOpen || gateGain > 0.0f) ? 1 : 0, std::memory_order_relaxed);   // Indicator (closed only once fully silent)
     if (gateGain == target) {
         if (target == 0.0f) for (int b = 0; b < nbufs; ++b) FloatVectorOperations::clear(bufs[b], numSamples);
         return;
@@ -838,29 +908,22 @@ void ChannelGroup::applyHardGate(float* const* bufs, int nbufs, int numSamples)
 void ChannelGroup::commitExpanderParams()
 {
     if (!expanderControl) return;
-    //mInputCompressorControl.setParamValue("/compressor/Bypass", mInputCompressorParams.enabled ? 0.0f : 1.0f);
-    expanderControl->setParamValue("/expander/knee", 3.0f);
-    expanderControl->setParamValue("/expander/threshold", params.expanderParams.thresholdDb);
-    expanderControl->setParamValue("/expander/ratio", params.expanderParams.ratio);
-    expanderControl->setParamValue("/expander/attack", params.expanderParams.attackMs * 1e-3);
-    expanderControl->setParamValue("/expander/release", params.expanderParams.releaseMs * 1e-3);
-
-    float * tmp = expanderControl->getParamZone("/expander/outgain");
-
-    if (tmp != expanderOutputGain) {
-        expanderOutputGain = tmp; // pointer
-    }
+    const auto & z = expanderZones;
+    if (z.knee) *z.knee = 3.0f;
+    if (z.threshold) *z.threshold = params.expanderParams.thresholdDb;
+    if (z.ratio) *z.ratio = params.expanderParams.ratio;
+    if (z.attack) *z.attack = params.expanderParams.attackMs * 1e-3f;
+    if (z.release) *z.release = params.expanderParams.releaseMs * 1e-3f;
 }
 
 void ChannelGroup::commitLimiterParams()
 {
     if (!limiterControl) return;
-
-    limiterControl->setParamValue("/compressor/Bypass", params.limiterParams.enabled ? 0.0f : 1.0f);
-    limiterControl->setParamValue("/compressor/threshold", params.limiterParams.thresholdDb);
-    limiterControl->setParamValue("/compressor/ratio", params.limiterParams.ratio);
-    limiterControl->setParamValue("/compressor/attack", params.limiterParams.attackMs * 1e-3);
-    limiterControl->setParamValue("/compressor/release", params.limiterParams.releaseMs * 1e-3);
+    const auto & z = limiterZones;
+    if (z.threshold) *z.threshold = params.limiterParams.thresholdDb;
+    if (z.ratio) *z.ratio = params.limiterParams.ratio;
+    if (z.attack) *z.attack = params.limiterParams.attackMs * 1e-3f;
+    if (z.release) *z.release = params.limiterParams.releaseMs * 1e-3f;
 }
 
 
@@ -868,17 +931,16 @@ void ChannelGroup::commitEqParams()
 {
     if (!eqControl[0]) return;
 
+    const float vals[10] = {
+        params.eqParams.lowShelfGain, params.eqParams.lowShelfFreq,
+        params.eqParams.para1Gain, params.eqParams.para1Freq, params.eqParams.para1Q,
+        params.eqParams.para2Gain, params.eqParams.para2Freq, params.eqParams.para2Q,
+        params.eqParams.highShelfGain, params.eqParams.highShelfFreq };
+
     for (int i=0; i < 2; ++i) {
-        eqControl[i]->setParamValue("/parametric_eq/low_shelf/gain", params.eqParams.lowShelfGain);
-        eqControl[i]->setParamValue("/parametric_eq/low_shelf/transition_freq", params.eqParams.lowShelfFreq);
-        eqControl[i]->setParamValue("/parametric_eq/para1/peak_gain", params.eqParams.para1Gain);
-        eqControl[i]->setParamValue("/parametric_eq/para1/peak_frequency", params.eqParams.para1Freq);
-        eqControl[i]->setParamValue("/parametric_eq/para1/peak_q", params.eqParams.para1Q);
-        eqControl[i]->setParamValue("/parametric_eq/para2/peak_gain", params.eqParams.para2Gain);
-        eqControl[i]->setParamValue("/parametric_eq/para2/peak_frequency", params.eqParams.para2Freq);
-        eqControl[i]->setParamValue("/parametric_eq/para2/peak_q", params.eqParams.para2Q);
-        eqControl[i]->setParamValue("/parametric_eq/high_shelf/gain", params.eqParams.highShelfGain);
-        eqControl[i]->setParamValue("/parametric_eq/high_shelf/transition_freq", params.eqParams.highShelfFreq);
+        for (int k=0; k < 10; ++k) {
+            if (eqZones[i][k]) *eqZones[i][k] = vals[k];
+        }
     }
 }
 

@@ -13,7 +13,7 @@
 namespace SonobusPlusVersion
 {
     struct Info {
-        String version;       // DATE build id, e.g. 2026.10.05.1551  (empty for an unstamped dev build) — what the updater compares
+        String version;       // DATE build id YYYY.MM.DD.HHMM  (empty for an unstamped dev build) — what the updater compares
         String marketing;     // e.g. 1.0.0 (CFBundleShortVersionString; compile-time SONOBUS_PLUS_VERSION when unstamped)
         String commit;        // e.g. bcf6b667
         String upstreamBase;  // e.g. 1.7.2b02

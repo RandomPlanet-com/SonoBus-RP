@@ -69,7 +69,7 @@ static inline int gettimeofday(struct timeval* tv, void*)
 #include <thread>
 #include <chrono>
 // The sink's elapsed_time only advances when the audio callback runs, so a bunched or stalled
-// callback makes on-time packets look like 4-8 ms arrival gaps. The gap histogram (the LAN "need")
+// callback makes on-time packets look like late arrival gaps. The gap histogram (the LAN "need")
 // therefore uses a monotonic wall clock for arrivals; SB_AOO_ADAPT_WALLCLOCK=0 selects the audio clock.
 // Everything else in the tracker keeps the audio clock (consistent with the tick).
 static double sb_wall_seconds(){
@@ -198,25 +198,25 @@ static int32_t sink_tap_int(const char* name, int32_t def, bool* set){
     return def;
 }
 
-// SB_AOO_RESAMP_FLAT=0: the drift resampler table keeps the former Kaiser beta 8 / cutoff 0.92 shape.
+// SB_AOO_RESAMP_FLAT=0: the drift resampler table uses Kaiser beta 8 / cutoff 0.92 instead of the flat shape.
 // Read once, when the table is built at setup time.
 extern "C" int32_t aoo_sb_resamp_flat_on(){
     static const int32_t v = sink_tap_int("SB_AOO_RESAMP_FLAT", 1, nullptr);
     return v;
 }
-// SB_AOO_LATE_RESYNC=0: after the buffer ran dry, refill with silence up to the target at once (the former rule).
+// SB_AOO_LATE_RESYNC=0: after the buffer ran dry, refill with silence up to the target at once.
 static int32_t late_resync_on(){
     static const int32_t v = sink_tap_int("SB_AOO_LATE_RESYNC", 1, nullptr);
     return v;
 }
 // SB_AOO_GATE_TIME=0: the resume after a dry spell waits for one callback without a jump in arrivals, whatever the
-// length of a callback (the former rule).
+// length of a callback.
 static int32_t gate_time_on(){
     static const int32_t v = sink_tap_int("SB_AOO_GATE_TIME", 1, nullptr);
     return v;
 }
-// SB_AOO_LOSS_FILL=0: a lost block is concealed the former way, and a block is given up as soon as a newer one
-// is here.
+// SB_AOO_LOSS_FILL=0: a lost block gets the pitch-period PLC instead of the loss fill, and a block is given up as
+// soon as a newer one is here.
 extern "C" int32_t aoo_sb_loss_fill_on(){
     static const int32_t v = sink_tap_int("SB_AOO_LOSS_FILL", 1, nullptr);
     return v;
@@ -228,7 +228,7 @@ static int32_t hold_lateness_mode(){
     return v;
 }
 static bool hold_lateness_on(){ return hold_lateness_mode() == 1; }
-// SB_AOO_ISO_INPLACE=0: every change of an iso sink's depth rebuilds its queues (the former rule).
+// SB_AOO_ISO_INPLACE=0: every change of an iso sink's depth rebuilds its queues.
 static int32_t iso_inplace_on(){
     static const int32_t v = sink_tap_int("SB_AOO_ISO_INPLACE", 1, nullptr);
     return v;
@@ -267,7 +267,7 @@ static bool grow_glide_on(){
     static const bool on = sink_tap_int("SB_AOO_GROW_GLIDE", 0, nullptr) != 0;
     return on;
 }
-// SB_AOO_RO_FAST=0: the period search of the ring-out runs the former, slower way.
+// SB_AOO_RO_FAST=0: the period search of the ring-out runs frame by frame (ro_find_period_ref).
 static bool ro_fast(){
     static const bool on = sink_tap_int("SB_AOO_RO_FAST", 1, nullptr) != 0;
     return on;
@@ -432,12 +432,9 @@ int32_t aoo::sink::set_option(int32_t opt, void *ptr, int32_t size)
         CHECKARG(int32_t);
         auto bufsize = std::max<int32_t>(0, as<int32_t>(ptr));
         if (bufsize != buffersize_){
-            // In LAN-isochronous mode (SB_AOO_ISO_BLOCKS>0) the
-            // depth is fixed in blocks by do_update(); a ms change would only
-            // trigger a queue rebuild (heap allocs under the writer lock +
-            // silence re-prime) — the exact "rebuild storm" the ratchet causes.
-            // Accept the FIRST value (so do_update runs once with a sane ms)
-            // and ignore all later changes.
+            // In LAN-isochronous mode (SB_AOO_ISO_BLOCKS>0) the depth is fixed in blocks by do_update(); a ms
+            // change would only rebuild the queues (allocations under the writer lock + silence re-prime).
+            // Accept the FIRST value (so do_update runs once with a sane ms) and ignore all later changes.
             static const int32_t iso_tap = sink_tap_int("SB_AOO_ISO_BLOCKS", 0, nullptr);
             // Same rule for the WAN adaptive sink (depth owned by adapt_retarget)
             if ((iso_tap > 0 || iso_blocks_.load(std::memory_order_relaxed) > 0
@@ -490,7 +487,7 @@ int32_t aoo::sink::set_option(int32_t opt, void *ptr, int32_t size)
     case aoo_opt_dynamic_resampling:
         CHECKARG(int32_t);
         dynamic_resampling_ = std::max<int32_t>(0, as<int32_t>(ptr));
-        fprintf(stderr, "[AOO-DYNRES] sink id=%d dynamic_resampling <- %d\n", (int) id(), (int) dynamic_resampling_.load());   // Who sets it?
+        if (kSinkDebug) fprintf(stderr, "[AOO-DYNRES] sink id=%d dynamic_resampling <- %d\n", (int) id(), (int) dynamic_resampling_.load());
         break;
     // timefilter bandwidth
     case aoo_opt_timefilter_bandwidth:
@@ -668,6 +665,10 @@ int32_t aoo::sink::get_sourceoption(void *endpoint, int32_t id,
             CHECKARG(int32_t);
             as<int32_t>(p) = (int32_t)(uint32_t) src->rx_bytes_.load(std::memory_order_relaxed);
             return 1;
+        case aoo_opt_rx_payload_bytes:   // Audio payload bytes only (wraps at 2^32)
+            CHECKARG(int32_t);
+            as<int32_t>(p) = (int32_t)(uint32_t) src->rx_payload_bytes_.load(std::memory_order_relaxed);
+            return 1;
         case aoo_opt_adapt_events:   // Adaptive-depth decisions since `since`
             CHECKARG(aoo_adapt_events);
             src->adapt_events(as<aoo_adapt_events>(p));
@@ -731,7 +732,7 @@ int32_t aoo::sink::handle_message(const char *data, int32_t n,
                     fprintf(stderr, "[AOO-DISPATCH-D] OK ep=%p salt=0x%x (sample %d)\n",
                             endpoint, (unsigned)salt, ++cd_ok_logged);
                 }
-                return handle_compact_data_message(endpoint, fn, msg);
+                return handle_compact_data_message(endpoint, fn, msg, n);
             }
             else {
                 static int cd_drop_logged = 0;
@@ -755,7 +756,7 @@ int32_t aoo::sink::handle_message(const char *data, int32_t n,
         if (!strcmp(pattern, AOO_MSG_FORMAT)){
             return handle_format_message(endpoint, fn, msg);
         } else if (!strcmp(pattern, AOO_MSG_DATA)){
-            return handle_data_message(endpoint, fn, msg);
+            return handle_data_message(endpoint, fn, msg, n);
         } else if (!strcmp(pattern, AOO_MSG_PING)){
             return handle_ping_message(endpoint, fn, msg);
         } else {
@@ -1005,7 +1006,7 @@ int32_t sink::handle_format_message(void *endpoint, aoo_replyfn fn,
 }
 
 int32_t sink::handle_data_message(void *endpoint, aoo_replyfn fn,
-                                  const osc::ReceivedMessage& msg)
+                                  const osc::ReceivedMessage& msg, int32_t wiresize)
 {
     auto it = msg.ArgumentsBegin();
 
@@ -1023,6 +1024,7 @@ int32_t sink::handle_data_message(void *endpoint, aoo_replyfn fn,
     (it++)->AsBlob(blobdata, blobsize);
     d.data = (const char *)blobdata;
     d.size = blobsize;
+    d.wiresize = wiresize;
 
     if (id < 0){
         LOG_WARNING("bad ID for " << AOO_MSG_DATA << " message");
@@ -1043,7 +1045,7 @@ int32_t sink::handle_data_message(void *endpoint, aoo_replyfn fn,
 }
 
 int32_t sink::handle_compact_data_message(void *endpoint, aoo_replyfn fn,
-                                          const osc::ReceivedMessage& msg)
+                                          const osc::ReceivedMessage& msg, int32_t wiresize)
 {
     // /d <i:salt> <i:seq> <b:data>
     // /d <i:salt> <i:seq> <f:srate> <b:data>
@@ -1069,6 +1071,7 @@ int32_t sink::handle_compact_data_message(void *endpoint, aoo_replyfn fn,
     d.data = (const char *)blobdata;
     d.size = blobsize;
     d.totalsize = d.size;
+    d.wiresize = wiresize;
 
     // try to find existing source by salt
     auto src = find_source_by_salt(endpoint, salt);
@@ -1585,7 +1588,9 @@ int32_t source_desc::handle_data(const sink& s, int32_t salt, const aoo::data_pa
     // synchronize with update()!
     shared_lock lock(mutex_);
 
-    rx_bytes_.fetch_add((uint64_t) d.size + 52u, std::memory_order_relaxed);   // Kbps readout (payload + headers)
+    // Kbps readout as on the wire: the whole datagram + IPv4 and UDP headers (28), same count as the hub's
+    rx_bytes_.fetch_add(d.wiresize > 0 ? (uint64_t) d.wiresize + 28u : (uint64_t) d.size + 52u, std::memory_order_relaxed);
+    rx_payload_bytes_.fetch_add((uint64_t) d.size, std::memory_order_relaxed);
     // the source format might have changed and we haven't noticed,
     // e.g. because of dropped UDP packets.
     if (salt != salt_){
@@ -1950,13 +1955,8 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
         channel_ = info.channel;
         samplerate_ = info.sr;
 
-        // Sources default
-        // dynamic_resampling=1 and stamp packets with their drifting DLL
-        // rate estimate; ratio = ours/theirs wanders off 1.0 and the
-        // resampler linear-interpolates the whole stream even when OUR
-        // dynamic resampling is off — grit that grows with stream age.
-        // Snap near-nominal rates (<0.1%, crystal tolerance) to the
-        // decoder's nominal so the ratio is exactly 1.0 (bit-exact path).
+        // Sources stamp packets with a drifting DLL rate estimate. Snap near-nominal rates (<0.1%, crystal
+        // tolerance) to the decoder's nominal so the ratio is exactly 1.0 (bit-exact path, no interpolation).
         if (decoder_){
             const double nom = (double)decoder_->samplerate();
             if (nom > 0 && samplerate_ > 0 && samplerate_ != nom
@@ -2130,7 +2130,7 @@ bool source_desc::process(const sink& s, aoo_sample *buffer, int32_t stride, int
     
     const int32_t ready = (int32_t) resampler_.read_available();
     // While dry, what is there (the ring-out) is played now and padded with silence, so nothing stale comes out
-    // after the gap. Any other short callback waits, as before.
+    // after the gap. Any other short callback waits.
     const int32_t take = ready >= readsamples ? readsamples
                          : (dry_ && dry_fade_on_ && nchannels > 0) ? ready - (ready % nchannels) : 0;
     if (take > 0){
@@ -2396,13 +2396,13 @@ bool source_desc::add_packet(const data_packet& d){
                 // Trickle skim: producer-faster-than-consumer skew (~44 ppm = one 128smp block per minute)
                 // lands here. Skim exactly ONE oldest block per detection: a single-block trim, no zero-refill,
                 // no mass drop, so latency oscillates +-1 block around the working point.
-                // SB_AOO_SKIM=0 disables it (env or taps file).
+                // SB_AOO_SKIM=1 enables it (env or taps file; default off).
                 static int skim_enabled = -1;
                 if (skim_enabled < 0){
                     const char* e = getenv("SB_AOO_SKIM");
                     if (e && *e){ skim_enabled = atoi(e) != 0; }
                     else {
-                        skim_enabled = 0;  // DEFAULT OFF — first shape held depth AT PEAK (see commit)
+                        skim_enabled = 0;  // default off
                         FILE* cf = sb_taps_fopen();
                         if (cf){
                             char line[256];
@@ -2931,7 +2931,7 @@ void source_desc::process_blocks(const sink& s){
             if (gated) governor_armed_ = false;
             // Back at or under the target: what armed the governor was a clump of arrivals, not surplus. Without
             // this a clump stays armed through the dip and is drained at the next clump.
-            // SB_AOO_GOV_DISARM=0: the armed state survives the dip (the former behaviour).
+            // SB_AOO_GOV_DISARM=0: the armed state survives the dip.
             {
                 static const int32_t disarm = sink_tap_int("SB_AOO_GOV_DISARM", 1, nullptr);
                 if (disarm && excess <= 0) governor_armed_ = false;
@@ -3383,7 +3383,7 @@ void source_desc::late_window(aoo_late_window& out){
 }
 
 // ─── Fast learning around a line storm (WAN profile) ───
-// SB_AOO_ADAPT_FASTLEARN=0: the depth follows a storm the former way (a step per strike, slow way back).
+// SB_AOO_ADAPT_FASTLEARN=0: the depth follows a storm a step per strike, with the slow way back.
 static bool adapt_fastlearn(){
     static const bool on = sink_tap_int("SB_AOO_ADAPT_FASTLEARN", 1, nullptr) != 0;
     return on;
@@ -3514,7 +3514,7 @@ void source_desc::fl_prove(double now){
 // immediately and creeps UP at SB_AOO_ADAPT_CREEP_US_PER_S (source-clock drift
 // follower); window jitter = max - running min. EWMA: up-moves at
 // SB_AOO_ADAPT_UP_PCT per window (bursts are captured fast), down-moves with
-// tau = SB_AOO_ADAPT_TAU_S (slow release, JackTrip's 60 s idea).
+// tau = SB_AOO_ADAPT_TAU_S (slow release).
 void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
     if (!fresh || d.framenum != 0 || d.totalsize == 0) return;
     const double now = s.elapsed_time();
@@ -3627,7 +3627,7 @@ void source_desc::adapt_track(const sink& s, const data_packet& d, bool fresh){
     // (depth stays at init, no strikes), then re-anchor the schedule and start the stats fresh.
     // The WAN warm-up covers the join transient only, as the hub clears its gap histogram; a launch
     // storm that inflates the depth is trimmed by the commit.
-    static const int32_t warmup_s_wan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_WARMUP_S", 5, nullptr) /* Was 60 */);
+    static const int32_t warmup_s_wan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_WARMUP_S", 5, nullptr) /* seconds */);
     static const int32_t warmup_s_lan = std::max<int32_t>(0, sink_tap_int("SB_AOO_ADAPT_LAN_WARMUP_S", 15, nullptr));
     const int32_t warmup_s = adapt_lan_profile_ ? warmup_s_lan : warmup_s_wan;
     if (!adapt_warm_ && now - adapt_t0_ < (double) warmup_s){

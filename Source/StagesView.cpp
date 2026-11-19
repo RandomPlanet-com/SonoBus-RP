@@ -3,6 +3,7 @@
 #include "StagesView.h"
 #include "SonoLookAndFeel.h"
 #include "SbLatencyColours.h"
+#include "SbTextFit.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -442,12 +443,37 @@ public:
         if (stage.older && cell(colVersion).getWidth() >= 8) {
             auto r = cell(colVersion);
             r.removeFromLeft(plain.getStringWidth(ver) + 6);
-            if (r.getWidth() > 20) {
+            if (r.getWidth() >= small.getStringWidth(TRANS("older")) + 2) {
                 g.setColour(kWarn.withMultipliedAlpha(full ? 0.55f : 1.0f));
                 g.setFont(small);
                 g.drawText(TRANS("older"), r, juce::Justification::centredLeft, true);
             }
         }
+    }
+
+    // The whole entry in the hover when a column is folded away or too narrow for its text
+    juce::String getTooltip() override {
+        const float sc = fontScale();
+        const juce::Font plain(14.5f * sc), bold(14.5f * sc, juce::Font::bold);
+        auto cut = [&](int col, const juce::String& t, int room) {
+            return t.isNotEmpty() && (float) (room < 0 ? owner.columnRect(col).getWidth() - 10 : room) < plain.getStringWidthFloat(t);
+        };
+        int nameRoom = owner.columnRect(colStage).getWidth() - 10 - (stage.locked ? 19 : 0) - (stage.test ? 36 : 0);
+        const int tw = tagWidth(TRANS("you are here"), sc);
+        if (owner.isHere(stage) && nameRoom >= tw + 60) nameRoom -= tw + 8;
+        const juce::String ver = (stage.version + " " + stage.os).trim();
+        const bool any = bold.getStringWidthFloat(stage.name) > (float) nameRoom
+                      || cut(colAbout, stage.about, -1) || cut(colCity, stage.city, -1) || cut(colCountry, stage.country, -1)
+                      || cut(colGenre, stage.genre, -1) || cut(colVersion, ver, -1);
+        if (! any) return {};
+        juce::StringArray lines;
+        lines.add(stage.name);
+        if (stage.about.isNotEmpty()) lines.add(stage.about);
+        const juce::String place = stage.city + (stage.city.isNotEmpty() && stage.country.isNotEmpty() ? ", " : "") + stage.country;
+        if (place.isNotEmpty()) lines.add(place);
+        if (stage.genre.isNotEmpty()) lines.add(stage.genre);
+        if (ver.isNotEmpty()) lines.add(ver);
+        return lines.joinIntoString("\n");
     }
 
     void itemDoubleClicked(const juce::MouseEvent&) override {
@@ -485,11 +511,31 @@ public:
     juce::String getUniqueName() const override { return stage.id + "/" + juce::String((int) kind) + "/" + juce::String(index); }
     void paintHorizontalConnectingLine(juce::Graphics&, const juce::Line<float>&) override {}
     void paintVerticalConnectingLine(juce::Graphics&, const juce::Line<float>&) override {}
-    int getItemHeight() const override { return kind == info ? 32 : kind == header ? 24 : 25; }
+    int getItemHeight() const override {
+        if (kind == note) {   // a note too long for the row wraps onto a second line
+            const int full = owner.mTree.getWidth() - owner.mTree.getViewport()->getScrollBarThickness();
+            const PlayerColumns c = owner.playerColumns(full);
+            return juce::Font(13.5f * fontScale()).getStringWidthFloat(text) > (float) juce::jmax(60, full - c.name - 12) ? 42 : 25;
+        }
+        return kind == info ? 32 : kind == header ? 24 : 25;
+    }
+
+    // A player's full name and instrument in the hover when their columns are too narrow
+    juce::String getTooltip() override {
+        if (kind != player || lastFull <= 0 || index < 0 || index >= stage.players.size()) return {};
+        const PlayerColumns c = owner.playerColumns(lastFull);
+        const juce::Font f(13.5f * fontScale());
+        const juce::String name = stage.players[index];
+        const juce::String inst = index < stage.instruments.size() ? stage.instruments[index] : juce::String();
+        const bool cut = f.getStringWidthFloat(name) > (float) c.nameW
+                      || (inst.isNotEmpty() && (c.instW <= 0 || f.getStringWidthFloat(inst) > (float) c.instW));
+        return cut ? name + (inst.isNotEmpty() ? " (" + inst + ")" : juce::String()) : juce::String();
+    }
 
     void paintItem(juce::Graphics& g, int width, int height) override {
         const int ox = getItemPosition(false).getX();
         const int full = width + ox;   // the whole row, from the left edge of the list
+        lastFull = full;
         g.setColour(kDetailBg);
         g.fillRect(-ox, 0, full, height);
 
@@ -507,11 +553,15 @@ public:
         if (kind == header) {
             g.setColour(kPanelHead);
             g.setFont(juce::Font(10.5f * sc));
-            g.drawText(TRANS("Player").toUpperCase(), at(c.name, c.nameW), left, true);
-            if (c.instW > 0) g.drawText(TRANS("Instrument").toUpperCase(), at(c.inst, c.instW), left, true);
-            g.drawText(TRANS("On stage").toUpperCase(), at(c.since, c.numW), right, true);
-            g.drawText(TRANS("Their ping").toUpperCase(), at(c.ping, c.numW), right, true);
-            g.drawText(TRANS("Sending").toUpperCase(), at(c.send, c.numW), right, true);
+            // Captions wrap onto two lines when a narrow window squeezes their columns
+            auto caption = [&](const juce::String& t, juce::Rectangle<int> r, juce::Justification j) {
+                SonoLookAndFeel::drawTextNoSqueeze(g, t.toUpperCase(), r, j, 2);
+            };
+            caption(TRANS("Player"), at(c.name, c.nameW), left);
+            if (c.instW > 0) caption(TRANS("Instrument"), at(c.inst, c.instW), left);
+            caption(TRANS("On stage"), at(c.since, c.numW), right);
+            caption(TRANS("Their ping"), at(c.ping, c.numW), right);
+            caption(TRANS("Sending"), at(c.send, c.numW), right);
             g.setColour(kPanelLine);
             g.fillRect(c.name - ox, height - 1, c.right - c.name, 1);
             return;
@@ -556,7 +606,7 @@ public:
         g.setFont(f);
         if (kind == note) {
             g.setColour(kDim);
-            g.drawText(text, c.name - ox, 0, juce::jmax(60, full - c.name - 12), height, left, true);
+            SonoLookAndFeel::drawTextNoSqueeze(g, text, { c.name - ox, 0, juce::jmax(60, full - c.name - 12), height }, left, 2);
             return;
         }
         g.setColour(kSep);
@@ -586,6 +636,7 @@ private:
     int index;
     juce::String text;
     juce::Rectangle<int> link;
+    int lastFull = 0;   // row width at the last paint
 };
 
 //==============================================================================
@@ -598,8 +649,8 @@ StagesView::StagesView()
     mSearch.onTextChange = [this] { touched(); rebuild(); };
     addAndMakeVisible(mSearch);
 
-    mGenre.onChange = [this] { rebuild(); };
-    mCountry.onChange = [this] { rebuild(); };
+    mGenre.onChange = [this] { updateChoiceTips(); rebuild(); };
+    mCountry.onChange = [this] { updateChoiceTips(); rebuild(); };
     fillChoice(mGenre, TRANS("All genres"), {});
     fillChoice(mCountry, TRANS("All countries"), {});
     addAndMakeVisible(mGenre);
@@ -608,7 +659,7 @@ StagesView::StagesView()
     mKind.addItem(TRANS("Real only"), 2);
     mKind.addItem(TRANS("Test only"), 3);
     mKind.setSelectedItemIndex(0, juce::dontSendNotification);
-    mKind.onChange = [this] { rebuild(); };
+    mKind.onChange = [this] { updateChoiceTips(); rebuild(); };
     addChildComponent(mKind);   // shown only while the directory sends test stages
 
     mOpenOnly.setButtonText(TRANS("Open stages only"));
@@ -656,15 +707,29 @@ StagesView::StagesView()
 
     const int fixed = juce::TableHeaderComponent::visible;
     const int normal = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::sortable | juce::TableHeaderComponent::resizable;
+    // A column never gets narrower than its caption with the sort arrow (header 28 high: bold 14, arrow 14, sides 4 + 4),
+    // nor than the fixed texts it shows
+    const juce::Font headFont(14.0f, juce::Font::bold);
+    auto minFor = [&headFont](const juce::String& title, int base) { return juce::jmax(base, SbTextFit::textWidth(headFont, title) + 8 + 14 + 2); };
+    const int pingMin = juce::jmax(minFor(TRANS("Ping"), 66), SbTextFit::textWidth(juce::Font(14.5f * fontScale()), TRANS("no answer")) + 10 + 2);
     mHeader.addColumn({}, colOpen, kIndent, kIndent, kIndent, fixed);
-    mHeader.addColumn(TRANS("Stage"), colStage, 280, 130, -1, normal);
-    mHeader.addColumn(TRANS("About"), colAbout, 300, 80, -1, normal);
-    mHeader.addColumn(TRANS("City"), colCity, 150, 70, -1, normal);
-    mHeader.addColumn(TRANS("Country"), colCountry, 80, 60, -1, normal);
-    mHeader.addColumn(TRANS("Genre"), colGenre, 130, 70, -1, normal);
-    mHeader.addColumn(TRANS("Players"), colPlayers, 84, 66, -1, normal);
-    mHeader.addColumn(TRANS("Ping"), colPing, 90, 66, -1, normal);
-    mHeader.addColumn(TRANS("Version"), colVersion, 140, 80, -1, normal);
+    mHeader.addColumn(TRANS("Stage"), colStage, 280, minFor(TRANS("Stage"), 130), -1, normal);
+    mHeader.addColumn(TRANS("About"), colAbout, 300, minFor(TRANS("About"), 80), -1, normal);
+    mHeader.addColumn(TRANS("City"), colCity, 150, minFor(TRANS("City"), 70), -1, normal);
+    mHeader.addColumn(TRANS("Country"), colCountry, 80, minFor(TRANS("Country"), 60), -1, normal);
+    mHeader.addColumn(TRANS("Genre"), colGenre, 130, minFor(TRANS("Genre"), 70), -1, normal);
+    mHeader.addColumn(TRANS("Players"), colPlayers, 84, minFor(TRANS("Players"), 66), -1, normal);
+    mHeader.addColumn(TRANS("Ping"), colPing, 90, pingMin, -1, normal);
+    mHeader.addColumn(TRANS("Version"), colVersion, 140, minFor(TRANS("Version"), 80), -1, normal);
+
+    // Player table: number columns as wide as their widest caption or value, the instrument column at least its caption
+    {
+        const juce::Font cap(10.5f * fontScale()), val(13.5f * fontScale());
+        mNumNeed = juce::jmax(SbTextFit::widestText(cap, { TRANS("On stage").toUpperCase(), TRANS("Their ping").toUpperCase(), TRANS("Sending").toUpperCase() }),
+                              SbTextFit::widestText(val, { TRANS("under 1 min"), "99 h 59 min", "999 ms", "64 ch" })) + 4;
+        mInstMin = juce::jmax(60, SbTextFit::textWidth(cap, TRANS("Instrument").toUpperCase()) + 2);
+        mInstNeed = juce::jmax(mInstMin, SbTextFit::textWidth(val, TRANS("not set")) + 2);
+    }
     mHeader.setStretchToFitActive(true);
     mHeader.setPopupMenuActive(false);
     mHeader.setColour(juce::TableHeaderComponent::backgroundColourId, kHeaderBg);
@@ -822,28 +887,37 @@ void StagesView::resized()
     const bool oneRow = w >= (mKind.isVisible() ? 1400 : 1180);
     auto top = r.removeFromTop(oneRow ? 44 : 80).reduced(10, 7);
     mCountry.setVisible(w >= 620);
+    // Captions get their measured width; a choice box never gets narrower than its "All ..." entry
+    const int rowH = 30;
+    const int openW = SbTextFit::toggleWidth(mOpenOnly, rowH) + 8, hideW = SbTextFit::toggleWidth(mHideFull, rowH) + 8;
+    const int refreshW = juce::jmax(90, SbTextFit::buttonWidth(mRefresh, rowH));
+    const int genreMin = SbTextFit::comboWidth(mGenre, rowH, TRANS("All genres"));
+    const int countryMin = SbTextFit::comboWidth(mCountry, rowH, TRANS("All countries"));
+    int kindMin = 0;
+    for (int i = 0; i < mKind.getNumItems(); ++i) kindMin = juce::jmax(kindMin, SbTextFit::comboWidth(mKind, rowH, mKind.getItemText(i)));
     if (oneRow) {
         mSearch.setBounds(top.removeFromLeft(230));  top.removeFromLeft(8);
-        mGenre.setBounds(top.removeFromLeft(170));   top.removeFromLeft(8);
-        mCountry.setBounds(top.removeFromLeft(150)); top.removeFromLeft(8);
-        if (mKind.isVisible()) { mKind.setBounds(top.removeFromLeft(140)); top.removeFromLeft(8); }
+        mGenre.setBounds(top.removeFromLeft(juce::jmax(170, genreMin)));   top.removeFromLeft(8);
+        mCountry.setBounds(top.removeFromLeft(juce::jmax(150, countryMin))); top.removeFromLeft(8);
+        if (mKind.isVisible()) { mKind.setBounds(top.removeFromLeft(juce::jmax(140, kindMin))); top.removeFromLeft(8); }
         top.removeFromLeft(4);
-        mOpenOnly.setBounds(top.removeFromLeft(160));
-        mHideFull.setBounds(top.removeFromLeft(110));
-        mRefresh.setBounds(top.removeFromLeft(90));  top.removeFromLeft(8);
+        mOpenOnly.setBounds(top.removeFromLeft(openW));
+        mHideFull.setBounds(top.removeFromLeft(hideW));
+        mRefresh.setBounds(top.removeFromLeft(refreshW));  top.removeFromLeft(8);
         mStatus.setBounds(top);
     } else {
-        auto row1 = top.removeFromTop(30);
+        auto row1 = top.removeFromTop(rowH);
         top.removeFromTop(6);
-        mRefresh.setBounds(row1.removeFromRight(90)); row1.removeFromRight(8);
-        if (mCountry.isVisible()) { mCountry.setBounds(row1.removeFromRight(juce::jmin(150, w / 5))); row1.removeFromRight(8); }
-        mGenre.setBounds(row1.removeFromRight(juce::jmin(170, w / 4))); row1.removeFromRight(8);
+        mRefresh.setBounds(row1.removeFromRight(refreshW)); row1.removeFromRight(8);
+        if (mCountry.isVisible()) { mCountry.setBounds(row1.removeFromRight(juce::jmax(countryMin, juce::jmin(150, w / 5)))); row1.removeFromRight(8); }
+        mGenre.setBounds(row1.removeFromRight(juce::jmax(genreMin, juce::jmin(170, w / 4)))); row1.removeFromRight(8);
         mSearch.setBounds(row1);
-        mOpenOnly.setBounds(top.removeFromLeft(160));
-        mHideFull.setBounds(top.removeFromLeft(110));
-        if (mKind.isVisible()) { mKind.setBounds(top.removeFromLeft(juce::jmin(140, w / 4))); top.removeFromLeft(8); }
+        mOpenOnly.setBounds(top.removeFromLeft(openW));
+        mHideFull.setBounds(top.removeFromLeft(hideW));
+        if (mKind.isVisible()) { mKind.setBounds(top.removeFromLeft(juce::jmax(kindMin, juce::jmin(140, w / 4)))); top.removeFromLeft(8); }
         mStatus.setBounds(top);
     }
+    updateChoiceTips();
 
     mFooter = r.removeFromBottom(30);
     auto header = r.removeFromTop(28);
@@ -883,18 +957,24 @@ StagesView::PlayerColumns StagesView::playerColumns(int fullWidth) const
     PlayerColumns c;
     c.name = kPanelIndent + 3 + 14;
     const int avail = juce::jmax(160, fullWidth - c.name - 14);
-    c.numW = juce::roundToInt(84.0f * sc);
+    c.numW = mNumNeed;
     int flex = avail - 3 * (c.numW + gap);
-    if (flex < 110) {   // a narrow window squeezes the number columns first
+    if (flex < 110) {   // a narrow window squeezes the number columns first (their captions wrap)
         c.numW = juce::jmax(44, (avail - 110) / 3 - gap);
         flex = avail - 3 * (c.numW + gap);
     }
-    const int nameMax = juce::roundToInt(250.0f * sc), instMax = juce::roundToInt(200.0f * sc);
-    c.nameW = juce::jlimit(90, juce::jmax(90, nameMax), flex * 55 / 100);
-    c.instW = juce::jlimit(0, instMax, flex - c.nameW - gap);
-    if (c.instW < 60) {   // no room for the instrument
+    // The instrument column takes what its longest entry needs, the name column the rest up to its cap.
+    // Names come first: when they do not fit, the instrument column gives way down to its caption, then folds.
+    const int nameMax = juce::jmax(90, juce::roundToInt(250.0f * sc)), instMax = juce::roundToInt(200.0f * sc);
+    c.instW = juce::jmin(instMax, mInstNeed);
+    c.nameW = juce::jlimit(90, nameMax, flex - c.instW - gap);
+    if (c.nameW < juce::jmin(nameMax, mNameNeed)) {
+        c.instW = juce::jlimit(mInstMin, juce::jmax(mInstMin, c.instW), flex - juce::jmin(nameMax, mNameNeed) - gap);
+        c.nameW = juce::jlimit(90, nameMax, flex - c.instW - gap);
+    }
+    if (flex - c.nameW - gap < mInstMin) {   // no room for the instrument
         c.instW = 0;
-        c.nameW = juce::jlimit(90, juce::jmax(90, nameMax), flex);
+        c.nameW = juce::jlimit(90, nameMax, flex);
     }
     c.inst = c.name + c.nameW + gap;
     c.since = c.instW > 0 ? c.inst + c.instW + gap : c.inst;
@@ -918,6 +998,16 @@ void StagesView::layoutConnectRow()
     mHint.setVisible(showHint);
     if (showHint) { bar.removeFromRight(6); mHint.setBounds(bar.removeFromRight(hintW)); }
     mNotice.setBounds(bar);
+
+    // The full text in the hover when a label has to wrap past its lines or end in "..."
+    auto tipIfCut = [](juce::Label& l) {
+        const auto font = l.getFont();
+        const int lines = juce::jmax(1, (int) ((float) (l.getHeight() - 2) / font.getHeight()));
+        const int room = lines * (l.getWidth() - 10) - (lines > 1 ? juce::roundToInt(font.getHeight() * 3.0f) : 0);   // wrapping loses some at word ends
+        l.setTooltip(SbTextFit::textWidth(font, l.getText()) > room ? l.getText() : juce::String());
+    };
+    tipIfCut(mSelected);
+    tipIfCut(mNotice);
 }
 
 // Connect follows the selected row: off with nothing selected and on the stage this player is on.
@@ -983,6 +1073,13 @@ void StagesView::fillChoice(juce::ComboBox& box, const juce::String& allText, co
     box.clear(juce::dontSendNotification);
     box.addItemList(want, 1);
     box.setSelectedItemIndex(chosen.isEmpty() ? 0 : juce::jmax(0, want.indexOf(chosen)), juce::dontSendNotification);
+    updateChoiceTips();
+}
+
+void StagesView::updateChoiceTips()
+{
+    for (auto* box : { &mGenre, &mCountry, &mKind })
+        SbTextFit::tooltipIfCut(*box, box->getText(), SbTextFit::comboWidth(*box, box->getHeight(), box->getText()));
 }
 
 void StagesView::rebuild()
@@ -1032,6 +1129,17 @@ void StagesView::rebuild()
     mShown = (int) rows.size();
     mShownPlayers = 0;
     for (const auto& s : rows) mShownPlayers += s.count;
+
+    // Player table columns follow the widest name and instrument shown, the same for every stage so they line up
+    {
+        const juce::Font val(13.5f * fontScale());
+        mNameNeed = 0;
+        mInstNeed = juce::jmax(mInstMin, SbTextFit::textWidth(val, TRANS("not set")) + 2);
+        for (const auto& s : rows) {
+            for (const auto& p : s.players) mNameNeed = juce::jmax(mNameNeed, SbTextFit::textWidth(val, p) + 2);
+            for (const auto& i : s.instruments) mInstNeed = juce::jmax(mInstNeed, SbTextFit::textWidth(val, i) + 2);
+        }
+    }
 
     const int scrollY = mTree.getViewport()->getViewPositionY();
     mRebuilding = true;
@@ -1120,7 +1228,16 @@ void StagesView::requestJoin(const Stage& s)
     auto go = [safe, req, locked] {
         if (safe == nullptr) return;
         safe->showNotice({});   // a new try: the last refusal is no longer the news
-        if (locked) safe->askPassword(req);
+        safe->mSavedTryActive = false;
+        const juce::String saved = locked && safe->savedPassword ? safe->savedPassword(req) : juce::String();
+        if (saved.isNotEmpty()) {   // accepted here before: no question
+            JoinRequest j = req;
+            j.password = saved;
+            safe->mSavedTry = j;
+            safe->mSavedTryActive = true;
+            if (safe->onJoin) safe->onJoin(j);
+        }
+        else if (locked) safe->askPassword(req);
         else if (safe->onJoin) safe->onJoin(req);
     };
 
@@ -1135,9 +1252,22 @@ void StagesView::requestJoin(const Stage& s)
     go();
 }
 
-void StagesView::askPassword(const JoinRequest& req)
+void StagesView::joinRefused(const juce::String& stage, const juce::String& why)
 {
-    auto* w = new juce::AlertWindow(TRANS("Stage password"), req.name, juce::MessageBoxIconType::NoIcon, this);
+    const bool savedOne = mSavedTryActive && stage == mSavedTry.name && why.containsIgnoreCase("password");
+    mSavedTryActive = false;
+    if (! savedOne) return;
+    if (forgetPassword) forgetPassword(mSavedTry);
+    if (showMe) showMe();
+    JoinRequest r = mSavedTry;
+    r.password = {};
+    askPassword(r, TRANS("The saved password was rejected. Enter the current password."));
+}
+
+void StagesView::askPassword(const JoinRequest& req, const juce::String& note)
+{
+    auto* w = new juce::AlertWindow(TRANS("Stage password"), note.isEmpty() ? req.name : req.name + "\n\n" + note,
+                                    juce::MessageBoxIconType::NoIcon, this);
     w->addTextEditor("pw", {}, TRANS("Password"), true);
     w->addButton(TRANS("Join"), 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton(TRANS("Cancel"), 0, juce::KeyPress(juce::KeyPress::escapeKey));

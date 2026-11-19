@@ -1261,8 +1261,7 @@ void AudioDeviceManager::LevelMeter::updateLevel (const float* const* channelDat
 double AudioDeviceManager::LevelMeter::getCurrentLevel() const noexcept
 {
     jassert (getReferenceCount() > 1);
-    // If the device callback
-    // has not run for 300 ms (device stopped / re-opening) the last value is meaningless → read as silence.
+    // No device callback for 300 ms (device stopped or re-opening): read as silence.
     const uint32 last = lastUpdateMs.get();
     if (last == 0 || Time::getMillisecondCounter() - last > 300) return 0.0;
     const float v = level.get();

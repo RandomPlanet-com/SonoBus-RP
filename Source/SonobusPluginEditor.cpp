@@ -12,7 +12,6 @@
 
 #include "PeersContainerView.h"
 #include "WaveformTransportComponent.h"
-#include "RandomSentenceGenerator.h"
 #include "SonoUtility.h"
 #include "SonobusTypes.h"
 #include "ChannelGroupsView.h"
@@ -24,6 +23,7 @@
 #include "SuggestNewGroupView.h"
 #include "SonoCallOutBox.h"
 #include "StagesView.h"
+#include "SbTextFit.h"
 #include <sstream>
 
 #if JUCE_ANDROID
@@ -126,12 +126,26 @@ public:
         repaint();
     }
     
+    // Number column wide enough for the highest player number
+    int numberColumnWidth() const
+    {
+        return jmax(30, SbTextFit::textWidth(Font(15.0f), String(processor.getNumberRemotePeers())) + 10 + 4 + 2);
+    }
+
+    // Pad wide enough for its "n>n" label at the largest type the grid draws pads with (35 px at this height)
+    int padWidth() const
+    {
+        const int count = processor.getNumberRemotePeers();
+        const String widest = String(count) + ">" + String(count);
+        return jmax(60, SbTextFit::textWidth(Font(35.0f), widest) + 10 + 11);
+    }
+
     Rectangle<int> getPreferredBounds() const
     {
         int count = processor.getNumberRemotePeers();
-        int labwidth = 30;
+        int labwidth = numberColumnWidth();
         int labheight= 18;
-        int buttwidth = 60;
+        int buttwidth = padWidth();
         int buttheight = 44;
 
         Rectangle<int> prefsize;
@@ -172,7 +186,7 @@ public:
             topLabels.getUnchecked(i)->setVisible(i < count);
         }
         
-        int labwidth = 30;
+        int labwidth = numberColumnWidth();
         int labheight= 18;
         int buttheight = 36;
         
@@ -349,8 +363,8 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
         
         currConnectionInfo.userName = username.trim();
 
-        currConnectionInfo.serverHost = DEFAULT_SERVER_HOST;
-        currConnectionInfo.serverPort = DEFAULT_SERVER_PORT;
+        currConnectionInfo.serverHost = {};   // no built-in hub: the Private Stage field starts empty
+        currConnectionInfo.serverPort = DEFAULT_HUB_SERVER_PORT;
     }
 
     String lastusername = processor.getCurrentUsername().trim();
@@ -373,7 +387,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     
     mMainGroupLabel = std::make_unique<Label>("group", "");
     mMainGroupLabel->setJustificationType(Justification::centredLeft);
-    mMainGroupLabel->setFont(Font(21.0f, Font::bold));   // Header more visible (was 16)
+    mMainGroupLabel->setFont(Font(21.0f, Font::bold));   // Header more visible
     mMainGroupLabel->setEnabled(false);
     mMainGroupLabel->setTitle(TRANS("Stage Name"));
 
@@ -381,7 +395,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainUserLabel = std::make_unique<Label>("user", "");
     mMainUserLabel->setJustificationType(Justification::centredLeft);
     mMainUserLabel->setTitle(TRANS("Your Name"));
-    mMainUserLabel->setFont(17);   // Was 14
+    mMainUserLabel->setFont(17);
     mMainUserLabel->setEnabled(false);
 
     // What this player plays, in reach at all times; same stored value as the Connect panel's field
@@ -390,7 +404,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainInstrumentCombo->addItemList(ConnectView::instrumentChoices(), 1);
     mMainInstrumentCombo->setTextWhenNothingSelected(TRANS("Your instrument"));
     mMainInstrumentCombo->setTitle(TRANS("Your instrument"));
-    mMainInstrumentCombo->setTooltip(TRANS("What you play. Others see it in the player list and the Stages list."));
+    mMainInstrumentCombo->setTooltip(TRANS("What you play. Others see it in the player list and the Stages Directory."));
     mMainInstrumentCombo->getProperties().set("leadText", TRANS("Instrument"));   // small caption on top, value under it
     mMainInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
     mMainInstrumentCombo->onChange = [this] {
@@ -403,7 +417,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainPeerLabel = std::make_unique<Label>("peers", "");
     mMainPeerLabel->setTitle(TRANS("User Count"));
     mMainPeerLabel->setJustificationType(Justification::centred);
-    mMainPeerLabel->setFont(Font(24.0f, Font::bold));   // Player count, was 18
+    mMainPeerLabel->setFont(Font(24.0f, Font::bold));   // Player count
     mMainPeerLabel->setEnabled(false);
 
     mMainMessageLabel = std::make_unique<Label>("mesg", "");
@@ -1680,7 +1694,8 @@ void SonobusAudioProcessorEditor::configLevelSlider(Slider * slider)
     //slider->setVelocityModeParameters(2.5, 1, 0.05);
     //slider->setTextBoxStyle(Slider::NoTextBox, true, 40, 18);
     slider->setSliderStyle(Slider::SliderStyle::LinearHorizontal);
-    slider->setTextBoxStyle(Slider::TextBoxAbove, true, 50, 14);
+    // Room for the widest reading ("-60.0 dB", "-INF dB") with wider Windows fonts, so it never elides
+    slider->setTextBoxStyle(Slider::TextBoxAbove, true, 70, 14);
     slider->setMouseDragSensitivity(128);
     slider->setScrollWheelEnabled(false);
     //slider->setPopupDisplayEnabled(true, false, this);
@@ -1926,8 +1941,7 @@ bool SonobusAudioProcessorEditor::updatePeerState(bool force)
     if (force || retired || mPeerContainer->getPeerViewCount() != processor.getNumberRemotePeers()) {
         const double rebuildStartMs = Time::getMillisecondCounterHiRes();
         mPeerContainer->rebuildPeerViews();
-        mPeerContainer->updatePeerViews();   // The hub peer row survives
-                                             // with no view, so the counts never match and the else-branch below never ran
+        mPeerContainer->updatePeerViews();   // The hub peer has no row view, so this branch can run on every pass
         updateLayout();
         resized();
 
@@ -3154,13 +3168,16 @@ void SonobusAudioProcessorEditor::showMetConfig(bool flag)
         Component* dw = this; 
         
 #if JUCE_IOS || JUCE_ANDROID
-        const int defWidth = 250;
+        int defWidth = 250;
         const int defHeight = 96;
 #else
-        const int defWidth = 230; 
+        int defWidth = 230; 
         const int defHeight = 86;
 #endif
-        
+        // Wide enough for the knob captions and the sync buttons whole
+        int metNeed = 0;
+        for (auto & item : metBox.items) metNeed += (int) std::ceil(item.minWidth + item.margin.left + item.margin.right);
+        defWidth = jmax(defWidth, metNeed);
         
         wrap->setSize(jmin(defWidth, dw->getWidth() - 20), jmin(defHeight, dw->getHeight() - 24));
         
@@ -3203,13 +3220,17 @@ void SonobusAudioProcessorEditor::showEffectsConfig(bool flag)
         Component* dw = this; 
         
 #if JUCE_IOS || JUCE_ANDROID
-        const int defWidth = 260; 
+        int defWidth = 260; 
         const int defHeight = 154;
 #else
-        const int defWidth = 260; 
+        int defWidth = 260; 
         const int defHeight = 135;
 #endif
-        
+        // Wide enough for every knob caption and the reverb style name whole
+        int knobNeed = 0, headNeed = 0;
+        for (auto & item : reverbKnobBox.items) knobNeed += (int) std::ceil(item.minWidth + item.margin.left + item.margin.right);
+        for (auto & item : reverbCheckBox.items) headNeed += (int) std::ceil(item.minWidth + item.margin.left + item.margin.right);
+        defWidth = jmax(defWidth, knobNeed, headNeed);
         
         wrap->setSize(jmin(defWidth, dw->getWidth() - 20), jmin(defHeight, dw->getHeight() - 24));
         
@@ -3510,8 +3531,9 @@ void SonobusAudioProcessorEditor::refreshMainInstrument()
 
 void SonobusAudioProcessorEditor::fitTopBandToText()
 {
-    if (! mMainGroupLabel || ! mMainUserLabel || ! mMainInstrumentCombo) return;
-    const String text = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText();
+    if (! mMainGroupLabel || ! mMainUserLabel || ! mMainInstrumentCombo || ! mMainPeerLabel) return;
+    const String text = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText()
+                        + "\n" + String(mMainPeerLabel->getText().length());
     if (text == mTopBandText) return;
     updateLayout();   // stores the text
     resized();
@@ -3764,7 +3786,7 @@ void SonobusAudioProcessorEditor::showSettings(bool flag)
         int defWidth = 320;
         int defHeight = 420;
 #else
-        int defWidth = 340;
+        int defWidth = 560;    // wide enough for whole device and channel names (capped to the window below)
         int defHeight = 400;
 #endif
         
@@ -4326,6 +4348,10 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             if (ev.success) {
                 statstr = TRANS("Joined Stage: ") + ev.group;
 
+                // A password the hub accepted is kept for this stage, so the Stages Directory does not ask again
+                if (ev.group == currConnectionInfo.groupName && currConnectionInfo.groupPassword.isNotEmpty())
+                    processor.setSavedStagePassword(currConnectionInfo.serverHost, currConnectionInfo.serverPort, ev.group, currConnectionInfo.groupPassword);
+
                 //AccessibilityHandler::postAnnouncement(statstr, AccessibilityHandler::AnnouncementPriority::high);
 
                 showConnectPopup(false);
@@ -4396,7 +4422,10 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
                        #endif
 
                         mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
-                        if (auto * list = mConnectView->getStagesView()) list->showNotice(statstr);   // The reason shows on the STAGES tab too
+                        if (auto * list = mConnectView->getStagesView()) {
+                            list->showNotice(statstr);   // The reason shows on the STAGES tab too
+                            list->joinRefused(ev.group, ev.message);
+                        }
                     }
                 }
                 
@@ -4566,7 +4595,7 @@ void SonobusAudioProcessorEditor::showGroupMenu(bool show)
     items.add(GenericItemChooserItem(TRANS("VDO.Ninja Video Link..."), {}, nullptr, true));
     menuActions.push_back(kActVdoNinja);
 
-    if (!hostedMenu) {   // A hub serves ONE group chosen by its operator — nothing to suggest (banked for a public hub directory)
+    if (!hostedMenu) {   // A hub serves ONE group chosen by its operator — nothing to suggest
         items.add(GenericItemChooserItem(TRANS("Suggest New Stage..."), {}, nullptr, true));
         menuActions.push_back(kActSuggestGroup);
     }
@@ -4884,21 +4913,32 @@ void SonobusAudioProcessorEditor::resized()
     int narrowthresh = 690 ; // 644; // 588; //520;
     int rnarrowthresh = 380; // 588; //520;
 #endif
+    narrowthresh = jmax(narrowthresh, mWideMinWidth);   // the bottom row needs this much for its controls side by side
+    // The top band sits beside the input controls only while its stage, name and instrument show whole
+    int bandthresh = jmax(narrowthresh, mBandWholeWidth);
 
-
+    int sidePanels = 0;
     if (mChatView->isVisible()) {
-        narrowthresh += mChatView->getWidth();
+        sidePanels += mChatView->getWidth();
     }
 
     if (mSoundboardView->isVisible()) {
-       narrowthresh += mSoundboardView->getWidth();
+        sidePanels += mSoundboardView->getWidth();
     }
+    narrowthresh += sidePanels;
+    bandthresh += sidePanels;
 
     bool nownarrow = getWidth() < narrowthresh;
     if (nownarrow != isNarrow) {
         isNarrow = nownarrow;
         mPeerContainer->setNarrowMode(isNarrow);
         mInputChannelsContainer->setNarrowMode(isNarrow);
+        updateLayout();
+    }
+
+    bool nowstacked = getWidth() < bandthresh;
+    if (nowstacked != mBandStacked) {
+        mBandStacked = nowstacked;
         updateLayout();
     }
 
@@ -4938,7 +4978,10 @@ void SonobusAudioProcessorEditor::resized()
         }
     }
 
-    int soundboardwidth = processor.getLastSoundboardWidth();
+    // The soundboard panel is never narrower than its title and controls need
+    const int soundboardMinW = jmax(180, mSoundboardView->getMinimumWidth());
+    if (mSoundboardSizeConstrainer) mSoundboardSizeConstrainer->setMinimumWidth(soundboardMinW);
+    int soundboardwidth = jmax(soundboardMinW, processor.getLastSoundboardWidth());
     mSoundboardView->setBounds(getLocalBounds().removeFromRight(soundboardwidth));
 
     if (mSoundboardView->isVisible() || mAboutToShowSoundboard) {
@@ -5043,7 +5086,23 @@ void SonobusAudioProcessorEditor::resized()
     mConnectionTimeLabel->setBounds(mConnectButton->getBounds().removeFromBottom(20));   // Taller for the 16-pt counter
     
     if (mRecordingButton) {
-        mFileRecordingLabel->setBounds(mRecordingButton->getBounds().removeFromBottom(14).translated(0, 1));
+        // Centred under the record button, wider than it when an hour-long take needs the room
+        const auto recTimeBounds = mRecordingButton->getBounds().removeFromBottom(14).translated(0, 1);
+        mFileRecordingLabel->setBounds(recTimeBounds.withSizeKeepingCentre(jmax(recTimeBounds.getWidth(), SbTextFit::labelWidth(*mFileRecordingLabel, "0:00:00")),
+                                                                           recTimeBounds.getHeight()));
+    }
+
+    // A stage or own name cut short: both whole in the hover of the stage menu button that lies under them
+    {
+        const String linkTip = TRANS("Press for stage action menu");
+        const bool namesCut = mMainGroupLabel->isVisible() && (mMainGroupLabel->getWidth() < SbTextFit::labelWidth(*mMainGroupLabel)
+                                                               || mMainUserLabel->getWidth() < SbTextFit::labelWidth(*mMainUserLabel));
+        mMainLinkButton->setTooltip(namesCut ? mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n\n" + linkTip : linkTip);
+
+        const String instrumentTip = TRANS("What you play. Others see it in the player list and the Stages Directory.");
+        const String shown = mMainInstrumentCombo->getText().isNotEmpty() ? mMainInstrumentCombo->getText() : mMainInstrumentCombo->getTextWhenNothingSelected();
+        SbTextFit::tooltipIfCut(*mMainInstrumentCombo, shown + "\n\n" + instrumentTip,
+                                SbTextFit::textWidth(Font(15.0f * SonoLookAndFeel::getFontScale()), shown) + 22, instrumentTip);
     }
 
     mDrySlider->setMouseDragSensitivity(jmax(128, mDrySlider->getWidth()));
@@ -5099,6 +5158,13 @@ void SonobusAudioProcessorEditor::updateLayout()
     int mutew = 52;
     int inmixw = 74;
     int choicew = inmixw + mutew + 3;
+
+    // The Monitor and Out Level captions sit left of the value readout inside the slider's width:
+    // each slider is at least as wide as its caption plus the readout box
+    const int dryNeed = SbTextFit::labelWidth(*mDryLabel) + mDrySlider->getTextBoxWidth() - 3;
+    const int outNeed = SbTextFit::labelWidth(*mOutGainLabel) + mOutGainSlider->getTextBoxWidth() - 3;
+    const int inRightMin = jmax(minSliderWidth, 2*mutew + 16, 4 + dryNeed);
+    const int outSliderMin = jmax(minSliderWidth, outNeed);
 
     inGainBox.items.clear();
     inGainBox.flexDirection = FlexBox::Direction::row;
@@ -5167,7 +5233,7 @@ void SonobusAudioProcessorEditor::updateLayout()
     inputMainBox.items.add(FlexItem(4, 6).withMargin(0).withFlex(0));
     inputMainBox.items.add(FlexItem(inmeterwidth, minitemheight, inMeterBox).withMargin(0).withFlex(0));
     inputMainBox.items.add(FlexItem(4, 6).withMargin(0).withFlex(0));
-    inputMainBox.items.add(FlexItem(jmax(minSliderWidth, 2*mutew + 16), minitemheight + minitemheight +4, inputRightBox).withMargin(0).withFlex(1)) ; //.withMaxWidth(isNarrow ? 160 : 120));
+    inputMainBox.items.add(FlexItem(inRightMin, minitemheight + minitemheight +4, inputRightBox).withMargin(0).withFlex(1)) ; //.withMaxWidth(isNarrow ? 160 : 120));
 
     int minmainw = jmax(minPannerWidth, 2*mutew + 8) + inmeterwidth + jmax(minPannerWidth, 2*mutew + 8);
     
@@ -5178,7 +5244,7 @@ void SonobusAudioProcessorEditor::updateLayout()
     outputMainBox.items.add(FlexItem(4, 6).withMargin(0).withFlex(0));
     outputMainBox.items.add(FlexItem(toolwidth, minitemheight, *mEffectsButton).withMargin(0).withFlex(0));
     outputMainBox.items.add(FlexItem(4, 6).withMargin(0).withFlex(0));
-    outputMainBox.items.add(FlexItem(minSliderWidth, minitemheight, outBox).withMargin(0).withFlex(1)); //.withMaxWidth(isNarrow ? 160 : 120));
+    outputMainBox.items.add(FlexItem(outSliderMin, minitemheight, outBox).withMargin(0).withFlex(1)); //.withMaxWidth(isNarrow ? 160 : 120));
     outputMainBox.items.add(FlexItem(4, 6).withMargin(0).withFlex(0));
     outputMainBox.items.add(FlexItem(outmeterwidth, bottomRowH - 4, mainMeterBox).withMargin(0).withFlex(0));   // Tall output VU
     if (isNarrow) {
@@ -5186,6 +5252,8 @@ void SonobusAudioProcessorEditor::updateLayout()
     } else {
         outputMainBox.items.add(FlexItem(16, 6).withMargin(0).withFlex(0));        
     }
+    int outRowMin = 0;
+    for (auto & item : outputMainBox.items) outRowMin += (int) std::ceil(item.minWidth);
 
     
     paramsBox.items.clear();
@@ -5194,17 +5262,26 @@ void SonobusAudioProcessorEditor::updateLayout()
 
 
 
-    // Stage and name lines may elide down to a short stub; the instrument box beside them never goes below this
+    // Stage and name lines may elide down to a short stub (whole in the hover then)
     const int stageLabelMin = 40;
     const int stageBlockMin = iconwidth + 2 + stageLabelMin;
-    const int instrumentMinWidth = 110;   // placeholder and every listed instrument readable, never just "..."
+    // Placeholder and every listed instrument whole at the box's smallest, never just "..."
+    int instrumentMinWidth = 110;
+    {
+        const Font valueFont (15.0f * SonoLookAndFeel::getFontScale());
+        instrumentMinWidth = jmax(instrumentMinWidth, SbTextFit::textWidth(valueFont, mMainInstrumentCombo->getTextWhenNothingSelected()) + 24);
+        for (const auto & choice : ConnectView::instrumentChoices())
+            instrumentMinWidth = jmax(instrumentMinWidth, SbTextFit::textWidth(valueFont, choice) + 24);
+    }
     // What the stage, the own name and the instrument need to show in full: the band's free space goes to them first
-    mTopBandText = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText();
+    mTopBandText = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText()
+                   + "\n" + String(mMainPeerLabel->getText().length());
     const auto labelNeed = [] (Label & l) { return (int) std::ceil (l.getFont().getStringWidthFloat (l.getText())) + 11; };
     const int stageBlockNeed = jmax(stageBlockMin, iconwidth + 2 + jmax(labelNeed(*mMainGroupLabel), labelNeed(*mMainUserLabel)));
     const String instrumentText = mMainInstrumentCombo->getText().isNotEmpty() ? mMainInstrumentCombo->getText()
                                                                                : mMainInstrumentCombo->getTextWhenNothingSelected();
     const int instrumentNeed = jmax(instrumentMinWidth, (int) std::ceil (Font (15.0f).getStringWidthFloat (instrumentText)) + 24);
+    const int peerCountW = jmax(34, SbTextFit::labelWidth(*mMainPeerLabel));   // two-digit player counts whole
 
     mainGroupBox.items.clear();
     mainGroupBox.flexDirection = FlexBox::Direction::row;
@@ -5242,7 +5319,7 @@ void SonobusAudioProcessorEditor::updateLayout()
     mMainGroupLabel->setVisible(stageShown);
     mMainUserLabel->setVisible(stageShown);
     if (stageShown) {
-        mainGroupLayoutBox.items.add(FlexItem(34, minitemheight + 10, *mMainPeerLabel).withMargin(0).withFlex(0));
+        mainGroupLayoutBox.items.add(FlexItem(peerCountW, minitemheight + 10, *mMainPeerLabel).withMargin(0).withFlex(0));
         mainGroupLayoutBox.items.add(FlexItem(stageBlockMin, minitemheight + 10, mainGroupUserBox).withMargin(0).withFlex(1, 1, (float) stageBlockNeed));   // +10 px band
         mainGroupLayoutBox.items.add(FlexItem(4, 4));
     }
@@ -5250,7 +5327,8 @@ void SonobusAudioProcessorEditor::updateLayout()
     // way together, down to their minimums, only when the band has no more room
     mainGroupLayoutBox.items.add(FlexItem(instrumentMinWidth, minitemheight + 10, *mMainInstrumentCombo).withMargin(0).withFlex(0.35f, 1, (float) instrumentNeed).withMaxWidth((float) jmax(160, instrumentNeed)));
     const bool videoShown = processor.isConnectedToServer() && processor.getCurrentJoinedGroup().isNotEmpty() && !isReallyNarrow;
-    const int connectNeed = 1 + 2 * toolwidth + 4 + (stageShown ? 34 + stageBlockNeed + 4 : 0) + instrumentNeed + (videoShown ? 5 + toolwidth : 0);
+    const int connectNeed = 1 + 2 * toolwidth + 4 + (stageShown ? peerCountW + stageBlockNeed + 4 : 0) + instrumentNeed + (videoShown ? 5 + toolwidth : 0);
+    const int bandMin = 1 + 2 * toolwidth + 4 + (stageShown ? peerCountW + stageBlockMin + 4 : 0) + instrumentMinWidth + (videoShown ? 5 + toolwidth : 0);
     if (videoShown) {
         mainGroupLayoutBox.items.add(FlexItem(3, 4).withMargin(1).withFlex(0.0));
         mainGroupLayoutBox.items.add(FlexItem(toolwidth, minitemheight, *mVideoButton).withMargin(0).withFlex(0));
@@ -5274,27 +5352,41 @@ void SonobusAudioProcessorEditor::updateLayout()
     titleBox.flexDirection = FlexBox::Direction::row;
     titleBox.items.add(FlexItem(2, 20).withMargin(1).withFlex(0));
     titleBox.items.add(FlexItem(minitemheight - 8, minitemheight - 12, *mSettingsButton).withMargin(1).withMaxWidth(44).withFlex(0));
-    titleBox.items.add(FlexItem(132, 20, *mTitleLabel).withMargin(1).withFlex(0));
+    const int titleW = jmax(132, SbTextFit::labelWidth(*mTitleLabel));
+    titleBox.items.add(FlexItem(titleW, 20, *mTitleLabel).withMargin(1).withFlex(0));
     if (iaaConnected) {
         titleBox.items.add(FlexItem(4, 4).withMargin(1).withFlex(0.0));
         titleBox.items.add(FlexItem(minitemheight, minitemheight, *mIAAHostButton).withMargin(0).withFlex(0));
     }
     titleBox.items.add(FlexItem(4, 4).withMargin(1).withFlex(0.0));
-    titleBox.items.add(FlexItem(minButtonWidth, minitemheight, *mConnectButton).withMargin(0).withFlex(1));
+    // Both captions of the Connect button and the Stages caption whole
+    const int connectButtonW = jmax(minButtonWidth, SbTextFit::buttonWidth(*mConnectButton, minitemheight, TRANS("Connect...")),
+                                    SbTextFit::buttonWidth(*mConnectButton, minitemheight, TRANS("Disconnect")));
+    titleBox.items.add(FlexItem(connectButtonW, minitemheight, *mConnectButton).withMargin(0).withFlex(1));
     if (mStagesButton->isVisible()) {
         titleBox.items.add(FlexItem(4, 4).withMargin(1).withFlex(0.0));
-        titleBox.items.add(FlexItem(72, minitemheight, *mStagesButton).withMargin(0).withFlex(0));
+        titleBox.items.add(FlexItem(jmax(72, SbTextFit::buttonWidth(*mStagesButton, minitemheight)), minitemheight, *mStagesButton).withMargin(0).withFlex(0));
     }
+    int titleRowMin = 0;
+    for (auto & item : titleBox.items) titleRowMin += (int) std::ceil(item.minWidth + item.margin.left + item.margin.right);
+    // Narrowest the connect side can be before its title row or its band runs into the input controls
+    const int connectMin = jmax(280, titleRowMin, bandMin);
     // The globe "Connect to Other" button (stock SonoBus public-rooms browser) has no
     // meaning on a private hub; never shown.
     mAltConnectButton->setVisible(false);
 
     
+    // The input controls keep exactly what their own row needs (its items plus the 2-px margin)
+    const int paramsNeed = jmax(choicew + 4, 2*mutew + 16) + 4 + inmeterwidth + 4 + inRightMin + 4;
+    // Side by side only while the connect side shows its text whole beside the input controls (mainBox and item
+    // margins included); below that the two stack and each gets the full width
+    mBandWholeWidth = 6 + jmax(connectMin, connectNeed) + 4 + 1 + paramsNeed + 4;
+
     middleBox.items.clear();
-    int midboxminheight =  minitemheight * 2 + 8 ; //(knobitemheight + 4);
+    int midboxminheight =  minitemheight * 2 + 18;   // as tall as the connect side (title row and the taller band)
     int midboxminwidth = 296;
     
-    if (isNarrow) {
+    if (isNarrow || mBandStacked) {
         middleBox.flexDirection = FlexBox::Direction::column;
         middleBox.items.add(FlexItem(150, minitemheight*2 + 18, connectBox).withMargin(2).withFlex(0));   // +10 for the bigger group/user band
         middleBox.items.add(FlexItem(5, 2));
@@ -5311,10 +5403,9 @@ void SonobusAudioProcessorEditor::updateLayout()
 
     } else {
         middleBox.flexDirection = FlexBox::Direction::row;        
-        // The connect side asks for room for the stage, name and instrument box; the input controls keep exactly what
-        // their own row needs (its items plus the 2-px margin), so the connect side takes only their spare room.
-        const int paramsNeed = jmax(choicew + 4, 2*mutew + 16) + 4 + inmeterwidth + 4 + jmax(minSliderWidth, 2*mutew + 16) + 4;
-        middleBox.items.add(FlexItem(280, minitemheight*2+18 , connectBox).withMargin(2).withFlex(1.5, 1, (float) jmax(420, connectNeed)).withMaxWidth((float) jmax(470, connectNeed)));
+        // The connect side asks for room for the stage, name and instrument box and takes only the input controls'
+        // spare room
+        middleBox.items.add(FlexItem(connectMin, minitemheight*2+18 , connectBox).withMargin(2).withFlex(1.5, 1, (float) jmax(420, connectNeed, connectMin)).withMaxWidth((float) jmax(470, connectNeed, connectMin)));
         middleBox.items.add(FlexItem(1, 1).withMaxWidth(3).withFlex(0.5));
         middleBox.items.add(FlexItem(paramsNeed, minitemheight + minitemheight, paramsBox).withMargin(2).withFlex(4));
 
@@ -5333,40 +5424,52 @@ void SonobusAudioProcessorEditor::updateLayout()
     toolbarTextBox.items.add(FlexItem(40, minitemheight/2, *mMainStatusLabel).withMargin(0).withFlex(1));
 
 
+    // Metronome pop-up: knob captions and sync buttons whole (the pop-up is sized from these minimums)
+    const int metKnobW = jmax(minKnobWidth, SbTextFit::labelWidth(*mMetLevelSliderLabel), SbTextFit::labelWidth(*mMetTempoSliderLabel));
+    const int metSyncHostW = SbTextFit::buttonWidth(*mMetSyncButton, minitemheight);
+    const int metSyncFileW = SbTextFit::buttonWidth(*mMetSyncFileButton, minitemheight);
+    const int metSyncW = jmax(80, JUCEApplicationBase::isStandaloneApp() ? metSyncFileW : metSyncHostW + 2 + metSyncFileW);
+
     metVolBox.items.clear();
     metVolBox.flexDirection = FlexBox::Direction::column;
-    metVolBox.items.add(FlexItem(minKnobWidth, knoblabelheight, *mMetLevelSliderLabel).withMargin(0).withFlex(0));
+    metVolBox.items.add(FlexItem(metKnobW, knoblabelheight, *mMetLevelSliderLabel).withMargin(0).withFlex(0));
     metVolBox.items.add(FlexItem(minKnobWidth, minitemheight, *mMetLevelSlider).withMargin(0).withFlex(1));
 
     metTempoBox.items.clear();
     metTempoBox.flexDirection = FlexBox::Direction::column;
-    metTempoBox.items.add(FlexItem(minKnobWidth, knoblabelheight, *mMetTempoSliderLabel).withMargin(0).withFlex(0));
+    metTempoBox.items.add(FlexItem(metKnobW, knoblabelheight, *mMetTempoSliderLabel).withMargin(0).withFlex(0));
     metTempoBox.items.add(FlexItem(minKnobWidth, minitemheight, *mMetTempoSlider).withMargin(0).withFlex(1));
 
     metSendSyncBox.items.clear();
     metSendSyncBox.flexDirection = FlexBox::Direction::row;
     if (!JUCEApplicationBase::isStandaloneApp()) {
-        metSendSyncBox.items.add(FlexItem(40, minitemheight, *mMetSyncButton).withMargin(0).withFlex(1));
+        metSendSyncBox.items.add(FlexItem(metSyncHostW, minitemheight, *mMetSyncButton).withMargin(0).withFlex(1));
         metSendSyncBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0));
     }
-    metSendSyncBox.items.add(FlexItem(40, minitemheight, *mMetSyncFileButton).withMargin(0).withFlex(1));
+    metSendSyncBox.items.add(FlexItem(metSyncFileW, minitemheight, *mMetSyncFileButton).withMargin(0).withFlex(1));
 
 
     metSendBox.items.clear();
     metSendBox.flexDirection = FlexBox::Direction::column;
-    metSendBox.items.add(FlexItem(80, minitemheight, metSendSyncBox).withMargin(0).withFlex(0));
+    metSendBox.items.add(FlexItem(metSyncW, minitemheight, metSendSyncBox).withMargin(0).withFlex(0));
     metSendBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(1));
     metSendBox.items.add(FlexItem(60, minitemheight, *mMetSendButton).withMargin(0).withFlex(0));
 
     metBox.items.clear();
     metBox.flexDirection = FlexBox::Direction::row;
-    metBox.items.add(FlexItem(minKnobWidth, minitemheight, metTempoBox).withMargin(0).withFlex(1));
-    metBox.items.add(FlexItem(minKnobWidth, minitemheight, metVolBox).withMargin(0).withFlex(1));
+    metBox.items.add(FlexItem(metKnobW, minitemheight, metTempoBox).withMargin(0).withFlex(1));
+    metBox.items.add(FlexItem(metKnobW, minitemheight, metVolBox).withMargin(0).withFlex(1));
     metBox.items.add(FlexItem(3, 6).withMargin(0).withFlex(0));
-    metBox.items.add(FlexItem(80, minitemheight, metSendBox).withMargin(2).withFlex(1));
+    metBox.items.add(FlexItem(metSyncW, minitemheight, metSendBox).withMargin(2).withFlex(1));
 
     
-    // effects
+    // effects: every knob column as wide as the widest knob caption, the style choice as wide as its longest name
+    // (the pop-up is sized from these minimums)
+    const int revKnobW = jmax(jmax(minKnobWidth, SbTextFit::labelWidth(*mReverbPreDelayLabel), SbTextFit::labelWidth(*mReverbLevelLabel)),
+                              SbTextFit::labelWidth(*mReverbSizeLabel), SbTextFit::labelWidth(*mReverbDampingLabel));
+    const int revTitleW = jmax(minKnobWidth, SbTextFit::labelWidth(*mReverbTitleLabel));
+    const int revModelW = jmax(minKnobWidth, SbTextFit::widestText(Font(15.0f * SonoLookAndFeel::getFontScale()),
+                                                                   { TRANS("Freeverb"), TRANS("MVerb"), TRANS("Zita") }) + 22 + 10 + 2);
 
     reverbSizeBox.items.clear();
     reverbSizeBox.flexDirection = FlexBox::Direction::column;
@@ -5393,8 +5496,8 @@ void SonobusAudioProcessorEditor::updateLayout()
     reverbCheckBox.flexDirection = FlexBox::Direction::row;
     reverbCheckBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
     reverbCheckBox.items.add(FlexItem(minKnobWidth, minitemheight, *mReverbEnabledButton).withMargin(0).withFlex(0));
-    reverbCheckBox.items.add(FlexItem(minKnobWidth, minitemheight, *mReverbTitleLabel).withMargin(0).withFlex(2));
-    reverbCheckBox.items.add(FlexItem(minKnobWidth, minitemheight, *mReverbModelChoice).withMargin(0).withFlex(1));
+    reverbCheckBox.items.add(FlexItem(revTitleW, minitemheight, *mReverbTitleLabel).withMargin(0).withFlex(2));
+    reverbCheckBox.items.add(FlexItem(revModelW, minitemheight, *mReverbModelChoice).withMargin(0).withFlex(1));
     reverbCheckBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
 
 
@@ -5402,10 +5505,10 @@ void SonobusAudioProcessorEditor::updateLayout()
     reverbKnobBox.items.clear();
     reverbKnobBox.flexDirection = FlexBox::Direction::row;
     reverbKnobBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
-    reverbKnobBox.items.add(FlexItem(minKnobWidth, minitemheight, reverbPreDelayBox).withMargin(0).withFlex(1));
-    reverbKnobBox.items.add(FlexItem(minKnobWidth, minitemheight, reverbLevelBox).withMargin(0).withFlex(1));
-    reverbKnobBox.items.add(FlexItem(minKnobWidth, minitemheight, reverbSizeBox).withMargin(0).withFlex(1));
-    reverbKnobBox.items.add(FlexItem(minKnobWidth, minitemheight, reverbDampBox).withMargin(0).withFlex(1));
+    reverbKnobBox.items.add(FlexItem(revKnobW, minitemheight, reverbPreDelayBox).withMargin(0).withFlex(1));
+    reverbKnobBox.items.add(FlexItem(revKnobW, minitemheight, reverbLevelBox).withMargin(0).withFlex(1));
+    reverbKnobBox.items.add(FlexItem(revKnobW, minitemheight, reverbSizeBox).withMargin(0).withFlex(1));
+    reverbKnobBox.items.add(FlexItem(revKnobW, minitemheight, reverbDampBox).withMargin(0).withFlex(1));
     reverbKnobBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
 
     reverbBox.items.clear();
@@ -5440,7 +5543,8 @@ void SonobusAudioProcessorEditor::updateLayout()
 #else
     if (processor.getCurrentJoinedGroup().isEmpty() && processor.getNumberRemotePeers() > 1) {
         toolbarBox.items.add(FlexItem(6, 6).withMargin(1).withFlex(0.2));
-        toolbarBox.items.add(FlexItem(60, minitemheight, *mPatchbayButton).withMargin(2).withFlex(0.5).withMaxWidth(120));
+        const int patchbayW = jmax(60, SbTextFit::buttonWidth(*mPatchbayButton, minitemheight));
+        toolbarBox.items.add(FlexItem(patchbayW, minitemheight, *mPatchbayButton).withMargin(2).withFlex(0.5).withMaxWidth(jmax(120, patchbayW)));
     }
 #endif
 
@@ -5499,12 +5603,17 @@ void SonobusAudioProcessorEditor::updateLayout()
 
     if (!isNarrow) {
         toolbarBox.items.add(FlexItem(1, 5).withMargin(0).withFlex(0.1));
-        toolbarBox.items.add(FlexItem(120, bottomRowH, outputMainBox).withMargin(0).withFlex(1).withMaxWidth(390));   // Tall output VU
+        toolbarBox.items.add(FlexItem(jmax(120, outRowMin), bottomRowH, outputMainBox).withMargin(0).withFlex(1).withMaxWidth(jmax(390, outRowMin)));   // Tall output VU
         toolbarBox.items.add(FlexItem(6, 6).withMargin(0).withFlex(0));
     }
     else {    
         toolbarBox.items.add(FlexItem(14, 6).withMargin(0).withFlex(0));
     }
+    // The bottom row with the output controls in it has to fit side by side as well
+    int toolbarMin = 0;
+    for (auto & item : toolbarBox.items) toolbarMin += (int) std::ceil(item.minWidth + item.margin.left + item.margin.right);
+    if (isNarrow) toolbarMin += 1 + jmax(120, outRowMin - 5) + 6 - 14;
+    mWideMinWidth = toolbarMin;
     
 
     
@@ -5915,7 +6024,7 @@ public:
         r.removeFromTop(14);
         if (info.commit.isNotEmpty())
             g.drawText("Build " + info.commit + String::fromUTF8("  \u00b7  compiled ") + info.buildDate, r.removeFromTop(20), Justification::centredLeft);
-        g.drawText("Developed by Jason Buecker (Random Planet)", r.removeFromTop(20), Justification::centredLeft);   // base = the 1.7.2 release; shorter so it never truncates
+        g.drawText("Developed by Jason Buecker (Random Planet)", r.removeFromTop(20), Justification::centredLeft);
         g.drawText(String::fromUTF8("Hub mode  \u00b7  PCM 16-bit"), r.removeFromTop(20), Justification::centredLeft);
 
         r.removeFromTop(18);

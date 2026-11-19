@@ -9,6 +9,7 @@
 #include "SonobusPluginProcessor.h"
 #include "SonoLookAndFeel.h"
 #include "SonoDrawableButton.h"
+#include "SbTextFit.h"
 
 //==============================================================================
 /*
@@ -214,6 +215,14 @@ protected:
     #if JUCE_IOS
         //slider->setPopupDisplayEnabled(true, false, this);
     #endif
+    }
+
+    // Knob column wide enough for each caption above it on one line
+    static int knobColumnWidth (int minWidth, std::initializer_list<Label*> labels)
+    {
+        int w = minWidth;
+        for (auto* l : labels) w = jmax (w, SbTextFit::labelWidth (*l));
+        return w;
     }
 
     void configLabel(Label & label, bool bright=false) 

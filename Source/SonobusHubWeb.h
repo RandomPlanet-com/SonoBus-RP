@@ -29,9 +29,9 @@ public:
     int port() const { return mPort; }
     std::string statusJson() const;   // public for tests / the GUI path
     static std::string joinLink(const SonobusHubServer::UiSnapshot& s);
-    std::string removePlayerRequest(const std::string& body, bool& ok);   // POST /api/sessions/remove
+    std::string removePlayerRequest(const std::string& body, bool& ok);   // POST /api/sessions/removeplayer
     std::string removeSessionRequest(const std::string& body, bool& ok);   // POST /api/sessions/remove
-    static std::string joinLinkFor(const std::string& host, int port, const std::string& group, const std::string& password);   // // shared with the Mac GUI
+    static std::string joinLinkFor(const std::string& host, int port, const std::string& group, const std::string& password);   // shared with the Mac GUI
     void setUpdateCheck(sb_hub_gui::HubUpdateCheck* check) { mUpdateCheck = check; }   // call before start()
     void setGeoResolver(HubGeoResolver* shared) { mSharedGeo = shared; }   // Call before start
     void setLocation(std::string loc) { mLocation = std::move(loc); }   // Shown in the header
@@ -75,6 +75,7 @@ private:
     std::string licensesText() const;
     bool updateReady() const;
     std::string updateLine() const;
+    std::string updateInfoJson() const;
     std::string startUpdate(bool& ok);
     mutable std::mutex mSettingsLock;
     // One snapshot per second shared by every viewer (N browsers cost the same as one)

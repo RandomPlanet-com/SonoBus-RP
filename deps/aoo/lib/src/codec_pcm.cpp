@@ -232,8 +232,7 @@ static int plc_find_period(const codec *c, int ch, int srate)
     return bestLag * stride;
 }
 
-// Kill switch + observability. SB_PLC_OFF=1 disables concealment (stock
-// zero-fill) for A/B without rebuilds. Counters are process-wide totals,
+// Test switch: SB_PLC_OFF=1 disables concealment (zero-fill). Counters are process-wide totals,
 // exposed via aoo_pcm_plc_stats() for the host's stats surfaces.
 static bool plc_disabled(){
     static const bool off = [](){ const char* e = getenv("SB_PLC_OFF");
@@ -248,7 +247,7 @@ extern "C" void aoo_pcm_plc_stats(uint64_t* events, uint64_t* frames){
     if (frames) *frames = g_plcConcealFrames.load(std::memory_order_relaxed);
 }
 
-// SB_AOO_LOSS_FILL=0: a lost block is concealed the former way.
+// SB_AOO_LOSS_FILL=0: a lost block gets the pitch-period PLC above instead of the loss fill.
 extern "C" int32_t aoo_sb_loss_fill_on();
 
 // The lag (frames) at which the last sound repeats best: every fourth frame over 2 to 25 ms, then full rate around

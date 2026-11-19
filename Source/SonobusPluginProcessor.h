@@ -135,7 +135,7 @@ public:
         AutoNetBufferModeAutoFull,
         AutoNetBufferModeInitAuto,
         // Measure-commit-pin ("Smart Pin"): MEASURE with the AutoFull machinery for a bounded window, COMMIT to
-        // max(measured need, 8ms clean floor), then PIN: stop reacting to individual loss events; only sustained
+        // max(measured need, floor), then PIN: stop reacting to individual loss events; only sustained
         // underruns (>6/min over 60s) escalate one block. Must stay last: the mode persists as a plain int.
         AutoNetBufferModeMeasureCommitPin
     };
@@ -352,6 +352,7 @@ public:
     void setLaunchConnectRequested(bool flag) { mLaunchConnectRequested.store(flag); }
     bool isLaunchConnectRequested() const { return mLaunchConnectRequested.load(); }
     void sbLaunchConnectFailed(const char* why);
+    static bool launchRaceFixOn();   // SB_LAUNCH_RACE_FIX (default 1): launch connect is never undone by the rejoin chain
     // A user-initiated connect (Connect panel / recents) retries itself a few times when the aoo client refuses
     // connect() because it is still (dis)connecting, e.g. the auto-reconnect loop is mid-flight after a refused join.
     // Auto paths keep their own chains.
@@ -500,6 +501,10 @@ public:
 
     void addRecentServerConnectionInfo(const AooServerConnectionInfo & cinfo);
     void removeRecentServerConnectionInfo(int index);
+
+    // Stage passwords a hub accepted, by hub address and stage name; an empty password forgets it
+    String getSavedStagePassword(const String & host, int port, const String & stage);
+    void setSavedStagePassword(const String & host, int port, const String & stage, const String & password);
     int getRecentServerConnectionInfos(Array<AooServerConnectionInfo> & retarray);
     void clearRecentServerConnectionInfos();
 
@@ -598,14 +603,8 @@ public:
     std::map<String, uint32> mLastFeedReqMs;   // Per-sender dedup of /sb/hxfeedreq bursts
     void sendHubFeedReqForPeer(const String& senderUserName, int32_t ourIdForSender);
 
-    // The hub learns which local oursink id carries `senderUserName`'s feed only from the one-shot /sb/hxfeedreq
-    // above, and the AOO sink never re-requests a format for a compact-data source on its own. When a sender quits
-    // and rejoins, the listener's RemotePeer is recreated (new oursink, possibly a new ourId) while the hub keeps the
-    // deterministic feed source id; if the feedreq/format exchange is lost or lands on the stale binding, the row
-    // stays 0ch and deaf until the listener relaunches. This re-checks the row a few times after (re)creation and,
-    // while it has no format, re-invites, asks the source to resend /format and resends the feedreq (the hub re-binds
-    // old ourId -> new via allocateOrUpdateFeed). A row is also treated as unbound while RemotePeer::hostedFeedStale
-    // is set (hub disconnect seen, no fresh /format yet), so a hub restart recovers without a client relaunch.
+    // Re-checks a feed row a few times after it is (re)created. While it has no format, or hostedFeedStale is set,
+    // it re-invites, asks the source to resend /format and resends the feedreq (the hub re-binds the old ourId).
     // Message thread only; no-op once recvChannels > 0 or the row is gone.
     void scheduleHostedFeedRebind(const String& senderUserName, int32_t ourIdForSender, int attempt = 0);
 
@@ -701,6 +700,7 @@ public:
 
     int64_t getRemotePeerBytesReceived(int index) const;
     int64_t getRemotePeerStreamBytesReceived(int index) const;   // This peer's OWN stream (per AOO source), not the shared hub socket
+    int64_t getRemotePeerStreamPayloadBytesReceived(int index) const;   // The same stream's audio payload only (no headers)
     bool getRemotePeerHubStats(int index, float & rttMs, float & upKbps) const;   // Their ping + uplink rate (hub-reported)
     int64_t getRemotePeerBytesSent(int index) const;
 
@@ -1361,10 +1361,9 @@ private:
     float mLastInMonPan1 = -1.0f;
     float mLastInMonPan2 = 1.0f;
     bool mLastMetEnabled = false;
-    bool mLastMainReverbEnabled = false;
     bool mReverbParamsChanged = false;
-    bool mLastHasMainFx = false;
-    bool mLastInputReverbEnabled = false;
+    SonoAudio::FxFade mMainReverbFade;
+    SonoAudio::FxFade mInputReverbFade;
     bool mFreshInit = true;
     
     Atomic<bool>   mAnythingSoloed  { false };
@@ -1373,8 +1372,7 @@ private:
     int defaultAutoNetbufMode = AutoNetBufferModeAutoFull;
 
     // HostedMix unified receive-buffer policy state (see setUnifiedReceiveBufferTime). One shared network path -> one
-    // value + one auto mode for every remote sink. Persisted via extraTree. Default matches the hosted feed-buffer
-    // floor (8 ms, the lowest clean value on LAN).
+    // value + one auto mode for every remote sink. Persisted via extraTree.
     float mUnifiedReceiveBufferMs = 8.0f;
     // Hosted-mode default is measure-commit-pin, because continuous AutoFull rises quickly and falls slowly. P2P uses
     // defaultAutoNetbufMode above.
@@ -1383,9 +1381,8 @@ private:
     // straight at mUnifiedReceiveBufferMs. Cleared by any manual unified buffer/mode set. Persisted via extraTree.
     bool mUnifiedMcpPinned = false;
 
-    // Measure-commit-pin floor (ms), the clean threshold by listening (8 ms clean, 6 near, 4 edge). The commit value
-    // is never pinned below this.
-    float mMcpPinFloorMs = 2.67f;   // tested default
+    // Measure-commit-pin floor (ms): the commit value is never pinned below this.
+    float mMcpPinFloorMs = 2.67f;
     // SB_MCP_RESET_PIN=1 for this process: every persisted pin (per-peer cache entries and the hosted unified flag)
     // is discarded at load, so every peer re-MEASUREs from the floor this launch.
     bool  mMcpResetPinTap = false;
@@ -1493,7 +1490,6 @@ private:
     // mPeerStateCacheMap.
     struct HubMixOverrideCache { bool muted = false; float gain = 1.0f; bool soloed = false; bool mutedBeforeMuteAll = false; /* Restored when Mute Everyone is released */ };
     std::map<String, HubMixOverrideCache> mHubMixOverrides;
-    // 
     Atomic<int>      mInternalRecvMuteToggle { 0 };   // 1 while the block-size "reset all incoming" trick flips mastrecvmute (not a user mute)
     std::set<String> mMuteAllHubMuted;                 // senders WE hub-muted for Mute Everyone (restored on release; row edits during it opt out)
     bool             mInMuteAllApply = false;
@@ -1666,6 +1662,7 @@ private:
 
     Array<AooServerConnectionInfo> mRecentConnectionInfos;
     CriticalSection  mRecentsLock;
+    StringPairArray mSavedStagePasswords { false };   // "host:port\nstage" -> password, kept with the recents
     
     AooServerConnectionInfo mPendingReconnectInfo;
     bool mPendingReconnect = false;
@@ -1779,7 +1776,7 @@ private:
     zitaRev mZitaReverb;
     MapUI  mZitaControl;
 
-    ReverbModel mLastReverbModel = ReverbModelMVerb;
+    ReverbModel mLastReverbModel = ReverbModelMVerb;   // the model in use
 
     // input reverb
     MVerbFloat mInputReverb;

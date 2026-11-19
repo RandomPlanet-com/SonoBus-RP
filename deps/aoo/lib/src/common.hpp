@@ -154,6 +154,7 @@ struct data_packet {
     int32_t framenum;
     const char *data;
     int32_t size;
+    int32_t wiresize = 0;   // UDP payload of the datagram that carried it, 0 = unknown
 };
 
 class block {

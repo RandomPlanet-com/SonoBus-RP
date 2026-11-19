@@ -33,7 +33,7 @@ void SonoChoiceButton::addItem(const String & name, int ident, bool separator, b
 {
     items.add(GenericItemChooserItem(name, Image(), nullptr, separator, disabled));
     idList.add(ident);
-    repaint(); // Keeps paint correct now that setSelectedItemIndex only repaints on change
+    repaint(); // setSelectedItemIndex repaints only on a change
 }
 
 void SonoChoiceButton::addItem(const String & name, int ident, const Image & newItemImage, bool separator, bool disabled)
@@ -46,12 +46,7 @@ void SonoChoiceButton::addItem(const String & name, int ident, const Image & new
 
 void SonoChoiceButton::setSelectedItemIndex(int index, NotificationType notification)
 {
-    // The periodic view refresh calls
-    // setSelectedId() on every choice button each tick with an unchanged
-    // value; this used to repaint the whole button unconditionally. Now only
-    // a real selection change repaints (Label::setText already no-ops on
-    // equal text). Item-list mutations repaint themselves (see above) so the
-    // image/arrow paint stays correct.
+    // Repaints only on a real change: the periodic view refresh calls this every tick with an unchanged value.
     const bool changed = (selIndex != index);
 
     selIndex = index;

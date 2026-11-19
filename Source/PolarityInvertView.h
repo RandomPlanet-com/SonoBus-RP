@@ -11,6 +11,7 @@
 #include "EffectsBaseView.h"
 #include "EffectParams.h"
 #include "SonoChoiceButton.h"
+#include "SbTextFit.h"
 
 #include "SonobusPluginProcessor.h"
 
@@ -79,7 +80,8 @@ public:
         //checkBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(enablewidth, minitemheight, enableButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0));
-        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(120));
+        const int titleW = jmax(100, SbTextFit::labelWidth(titleLabel));   // the title whole
+        checkBox.items.add(FlexItem(titleW, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(jmax(120, titleW)));
         //checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
         if (showDragIcon) {
             checkBox.items.add(FlexItem(24, minitemheight, dragButton).withMargin(0).withFlex(0));

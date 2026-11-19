@@ -256,8 +256,7 @@ public:
         }
 
         int dir = 0;
-        // On virtual machines a 4-period buffer (2.7 ms at 32 samples) underruns on every scheduling
-        // hiccup and the recovery stalls audio for ~1 s. SB_ALSA_PERIODS=<n> (test nodes: 32) widens it; default unchanged.
+        // SB_ALSA_PERIODS=<n> (2..256) widens the ALSA buffer for hosts with scheduling hiccups; default 4 periods.
         unsigned int periods = 4;
         if (const char* e = getenv ("SB_ALSA_PERIODS"); e != nullptr && atoi (e) >= 2 && atoi (e) <= 256)
             periods = (unsigned int) atoi (e);

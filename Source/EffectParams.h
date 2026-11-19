@@ -29,6 +29,17 @@ struct CompressorParams
 
 
 
+// The noise gate uses the compressor's parameter set with its own defaults
+inline CompressorParams gateDefaultParams()
+{
+    CompressorParams p;
+    p.thresholdDb = -60.0f;
+    p.ratio = 2.0f;
+    p.attackMs = 1.0f;
+    p.releaseMs = 200.0f;
+    return p;
+}
+
 struct ParametricEqParams
 {
     ValueTree getValueTree() const;

@@ -41,14 +41,14 @@ project(SonoBus VERSION 1.7.2)
 include(CTest)
 enable_testing()
 
-set(BETA_VERSION_SUFFIX "")   # the base IS Jesse's 1.7.2 release; "b02" was our own March label and the About window mis-reported it as the upstream version
+set(BETA_VERSION_SUFFIX "")   # the base is the upstream 1.7.2 release, no suffix
 set(DISPLAY_VERSION "${PROJECT_VERSION}${BETA_VERSION_SUFFIX}")
 # the hub server is OURS — its own version line, independent of upstream SonoBus 1.7.2.
 # Shown on the web page / About as "Hub 1.0.0 (build <commit>, <date>)". Bump here on hub releases.
 # Apple-style versioning — marketing version (CFBundleShortVersionString) + date build id
 # (CFBundleVersion, stamped by the release scripts as YYYY.MM.DD.HHMM). The updater keeps comparing the DATE build.
-set(SONOBUS_PLUS_VERSION "1.3.4")
-set(SONOBUS_HUB_VERSION "1.3.3")
+set(SONOBUS_PLUS_VERSION "1.3.5")
+set(SONOBUS_HUB_VERSION "1.3.4")
 # the client's date build id + source commit as compile-time defines for platforms
 # without an Info.plist (Windows/Linux). Mac bundles still read CFBundleVersion/SBPlusCommit stamped at release.
 #   -DSONOBUS_PLUS_BUILD=YYYY.MM.DD.HHMM[-dev]   (a build script passes the configure time)
@@ -336,8 +336,6 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         Source/PeersContainerView.cpp
         Source/PeersContainerView.h
         Source/PolarityInvertView.h
-        Source/RandomSentenceGenerator.cpp
-        Source/RandomSentenceGenerator.h
         Source/ReverbSendView.h
         Source/ReverbView.h
         Source/RunCumulantor.cpp
@@ -502,11 +500,8 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         # Uncaught C++ exceptions on the message thread call unhandledException() (logged +
         # breadcrumb file, see SonoStandaloneFilterApp.cpp) instead of aborting with no type.
         JUCE_CATCH_UNHANDLED_EXCEPTIONS=1
-        # without this, JUCE's macOS peer paints
-        # the UNION of all dirty rects per frame (macOS >=10.13 no longer supplies
-        # sub-rects), so two level meters at opposite ends of a row re-composite
-        # the whole row 8x/s. With it, JUCE 7 uses CoreGraphicsMetalLayerRenderer
-        # and paints each dirty rect separately (falls back gracefully w/o Metal).
+        # Paint each dirty rect separately; otherwise macOS repaints the union of all dirty rects
+        # (two meters at the ends of a row repaint the whole row).
         JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS=1
         JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
 	JUCE_USE_WINDOWS_MEDIA_FORMAT=1
@@ -529,7 +524,6 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         ${PLAT_COMPILE_DEFS} )
 
     juce_add_binary_data("${target_name}_SBData" SOURCES
-        Source/wordmaker.g
         Source/GoNotoKurrent-Regular.ttf
 	Source/DejaVuSans.ttf
         localization/localized_de.txt
@@ -554,7 +548,6 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         images/chevron_forward.svg
         images/continue.svg
         images/copy_icon.svg
-        images/dice_icon_128.png
         images/dispfull.svg
         images/dispminimal.svg
         images/dots.svg
@@ -677,9 +670,8 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
             
 endfunction()
 
-# release identity — "SonoBus RP", com.randomplanet.SonoBusRP. A new bundle id means macOS asks
-# Local Network / microphone once more on every machine (wanted: the stale Beta rules on RP never prompted again) and
-# the app is no longer tied to the stock SonoBus or the Beta era. Settings migrate from the Beta file on first launch.
+# release identity — "SonoBus RP", com.randomplanet.SonoBusRP. A new bundle id means macOS asks for
+# Local Network / microphone once more on every machine. Settings migrate from the Beta file on first launch.
 set(SONOBUS_MAIN_PRODUCT_NAME "SonoBus RP")
 set(SONOBUS_MAIN_BUNDLE_ID "com.randomplanet.SonoBusRP")
 set(SONOBUS_INST_BUNDLE_ID "com.Sonosaurus.SonoBusInstrument")
@@ -762,19 +754,10 @@ if (BUILD_TESTING)
     set_tests_properties(HostedPathErrorHandlingTests PROPERTIES LABELS "hosted;error-handling")
 endif()
 
-if (APPLE)   # the hub is macOS-only (mach timing, bundle stamping); Linux/Windows build the player only
-# ─── SonoBus RP Hub Server (Jamulus-style GUI + headless via --nogui) ───
-# Built as a Mac .app bundle so it can be launched via `open -a` on the hub
-# host (the Mac the hub shares with a player). Inner binary stays callable as
-# SonoBus-Hub.app/Contents/MacOS/SonoBus-Hub --nogui for existing launchd /
-# restart-hub*.sh scripts.
-# re-introduce JUCE GUI build
-# but with CoutTee install gated off — isolates whether the prior /sb/hxfeedreq
-# dispatch regression was caused by (a) CoutTee streambuf interception of
-# std::cout/std::cerr from AOO threads, or (b) juce::JUCEApplicationBase::main
-# event-loop integration. If dispatch works with CoutTee disabled, (a) is the
-# culprit. Built as a GUI app bundle; --nogui still runs the pure headless
-# code path verbatim from SonobusHubMain.cpp::runHeadless.
+if (APPLE)   # the Mac hub (mach timing, bundle stamping); the Linux and Windows hubs follow below
+# ─── SonoBus RP Hub Server (status window + headless via --nogui) ───
+# A Mac .app bundle, launched via `open -a`. The inner binary with --nogui runs the headless
+# code path (SonobusHubMain.cpp::runHeadless).
 juce_add_gui_app(SonoBusHub
     PRODUCT_NAME "sonobus-hub"
     COMPANY_NAME "Random Planet"   # the hub is Random Planet's own product (the client keeps Sonosaurus)
@@ -784,10 +767,8 @@ juce_add_gui_app(SonoBusHub
     # GUI's teal palette (images/make_hub_icon.py regenerates it from sonobus_icon_mac_1024.png).
     ICON_BIG "images/sonobus_hub_icon_mac_1024.png"
     ICON_SMALL "images/sonobus_hub_icon_mac_256.png"
-    # the hub opens no audio device, so macOS saw an idle
-    # background GUI app and App-Napped it whenever its window lost focus —
-    # recv thread demoted, hub sinks starved, relay collapsed until refocused
-    #. Plist key = belt; disableAppNap() at startup = suspenders.
+    # The hub opens no audio device, so macOS would App-Nap it when its window loses focus and starve
+    # the receive thread. LSAppNapIsDisabled here, plus disableAppNap() at startup.
     # Finder/Dock/menu-bar name "SonoBus RP Hub" (executable + artefact stay sonobus-hub)
     PLIST_TO_MERGE "<plist version=\"1.0\"><dict><key>NSLocalNetworkUsageDescription</key><string>SonoBus RP Hub relays audio to players on your local network.</string><key>LSAppNapIsDisabled</key><true/><key>CFBundleDisplayName</key><string>SonoBus RP Hub</string><key>CFBundleName</key><string>SonoBus RP Hub</string><key>CFBundleShortVersionString</key><string>${SONOBUS_HUB_VERSION}</string><key>SBPlusUpstreamBase</key><string>${PROJECT_VERSION}</string></dict></plist>"
 )
@@ -835,15 +816,13 @@ target_sources(SonoBusHub PRIVATE
 )
 
 if(APPLE)
-    # the stock disableAppNap helper lived only in the
-    # client build; the hub never linked it (App Nap starvation, see above).
     # The hub uses its own hubDisableAppNap instead of CrossPlatformUtilsMac.mm
     # (the client target above keeps the original file).
     target_sources(SonoBusHub PRIVATE Source/SonobusHubMacUtils.mm Source/SonobusHubMacUtils.h)
 endif()
 
 juce_generate_juce_header(SonoBusHub)
-# renamed the hub shows as "SonoBus RP Hub" in Finder / Dock / menu bar. The
+# The hub shows as "SonoBus RP Hub" in Finder / Dock / menu bar. The
 # executable and the artefact stay "sonobus-hub" (deploy scripts, pgrep patterns and the on-disk bundle path key on it).
 add_custom_command(TARGET SonoBusHub POST_BUILD
     COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName SonoBus RP Hub" "$<TARGET_BUNDLE_DIR:SonoBusHub>/Contents/Info.plist"
@@ -876,7 +855,6 @@ target_compile_definitions(SonoBusHub PRIVATE
 )
 
 target_link_libraries(SonoBusHub PRIVATE
-    # restored juce_gui_basics/extra/graphics.
     juce::juce_gui_extra
     juce::juce_gui_basics
     juce::juce_graphics
@@ -890,7 +868,7 @@ if (APPLE)
     find_library(COREFOUNDATION CoreFoundation)
     target_link_libraries(SonoBusHub PRIVATE opus ${COREFOUNDATION})
     # No "-framework AVFoundation" (only CrossPlatformUtilsMac.mm's microphone request needed it):
-    # the hub no longer compiles that file; Foundation/AppKit come via JUCE.
+    # the hub does not compile that file; Foundation/AppKit come via JUCE.
 elseif (WIN32)
     target_link_libraries(SonoBusHub PRIVATE opus ws2_32)
 else()
@@ -940,6 +918,69 @@ target_include_directories(SonoBusHub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/a
 target_compile_definitions(SonoBusHub PRIVATE USE_CODEC_OPUS=1 AOO_TIMEFILTER_CHECK=0 AOO_STATIC SONOBUS_HUB_NOGUI=1 SONOBUS_HUB_WEB_VERSION="${DISPLAY_VERSION}" SONOBUS_HUB_VERSION="${SONOBUS_HUB_VERSION}" SONOBUS_HUB_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_HUB_COMMIT="${SONOBUS_HUB_COMMIT}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=0)
 target_link_libraries(SonoBusHub PRIVATE juce::juce_core juce::juce_events juce::juce_data_structures juce::juce_recommended_config_flags opus pthread)   # data_structures for the layout ValueTree
 endif()   # Linux hub
+
+# WINDOWS HUB — the Mac hub's window (default) and the headless mode (--nogui, web status page). Executable sonobus-hub.exe.
+if (WIN32)
+juce_add_gui_app(SonoBusHub
+    PRODUCT_NAME "sonobus-hub"
+    COMPANY_NAME "Random Planet"
+    COMPANY_COPYRIGHT "Copyright 2026 Jason Buecker (Random Planet)"   # ASCII for the resource file
+    VERSION "${SONOBUS_HUB_VERSION}"   # file properties show the hub version
+    ICON_BIG "images/sonobus_hub_icon_mac_1024.png"
+    ICON_SMALL "images/sonobus_hub_icon_mac_256.png")
+juce_add_binary_data(SonoBusHubData HEADER_NAME HubBinaryData.h NAMESPACE HubBinaryData SOURCES images/sonobus_hub_icon_mac_256.png)
+target_link_libraries(SonoBusHub PRIVATE SonoBusHubData)
+target_sources(SonoBusHub PRIVATE
+    Source/SonobusHubMain.cpp
+    Source/SonobusHubMainWindow.cpp
+    Source/SonobusHubMainWindow.h
+    Source/SonobusHubServer.cpp
+    Source/SonobusHubServer.h
+    Source/SonobusHubSettings.cpp
+    Source/SonobusHubSettings.h
+    Source/SonobusHubWeb.cpp
+    Source/SonobusHubWeb.h
+    Source/SonobusHubGeo.cpp
+    Source/SonobusHubGeo.h
+    Source/SonobusHubUpdater.cpp
+    Source/SonobusHubUpdater.h
+    Source/SonobusHubDirectory.cpp
+    Source/SonobusHubDirectory.h
+    Source/SonobusHubLayout.cpp
+    Source/SonobusHubLayout.h
+    Source/SonobusHubWebIcon.h
+    Source/SonobusHubCompat.h
+    deps/aoo/lib/src/source.cpp
+    deps/aoo/lib/src/sink.cpp
+    deps/aoo/lib/src/common.cpp
+    deps/aoo/lib/src/sync.cpp
+    deps/aoo/lib/src/time.cpp
+    deps/aoo/lib/src/net_utils.cpp
+    deps/aoo/lib/src/client.cpp
+    deps/aoo/lib/src/server.cpp
+    deps/aoo/lib/src/codec_opus.cpp
+    deps/aoo/lib/src/codec_pcm.cpp
+    deps/aoo/deps/md5/md5.c
+    deps/aoo/deps/oscpack/osc/OscOutboundPacketStream.cpp
+    deps/aoo/deps/oscpack/osc/OscPrintReceivedElements.cpp
+    deps/aoo/deps/oscpack/osc/OscReceivedElements.cpp
+    deps/aoo/deps/oscpack/osc/OscTypes.cpp
+)
+juce_generate_juce_header(SonoBusHub)
+target_include_directories(SonoBusHub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/aoo/lib ${CMAKE_CURRENT_SOURCE_DIR}/deps/aoo/deps ${CMAKE_CURRENT_SOURCE_DIR}/deps/windows)
+target_link_directories(SonoBusHub PRIVATE $<$<CONFIG:Debug>:${CMAKE_CURRENT_SOURCE_DIR}/deps/windows/Debug> $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/deps/windows/Release>)
+target_compile_definitions(SonoBusHub PRIVATE _USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+# SONOBUS_PLUS_BUILD / _COMMIT: the About window reads them where a Mac reads Info.plist
+target_compile_definitions(SonoBusHub PRIVATE USE_CODEC_OPUS=1 AOO_TIMEFILTER_CHECK=0 AOO_STATIC SONOBUS_HUB_WEB_VERSION="${DISPLAY_VERSION}" SONOBUS_HUB_VERSION="${SONOBUS_HUB_VERSION}" SONOBUS_HUB_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_HUB_COMMIT="${SONOBUS_HUB_COMMIT}" SONOBUS_PLUS_BUILD="${SONOBUS_HUB_BUILD}" SONOBUS_PLUS_COMMIT="${SONOBUS_HUB_COMMIT}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_DISPLAY_SPLASH_SCREEN=0)
+target_link_libraries(SonoBusHub PRIVATE juce::juce_gui_extra juce::juce_gui_basics juce::juce_graphics juce::juce_events juce::juce_core juce::juce_data_structures juce::juce_cryptography juce::juce_recommended_config_flags opus ws2_32 iphlpapi winmm avrt)   # cryptography: the update checksum
+# A windowed program that keeps the standard main(); the headless mode attaches to the console it was started from.
+target_link_options(SonoBusHub PRIVATE /ENTRY:mainCRTStartup)
+set_target_properties(SonoBusHub PROPERTIES OUTPUT_NAME "sonobus-hub")
+# third-party notices next to the program (the About window points at them)
+add_custom_command(TARGET SonoBusHub POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LICENSES-HUB.txt" "$<TARGET_FILE_DIR:SonoBusHub>/LICENSES-HUB.txt"
+    COMMENT "Copying LICENSES-HUB.txt next to sonobus-hub.exe")
+endif()   # Windows hub
 
 # Auto-sign standalone app bundles after build, when the developer's signing script is present
 if (APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sign_sonobus_apps.sh")

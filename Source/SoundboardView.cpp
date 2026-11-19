@@ -8,6 +8,7 @@
 #include "SoundboardView.h"
 #include "SoundboardEditView.h"
 #include "SampleEditView.h"
+#include "SbTextFit.h"
 
 SoundboardView::SoundboardView(SonobusAudioProcessor& audioproc, SoundboardChannelProcessor* channelProcessor, File supportDir)
         : audioProcessor(audioproc), processor(std::make_unique<SoundboardProcessor>(channelProcessor, supportDir))
@@ -259,6 +260,29 @@ void SoundboardView::updateSoundboardSelector()
     if (selectedIndex.has_value()) {
         mBoardSelectComboBox->setSelectedItemIndex(*selectedIndex);
     }
+    updateBoardSelectorTooltip();
+}
+
+void SoundboardView::updateBoardSelectorTooltip()
+{
+    // Board names are the user's: when the selector cannot show the name whole, the hover shows it
+    if (mBoardSelectComboBox == nullptr) return;
+    const auto name = mBoardSelectComboBox->getCurrentText();
+    SbTextFit::tooltipIfCut(*mBoardSelectComboBox, name, SbTextFit::textWidth(Font(15.0f), name) + 22 + 10);
+}
+
+int SoundboardView::getMinimumWidth() const
+{
+    int titleRow = 0;
+    for (auto & item : titleBox.items)
+        titleRow += (int) (item.minWidth + item.margin.left + item.margin.right);
+    titleRow += SbTextFit::labelWidth(*mTitleLabel) - (int) TITLE_LABEL_WIDTH;   // the title at its measured width
+
+    int controlRow = 4;   // the row's own margin
+    for (auto & item : controlsBox.items)
+        controlRow += (int) (item.minWidth + item.margin.left + item.margin.right);
+
+    return jmax(titleRow, controlRow) + 4;   // the panel's border
 }
 
 void SoundboardView::updateButton(SonoPlaybackProgressButton * playbackButton, SoundSample & sample)
@@ -862,13 +886,15 @@ void SoundboardView::clickedEditSoundSample(Component& button, SoundSample& samp
 
     content->setSize((int)SampleEditView::DEFAULT_VIEW_WIDTH, (int)SampleEditView::DEFAULT_VIEW_HEIGHT); // first time to calculate
 
-    wrap->setSize(jmin((int)SampleEditView::DEFAULT_VIEW_WIDTH, dw->getWidth() - 10), jmin((int)content->getMinimumContentHeight(), dw->getHeight() - 24));
+    // At least as wide as its option row needs, so no caption is cut
+    const int editWidth = jmax((int)SampleEditView::DEFAULT_VIEW_WIDTH, content->getMinimumContentWidth());
+    wrap->setSize(jmin(editWidth, dw->getWidth() - 10), jmin((int)content->getMinimumContentHeight(), dw->getHeight() - 24));
 
 
 
     wrap->setViewedComponent(content.get(), true); // viewport now owns sampleeditview
 
-    content->setSize(wrap->getWidth() - (wrap->isVerticalScrollBarShown() ? wrap->getScrollBarThickness() : 0), (int)content->getMinimumContentHeight());
+    content->setSize(jmax(content->getMinimumContentWidth(), wrap->getWidth() - (wrap->isVerticalScrollBarShown() ? wrap->getScrollBarThickness() : 0)), (int)content->getMinimumContentHeight());
 
     content.release();
 
@@ -935,6 +961,7 @@ void SoundboardView::resized()
 
     mainBox.performLayout(getLocalBounds().reduced(2));
     buttonBox.performLayout(buttonContainer.getLocalBounds().reduced(2,0));
+    updateBoardSelectorTooltip();
 }
 
 bool SoundboardView::processKeystroke(const KeyPress& keyPress)
@@ -999,6 +1026,7 @@ void SoundboardView::choiceButtonSelected(SonoChoiceButton* choiceButton, int in
 {
     processor->selectSoundboard(index);
     rebuildButtons();
+    updateBoardSelectorTooltip();
 }
 
 void SoundboardView::choiceButtonEmptyClick(SonoChoiceButton* choiceButton)

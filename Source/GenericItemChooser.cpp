@@ -29,7 +29,7 @@ CallOutBox& GenericItemChooser::launchPopupChooser(const Array<GenericItemChoose
     if (maxheight > 0) {
         chooser->setMaxHeight(maxheight);        
     }
-    
+    chooser->fitWithin(targetComponent);
     
     CallOutBox & box = CallOutBox::launchAsynchronously (std::move(chooser), targetBounds, targetComponent, false);
     box.setDismissalMouseClicksAreAlwaysConsumed(true);
@@ -53,6 +53,7 @@ CallOutBox& GenericItemChooser::launchPopupChooser(const Array<GenericItemChoose
     if (maxheight > 0) {
         chooser->setMaxHeight(maxheight);
     }
+    chooser->fitWithin(targetComponent);
 
     CallOutBox & box = CallOutBox::launchAsynchronously (std::move(chooser), targetBounds, targetComponent);
     box.setDismissalMouseClicksAreAlwaysConsumed(true);
@@ -149,6 +150,25 @@ int GenericItemChooser::getAutoWidth()
     return targw + 30;
 }
 
+
+// The pop-up box adds its border on each side; rows that no longer fit end in "..." with the full text in the hover
+void GenericItemChooser::fitWithin (const Component * area)
+{
+    if (area == nullptr) return;
+    const int maxw = area->getWidth() - 2 * 20 - 8;
+    if (maxw > 0 && getWidth() > maxw) {
+        setSize(jmax(120, maxw), getHeight());
+    }
+}
+
+String GenericItemChooser::getTooltipForRow (int rowNumber)
+{
+    if (rowNumber < 0 || rowNumber >= items.size()) return {};
+    const auto & item = items.getReference(rowNumber);
+    const int imagewidth = item.image.isValid() ? rowHeight - 8 : 0;
+    const int room = table.getVisibleRowWidth() - (imagewidth + 8);
+    return font.getStringWidthFloat(item.name) > (float) room ? item.name : String();
+}
 
 void GenericItemChooser::setRowHeight(int ht)
 {

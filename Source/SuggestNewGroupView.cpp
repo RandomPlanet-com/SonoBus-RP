@@ -5,6 +5,7 @@
 
 #include "SuggestNewGroupView.h"
 #include "GenericItemChooser.h"
+#include "SbTextFit.h"
 
 SuggestNewGroupView::SuggestNewGroupView(SonobusAudioProcessor& proc) :  smallLNF(14), processor(proc)
 {
@@ -142,7 +143,8 @@ SuggestNewGroupView::SuggestNewGroupView(SonobusAudioProcessor& proc) :  smallLN
     int minitemheight = 32;
     int titleheight = 32;
     int minButtonWidth = 90;
-    int minLabelWidth = 70;
+    // One caption column, as wide as the widest caption
+    int minLabelWidth = jmax(70, SbTextFit::labelWidth(*mGroupStaticLabel), SbTextFit::labelWidth(*mGroupPassStaticLabel));
 #if JUCE_IOS || JUCE_ANDROID
     // make the button heights a bit more for touchscreen purposes
     minitemheight = 42;
@@ -162,7 +164,7 @@ SuggestNewGroupView::SuggestNewGroupView(SonobusAudioProcessor& proc) :  smallLN
     matchButtBox.items.clear();
     matchButtBox.flexDirection = FlexBox::Direction::row;
     matchButtBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0.5));
-    matchButtBox.items.add(FlexItem(minButtonWidth, 4, *mRequestButton).withMargin(0).withFlex(4));
+    matchButtBox.items.add(FlexItem(jmax(minButtonWidth, SbTextFit::buttonWidth(*mRequestButton, minitemheight)), 4, *mRequestButton).withMargin(0).withFlex(4));
     matchButtBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0.5));
 
     selButtBox.items.clear();
@@ -334,6 +336,11 @@ void SuggestNewGroupView::updatePeerRows(bool force)
         mRowsContainer->setBounds(0, 0, mViewport->getWidth() - 10, mch);
 
         peerRowsBox.performLayout(mRowsContainer->getLocalBounds().reduced(2));
+    }
+
+    // A name too long for its row shows whole in the hover
+    for (auto * toggle : mPeerToggles) {
+        SbTextFit::tooltipIfCut(*toggle, toggle->getButtonText(), SbTextFit::toggleWidth(*toggle, toggle->getHeight()));
     }
 }
 

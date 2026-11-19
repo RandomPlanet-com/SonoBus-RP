@@ -53,7 +53,8 @@ with {
 expandnew(env)        = level*(1-r)
 with {
         // the (filtered) input level above the threshold
-        level   = env : linear2db : (threshold+knee - _) : max(0);
+        // (the envelope is kept above zero: silence must not give an infinite level)
+        level   = env : max(1e-10) : linear2db : (threshold+knee - _) : max(0);
 
         // the knee factor, clamped to 0..1; we add a small perturbation in
         // the denominator to prevent infinities and nan when knee<<1

@@ -26,7 +26,6 @@
 #include "ReverbView.h"
 #include "VDONinjaView.h"
 
-class RandomSentenceGenerator;
 class WaveformTransportComponent;
 
 class SonobusAudioProcessorEditor;
@@ -566,7 +565,10 @@ private:
     int peersHeight = 0;
     bool isNarrow = false;
     bool isReallyNarrow = false;
-    String mTopBandText;   // stage, own name and instrument the top band was last laid out for
+    String mTopBandText;   // stage, own name, instrument and player-count digits the top band was last laid out for
+    int mWideMinWidth = 0;     // narrowest window whose bottom row fits its controls side by side
+    int mBandWholeWidth = 0;   // narrowest window that shows the top band whole beside the input controls
+    bool mBandStacked = false; // top band above the input controls instead of beside them
     bool settingsWasShownOnDown = false;
     WeakReference<Component> settingsCalloutBox;
 
@@ -629,7 +631,6 @@ private:
 
 
     
-    std::unique_ptr<RandomSentenceGenerator> mRandomSentence;
 
 
 

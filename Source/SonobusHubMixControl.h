@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
 // Copyright (C) 2026 Jason Buecker (Random Planet)
-// Phase 3: OSC control-channel messages from a SonoBus client to the hub for
+// OSC control-channel messages from a SonoBus client to the hub for
 // per-listener overrides of how each *other* peer is mixed into this listener's
 // mix-minus-self output. Both messages are sent over the existing per-peer UDP
 // channel (sendPeerMessage on the client; networkRecvThread on the hub).
@@ -15,12 +15,10 @@
 // /sb/hxlevel  s:senderUserName  f:peak    (linear 0..1; sender's pre-mix peak)
 // /sb/hxsolo   s:senderUserName  i:soloed  (1 = if any are soloed, only those)
 //
-// Defaults are mute=false, gain=1.0, soloed=false, which preserves
-// pre-Phase-3 behavior (unweighted mix-minus-self). Solo is per-listener
-// (Phase 5): if any of a listener's overrides have soloed=true, that
-// listener's mix contains only the soloed senders; otherwise standard mix.
+// Defaults are mute=false, gain=1.0, soloed=false (unweighted mix-minus-self). Solo is per-listener:
+// if any of a listener's overrides have soloed=true, that listener's mix contains only the soloed senders.
 //
-// Phase 4: hxlevel travels in the opposite direction (hub → listener) so each
+// hxlevel travels in the opposite direction (hub → listener) so each
 // listener can render virtual meters on info-only rows for senders whose audio
 // only reaches them mixed into the hub stream. Sent at ~20Hz from a worker
 // thread on the hub; never touches the audio thread.

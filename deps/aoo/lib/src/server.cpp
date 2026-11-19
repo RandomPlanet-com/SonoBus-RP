@@ -64,6 +64,19 @@ extern std::atomic<server*> g_sbServer;
 extern std::mutex g_sbKickMutex;
 extern std::vector<std::string> g_sbKickNames;
 static void sb_conn_event(const char* kind, const ip_address& a, const std::string& user, const std::string& group, const std::string& detail);
+// Why a player's connection ended, from the socket result (0 = the other side closed it in order).
+static std::string sb_close_reason(int err){
+#ifdef _WIN32
+    const bool reset = err == WSAECONNRESET, timedOut = err == WSAETIMEDOUT, aborted = err == WSAECONNABORTED;
+#else
+    const bool reset = err == ECONNRESET || err == EPIPE, timedOut = err == ETIMEDOUT, aborted = err == ECONNABORTED;
+#endif
+    if (err == 0) return "reason: closed by the other side (Disconnect, quit or the app ended)";
+    if (reset) return "reason: connection reset (the app or computer at the other end went away at once, or a router dropped the connection)";
+    if (timedOut) return "reason: timeout (no answer for about 30 s: the network path was lost)";
+    if (aborted) return "reason: connection aborted by this computer's network (timeout or adapter reset)";
+    return "reason: socket error " + std::to_string(err) + " (" + aoo::net::socket_strerror(err) + ")";
+}
 } // net
 } // aoo
 
@@ -238,6 +251,7 @@ int32_t aoo::net::server::run(){
             for (auto& c : clients_){
                 if (c->is_active() && c->sb_user_name() == name){
                     sb_conn_event("kicked", c->source_addr(), name, "", "removed by the host");
+                    c->sb_close_why = "reason: removed by the host";
                     c->close(true);
                 }
             }
@@ -320,19 +334,13 @@ std::shared_ptr<user> server::get_user(const std::string& name,
 {
     auto usr = find_user(name);
     if (usr){
-        // Reconnect-wins semantics: a new LOGIN with an existing username
-        // means the prior session is stale. The common case is a client that
-        // TCP-closed (clean quit or process exit) and relaunched faster than
-        // the server's poll loop noticed the FIN; the dead client_endpoint
-        // still holds usr->endpoint. Boot the old endpoint here so the new
-        // login can take over cleanly. close(notify=true) cascades through
-        // user::on_close → on_user_left_group, which broadcasts PEER_LEAVE
-        // to other group members — so hubs and peer clients see the old
-        // session leave before the new one joins. After on_close, the user's
-        // endpoint is nullptr and we fall through to the password check.
+        // Reconnect wins: a new LOGIN with an existing username means the prior session is stale (e.g. a
+        // relaunch before the poll loop saw the FIN). close(notify=true) broadcasts PEER_LEAVE for the old
+        // session before the new one joins; usr->endpoint is then nullptr and the password check follows.
         if (usr->endpoint){
             std::cerr << "[SRV] LOGIN evicting stale session for user='"
                       << name << "'\n";
+            usr->endpoint->sb_close_why = "reason: replaced by a new login with the same name";
             usr->endpoint->close(true);
             // usr->endpoint is now nullptr (cleared by user::on_close).
         }
@@ -577,15 +585,9 @@ void server::on_user_joined_group(user& usr, group& grp){
             auto notify = [&](client_endpoint* dest, user& u){
                 auto e = u.endpoint;
 
-                // Per-peer LAN/WAN classification. When the recipient (dest)
-                // is on the configured LAN subnet, advertise the source peer's
-                // LAN (local) address in BOTH the public and local fields. The
-                // receiving AOO library would otherwise also try the source's
-                // claimed public address (possibly a WAN IP because of the
-                // hub's --public-address override), which is unreachable from
-                // the LAN side and at best wastes a handshake attempt and at
-                // worst confuses peer::handle_message's first-ping-wins address
-                // pinning. WAN recipients get the defaults.
+                // Per-peer LAN/WAN classification: a recipient on the configured LAN subnet gets the source
+                // peer's LAN (local) address in BOTH the public and local fields, because the claimed public
+                // address may be unreachable from the LAN side. WAN recipients get the defaults.
                 std::string pub_name = e->public_address.name();
                 int pub_port = e->public_address.port();
                 std::string loc_name = e->local_address.name();
@@ -791,6 +793,7 @@ void server::wait_for_event(){
                 // connection was closed
                 int err = ne.iErrorCode[FD_CLOSE_BIT];
                 LOG_VERBOSE("aoo_server: client connection was closed (" << err << ")");
+                clients_[i]->sb_close_why = sb_close_reason(err);
 
                 clients_[i]->close();
                 didclose = true;
@@ -1234,7 +1237,7 @@ void client_endpoint::close(bool notify){
                   << "' notify=" << (notify ? 1 : 0) << ")\n";
         socket_close(socket);
         socket = -1;
-        sb_conn_event("disconnect", addr_, user_ ? user_->name : std::string(), "", notify ? "" : "(server closing)");   
+        sb_conn_event("disconnect", addr_, user_ ? user_->name : std::string(), "", notify ? sb_close_why : std::string("reason: the hub is stopping"));
 
         if (user_ && notify){
             user_->on_close(*server_);
@@ -1298,6 +1301,7 @@ bool client_endpoint::receive_data(){
         auto result = recv(socket, buffer, sizeof(buffer), 0);
         if (result == 0){
             LOG_WARNING("client_endpoint: connection was closed");
+            sb_close_why = sb_close_reason(0);
             return false;
         }
         if (result < 0){
@@ -1317,6 +1321,7 @@ bool client_endpoint::receive_data(){
             {
                 // TODO handle error
                 LOG_ERROR("client_endpoint: recv() failed (" << err << ")");
+                sb_close_why = sb_close_reason(err);
                 return false;
             }
         }

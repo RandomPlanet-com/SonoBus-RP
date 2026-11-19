@@ -2,6 +2,28 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-19
+
+### SonoBus RP 1.3.5
+
+- No audio artifacts when switching an effect on or off.
+- Noise gate no longer lowers the existing level.
+- EQ: removed audio artifacts; band 2 width is saved.
+- Text fields now maintain their full names
+- Input Mixer: PAN, WIDTH and MONITOR knobs; aligned columns.
+- Wider settings window.
+- Cleaner Private Stage tab / section.
+- Remembers stage passwords.
+- Reliable joins right after launch.
+
+### SonoBus RP Hub 1.3.4
+
+- A stage is not listed while its ports are blocked.
+- Clearer log lines.
+- No web page without a password.
+- New-version banner; stage name in the window title.
+- Windows: steadier timing on slower PCs.
+
 ## 2026-11-18
 
 ### SonoBus RP 1.3.4

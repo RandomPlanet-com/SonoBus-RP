@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
 // Copyright (C) 2026 Jason Buecker (Random Planet)
-// SonoBus RP — Hub Server GUI (Jamulus-shaped status window).
+// SonoBus RP — Hub Server GUI (status window).
 //
 // Two tabs:
 //   Status   — header (uptime, group, sr/bs/feed-default ch, codec, CPU) +
@@ -9,11 +9,7 @@
 //   Settings — every persisted hub parameter (see SonobusHubSettings.h) with
 //              Save / Save & Restart hub, and a per-field live/restart/relaunch tag
 //
-// LogTail / CoutTee / HubLogRing REMOVED root cause of the
-// A dispatch regression traced to CoutTee's std::mutex
-// blocking the AOO receive thread during LOG_WARNING. See
-// the hub GUI dispatch notes. Operators tail hub.log
-// or Console.app for log surface.
+// No std::cout capture: a mutex-guarded tee would block the AOO receive thread. The log is hub.log.
 //
 // Latency policy: every GUI read goes through SonobusHubServer::snapshotForUI()
 // on a 1 Hz juce::Timer (message thread). The audio thread is never accessed.
@@ -25,7 +21,7 @@
 #include "JuceHeader.h"
 #include "SonobusHubServer.h"
 #include "SonobusHubDirectory.h"
-#include "SonobusHubWeb.h"   // Optional web page (off by default on macOS since)
+#include "SonobusHubWeb.h"   // Optional web page (off by default on macOS)
 #include "SonobusHubGeo.h"   // Player locations in the native table
 #include "SonobusHubSettings.h"
 #include "SonobusHubUpdater.h"
@@ -39,22 +35,46 @@
 
 namespace sb_hub_gui {
 
+// Cells whose text was drawn shortened, with the full text (hover tooltip)
+using CutCells = std::vector<std::pair<juce::Rectangle<int>, juce::String>>;
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 class StatusHeader : public juce::Component, public juce::SettableTooltipClient {
 public:
     StatusHeader();
     void setSnapshot(const SonobusHubServer::UiSnapshot& s);
-    void setUpdate(const juce::String& line, const juce::String& url) { mUpdateLine = line; mUpdateUrl = url; repaint(); }   
     void setLocation(const juce::String& loc) { mLocation = loc; repaint(); }   // The `location` setting
     void setOutRate(float bytesPerSec) { mOutBytesPerSec = bytesPerSec; }   // hub upload now, for the limits line; painted with the next snapshot
     void paint(juce::Graphics& g) override;
-    void mouseUp(const juce::MouseEvent&) override { if (mUpdateUrl.isNotEmpty()) juce::URL(mUpdateUrl).launchInDefaultBrowser(); }
+    juce::String getTooltip() override;   // adds the full text of any line drawn shortened
 private:
+    juce::StringArray mCutLines;
     SonobusHubServer::UiSnapshot mSnap;
-    juce::String mUpdateLine, mUpdateUrl;
     juce::String mLocation, mPlatform;
     juce::Image mIcon;   // Hub icon top-left, like the web page
     float mOutBytesPerSec = -1.0f;   // -1 = not measured yet
+};
+
+// Full-width notice above the tabs while a newer hub is on the update server.
+class UpdateBanner : public juce::Component, public juce::SettableTooltipClient {
+public:
+    static constexpr int kHeight = 74;
+    UpdateBanner();
+    // state = install progress or the last failure, shown instead of the warning line.
+    void setInfo(const HubUpdateInfo& info, const juce::String& runningVersion, bool canInstall, const juce::String& state);
+    bool isAvailable() const { return mInfo.available; }
+    bool canInstall() const { return mCanInstall; }
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+    std::function<void()> onInstall;
+private:
+    void layoutLink();
+    int mLine2W = 0;   // width the second line gets left of the link
+    HubUpdateInfo mInfo;
+    juce::String mRunning, mState;
+    bool mCanInstall = false;
+    juce::TextButton mButton;
+    juce::HyperlinkButton mNotes;
 };
 
 class PeerTable : public juce::Component, public juce::SettableTooltipClient {
@@ -69,7 +89,7 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent&) override { mHoverRow = -1; mHoverCol = -1; }
     juce::String getTooltip() override;
-    int requiredWidth() const { return mRequiredWidth; }   // No truncation — the User column grows to the longest name
+    int requiredWidth() const { return mRequiredWidth; }   // Sum of the measured columns; the page scrolls sideways when narrower
     // Click a column header to sort (▲ ascending, again ▼ descending, again = hub order).
     // Applied inside setSnapshot so the choice survives the 1-s refresh. Kept in memory only — the hub has no
     // per-app properties file (hub_settings.json is the strict launch-args model).
@@ -78,13 +98,15 @@ public:
     std::function<void(const std::string& user, SonobusHubServer::RemovalKind keep)> onKick;
 private:
     void applySort();
+    void layoutColumns();   // column widths from the measured header and cell texts
     int mSortCol = -1;
     bool mSortDesc = false;
     std::vector<SonobusHubServer::UiPeerSnapshot> mPeers;
     int mHubSampleRate = 0, mHubBlockSize = 0;
     int mHoverRow = -1, mHoverCol = -1;
-    std::vector<int> mColX;          // column left edges from the last paint (for hit testing)
-    int mUserColW = 150, mRequiredWidth = 0;
+    std::vector<int> mColX, mColW;   // column left edges and widths (layoutColumns; hit testing)
+    int mRequiredWidth = 0;
+    CutCells mCut;
 };
 
 // "Recent players" — the distinct players seen in one session (the hub's own join/leave events),
@@ -100,9 +122,11 @@ public:
     // (▲, again ▼, again = hub order) like the live table.
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    juce::String getTooltip() override;
     std::function<void(const std::string& user)> onRemove;
     static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12;
 private:
+    CutCells mCut;
     void scrollBarMoved(juce::ScrollBar*, double newRangeStart) override { mFirstRow = (int) newRangeStart; repaint(); }
     void layoutScroll();
     void applySort();
@@ -123,9 +147,11 @@ public:
     void resized() override { layoutScroll(); }
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    juce::String getTooltip() override;
     std::function<void(const std::string& user, const std::string& ip)> onAllowBack;
     static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12, kMaxVisibleRows = 4;
 private:
+    CutCells mCut;
     void scrollBarMoved(juce::ScrollBar*, double newRangeStart) override { mFirstRow = (int) newRangeStart; repaint(); }
     void layoutScroll();
     std::vector<SonobusHubServer::RemovedPlayer> mRows;
@@ -145,6 +171,7 @@ public:
     void resized() override { layoutScroll(); }
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    juce::String getTooltip() override;
     const SonobusHubServer::SessionRecord* selected() const;   // nullptr = nothing selected (pointer valid until the next setRows)
     std::function<void()> onSelectionChanged;
     // "a Copy group link on the row instead of the personnel" — the main window supplies the link builder
@@ -164,10 +191,11 @@ private:
     int mFirstRow = 0, mSortCol = -1; bool mSortDesc = false;
     juce::ScrollBar mScroll{true};
     std::vector<int> mColX;
+    CutCells mCut;
 };
 
 
-// The pre-tabs Status content, verbatim, as one tab page.
+// The Status content as one tab page.
 class StatusPage : public juce::Component {
 public:
     StatusPage();
@@ -177,7 +205,6 @@ public:
     juce::TextButton copyLinkButton{"Copy Stage Link"};
     juce::Label linkLabel;
     juce::TextButton portCheckButton{"Re-run port check"};
-    juce::TextButton installUpdateButton{"Install Update"};
     std::function<void()> onCopyLink, onRerunPortCheck;
     // Group name on the front page. Apply = persist +
     // in-process hub restart (players rejoin the new group).
@@ -188,11 +215,12 @@ public:
     juce::TextButton messageSend{"Send"};
     std::function<void(const juce::String&)> onSendMessage;
     std::function<void(const juce::String&)> onApplyGroup;
-    // Per-player hold mode switch — "Jam" (best latency) / "Print" (safe for recording). Live.
+    // Hold mode switch (retired: never shown).
     juce::TextButton holdModeButton{"Hold: Jam"};
     std::function<void(bool)> onToggleHold;   // true = print
     juce::Label peerLabel;
     PeerTable peerTable;
+    juce::Viewport peerView;   // sideways scroll when the window is narrower than the table
     juce::Label removedLabel;
     RemovedTable removedTable;
     // Bottom strip — recent sessions (left) | the selected session's personnel + password
@@ -267,6 +295,7 @@ private:
     void onRowEdited(Row& r);
     void applyStagePassword(const juce::String& password);
     void refreshStatus(const juce::String& transient = {});
+    void updateCutTips();
     bool doSave();
 
     HubLaunchArgs mRunning;   // effective values of the live hub (Live-tier fields track saves)
@@ -308,7 +337,7 @@ public:
                std::function<void()> restartFn,
                std::function<void()> quitFn,
                std::function<void(const std::string&)> applyGroupFn,    // Status-page group field
-               std::function<void(bool)> applyHoldFn,                    // Jam/Print switch
+               std::function<void(bool)> applyHoldFn,                    // unused (retired hold mode)
                std::function<void(const std::string&, const std::string&)> applySessionFn);   // Recent session -> Apply & Restart
     ~HubContent() override;
 
@@ -325,6 +354,9 @@ private:
     SonobusHubServer* mHub;
     std::function<bool(std::string& err)> mRelaunchFn;
     std::unique_ptr<juce::ThreadWithProgressWindow> mUpdateRun;
+    UpdateBanner mUpdateBanner;
+    juce::String mUpdateFailure;   // shown in the banner after a failed install
+    juce::Label mPortAlert;        // red bar while a required port is closed from outside
     std::function<void()> mRestartFn;
     std::function<void()> mQuitFn;
 
@@ -379,11 +411,14 @@ public:
 
     const juce::String getApplicationName() override       { return "SonoBus RP Hub"; }   // (AOO user name stays "SonoBus-Hub": the client keys on it)
     const juce::String getApplicationVersion() override    { return "1.0.0"; }
-    bool moreThanOneInstanceAllowed() override             { return false; }
+    bool moreThanOneInstanceAllowed() override             { return hub_settings::hasOwnDataDir(); }   // own folder: guarded by its own lock
 
     void initialise(const juce::String& commandLine) override;
     void shutdown() override;
     void systemRequestedQuit() override;
+    void anotherInstanceStarted(const juce::String& commandLine) override;   // Windows: brings the window back
+    // Close button / Quit: on Windows asks first when players are on the stage, then stops the hub.
+    void userRequestedStop();
 
 private:
     // Tear down + bring back the SonobusHubServer with the stored launch
@@ -414,6 +449,9 @@ private:
     // (re)start the web status page against the CURRENT mHub (web_port 0 = off).
     void startWeb();
     std::unique_ptr<juce::MenuBarModel> mMenuModel;
+    void attachWindowMenu();                  // Windows: the menu sits in the window (no app menu bar)
+    std::unique_ptr<juce::Timer> mQuitWatch;  // Windows: a QUIT file in the data folder stops the hub (the Stop file)
+    bool mStopAsked = false;
 
     HubLaunchArgs mArgs;
     HubSettingsMeta mMeta;
@@ -423,6 +461,9 @@ private:
     std::unique_ptr<HubStageDirectory> mStageDirectory;   // Holds a reference to *mHub → reset BEFORE mHub
     void startStageDirectory();
     bool mStartFailed = false;   // Surfaced as an alert after makeWindow
+    bool mRestartQueued = false;      // message thread: a restart is waiting or running
+    juce::int64 mRestartDoneAtMs = 0; // when the last one finished: a click queued during it is dropped
+    bool mRelaunching = false;        // the replacement process is already started
     std::unique_ptr<HubMainWindow> mWindow;
 };
 

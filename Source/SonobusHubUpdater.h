@@ -12,6 +12,12 @@ struct HubUpdateZip {
     juce::int64 size = 0;
 };
 
+// What the update banners show. version = release name (e.g. 1.3.3), or the build when the server names none.
+struct HubUpdateInfo {
+    bool available = false;
+    juce::String version, build, notesUrl, url;
+};
+
 // Asks the update server at launch and once a day after that.
 class HubUpdateCheck : public juce::Thread {
 public:
@@ -22,11 +28,13 @@ public:
     juce::String url() const { const juce::ScopedLock sl(mLock); return mUrl; }
     juce::String latest() const { const juce::ScopedLock sl(mLock); return mLatest; }
     HubUpdateZip zip() const { const juce::ScopedLock sl(mLock); return mZip; }
+    HubUpdateInfo info() const { const juce::ScopedLock sl(mLock); return mInfo; }
 private:
     void checkOnce();
     juce::CriticalSection mLock;
     juce::String mLine, mUrl, mLatest;
     HubUpdateZip mZip;
+    HubUpdateInfo mInfo;
 };
 
 // True when this copy can be replaced by the user it runs as.

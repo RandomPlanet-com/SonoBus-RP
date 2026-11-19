@@ -17,8 +17,16 @@ public:
     FocusTextEditor(const String & name = {}) : TextEditor(name) {}
 
     void focusGained (FocusChangeType) override;
+    void paintOverChildren (Graphics&) override;
+
+    // Text shown while empty; it wraps onto more lines instead of ending in "..."
+    void setHint (const String& text, Colour colour) { hintColour = colour; setTextToShowWhenEmpty(text, colour); }
 
     std::function<void(FocusChangeType)> onFocusGained;
+    int hintRightInset = 0;   // room kept free at the right, for a button drawn over the editor
+
+private:
+    Colour hintColour { 0x88bbbbbb };
 };
 
 class ChatView : public Component
@@ -76,6 +84,8 @@ protected:
     
     void updateFontSizes();
     void updateTitles();
+    void fitTitle();       // the full title, or the name alone with the full title in the hover
+    void updateTabTips();  // a tab too narrow for its name shows it in the hover
     
     bool parseStringForUrl(const String & str, Array<Range<int> > & retranges);
 
@@ -117,6 +127,7 @@ protected:
     std::unique_ptr<SonoDrawableButton> mMenuButton;
     std::unique_ptr<SonoDrawableButton> mCloseButton;
     std::unique_ptr<Label> mTitleLabel;
+    String mFullTitle, mTitleName;
     std::unique_ptr<SonoDrawableButton> mChatTabMenuButton;
     std::unique_ptr<SonoDrawableButton> mSendButton;
 

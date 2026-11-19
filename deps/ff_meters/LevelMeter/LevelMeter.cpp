@@ -210,9 +210,8 @@ void LevelMeter::visibilityChanged ()
 
 void LevelMeter::timerCallback ()
 {
-    // The shared newDataFlag was consumed by the FIRST
-    // meter whose timer ran after each measurement, so the other meters on the same source never repainted. Each meter
-    // now compares the source's last-measurement time against its own copy — no shared state, same idle behaviour.
+    // Each meter compares the source's last-measurement time against its own copy, so every meter on a shared
+    // source repaints (a shared flag would be consumed by the first one).
     const juce::int64 t = source ? source->getLastMeasurementTime() : 0;
     if (backgroundNeedsRepaint || (source && t != lastSeenMeasurement))
     {

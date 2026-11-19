@@ -2,8 +2,7 @@
 // Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP — Hub Server settings model + persistence.
 //
-// ("every assignable hub parameter settable AND
-// persistent from the hub GUI, so a bare Dock launch comes up correctly").
+// Every assignable hub parameter is settable and persistent from the hub GUI, so a bare launch comes up correctly.
 //
 // One model — HubLaunchArgs — feeds three consumers: the CLI parser
 // (SonobusHubMain.cpp), the JSON settings file (dataDir()/
@@ -22,42 +21,9 @@
 // Latency policy: nothing in this file is ever touched by the audio, listener
 // or pacer threads. Load/save/apply run in main() or on the JUCE message thread.
 //
-// ─── launcher pins vs code defaults ────
-// The the hub Mac hub was started by a launcher script (launchctl setenv SB_AOO_*
-// + `open -g -n sonobus-hub.app --args ...`). Goal: a bare double-click of the
-// App icon (no script, no env, no args) behaves identically. Audit of every
-// value a launcher pinned against the code default:
-//
-//   launcher pin                      | code default (5257d247)             | now
-//   ----------------------------------+-------------------------------------+---------------------
-//   --local-server                    | localServer = true                  | same
-//   --server 192.0.2.25 (hairpin)   | "aoo.sonobus.net" -> 127.0.0.1      | 127.0.0.1 kept; LAN/WAN
-//                                     |   (resolveServerEndpoint)           |   addresses derived at
-//                                     |                                     |   start (see below)
-//   --server-port 10999               | localServerPort = 10999             | same
-//   --connected-sockets               | connectedSockets = false            | CHANGED -> true
-//   --pace-spread 50                  | paceSpread = 80                     | CHANGED -> 50
-//   --sink-buffer-lan 1.33 (SBLAN)    | sinkBufferLanMs = 1.33              | same
-//   --sink-buffer 12 (SBWAN)          | sinkBufferMs = 12                   | same (help text said 16: fixed)
-//   --redundancy-lan 1 (SBREDLAN)     | redundancyLan = 1                   | same
-//   --redundancy-wan 1 (SBREDWAN)     | redundancyWan = 1                   | same
-//   --blocksize 32 (SBBLOCK)          | blockSize = 32                      | same
-//   (SBNODSCP empty: no --no-dscp)    | dscp = false                        | same
-//   (no --group)                      | groupName = "hub-test"              | same (hub_settings.json overlays)
-//   env SB_AOO_DRAIN=1                | aooDrain = 1 (sink.cpp raw: 1)      | same
-//   env SB_AOO_GOV_ARM_BLOCKS=1       | aooGovArmBlocks = 1                 | same. sink.cpp raw default -1 = auto:
-//                                     |                                     |   H = max(2, ceil(T/2)) (T = pin blocks),
-//                                     |                                     |   = 2 for the 2-block LAN pin, 2 for adaptive
-//                                     |                                     |   sinks, 9 for an 18-block WAN pin; so
-//                                     |                                     |   1 DIFFERS from auto -> keep exporting 1
-//   env SB_AOO_SLACK_BLOCKS=0         | aooSlackBlocks = 0 (raw -1=auto->0) | same
-//   env SB_AOO_BLOCKQ_EXTRA=8         | aooBlockqExtra = 8 (raw: 8)         | same
-//   env SB_AOO_HANDOFF=1              | aooHandoff = 1 (raw: 1)             | same
-//   env SB_HUB_ASRC_ON=0              | hub_asrc_enabled(): unset = 0       | same (not a setting; off by code)
-//
-// The SB_AOO_* rows are exported to the process env by applySinkEnv() from
-// these defaults, so a no-env launch reaches sink.cpp with the same values the
-// launcher's launchctl setenv did.
+// A bare launch (no script, env or args) runs the ship defaults: applySinkEnv() exports the SB_AOO_* values
+// below, so sink.cpp sees them without a launcher. aooGovArmBlocks = 1 is exported on purpose: the sink's own
+// auto value (-1 = max(2, ceil(T/2)) blocks, T = pin blocks) differs from it.
 
 #pragma once
 
@@ -99,9 +65,9 @@ struct HubLaunchArgs {
     // applies to every peer (WAN-safe). The LAN value, when >0 AND lanSubnetCidr
     // is set, applies only to peers whose address matches the LAN CIDR — so
     // remote/WAN peers can never be under-buffered by accident.
-    double sinkBufferMs = 12.0;      // WAN inbound 12 (was 16)
-    double sinkBufferLanMs = 1.33;   // 2 blocks — hub conceals 317→46 per 15 min, p50 unchanged
-    std::string holdMode = "jam";   // RETIRED not a setting, not on the CLI; the hold has one policy (0/min). Live.
+    double sinkBufferMs = 12.0;      // WAN inbound (ms)
+    double sinkBufferLanMs = 1.33;   // 2 blocks
+    std::string holdMode = "jam";   // retired: not a setting, not on the CLI; the hold has one policy
     // File path for stdout/stderr redirect (GUI apps launched
     // via `open` otherwise log to the void).
     std::string logFile;
@@ -110,13 +76,13 @@ struct HubLaunchArgs {
 #else
     int webPort = 18080;            // Web status page (0 = off)
 #endif
-    std::string webPassword;        // optional Basic auth password (user name is ignored)
-    std::string location;           // Free text shown on the web page, e.g. "Atlanta, GA (cloud)"
+    std::string webPassword;        // web page password (user name is ignored); empty = the page stays off
+    std::string location;           // Free text shown on the web page, e.g. "City, ST"
     std::string dumpPeer; int dumpSecs = 0;   // diagnostic audio dump (CLI only, never persisted)
     // Paced fan-out emission (staggers per-listener sends
     // across the block interval; see SonobusHubServer::pacerThread).
     bool sendPace = true;
-    bool paceDither = true;   // Evening: pacer phase dither
+    bool paceDither = true;   // pacer phase dither
     int  paceSpread = 50;     // % of the block period the pacer spreads sends over (5..95)
     int  paceMinSlotUs = 50;  // Absolute floor for the pacer slot in µs (0..500)
     // --cut-through — each listener thread emits its own
@@ -138,7 +104,7 @@ struct HubLaunchArgs {
     int redundancyWan = 1;
     bool dscp = false;         // --dscp enables, --no-dscp disables (default off)
     // --connected-sockets: one connected UDP send socket per listener
-    // (send() is 3x cheaper than sendto() at the hub's rate). Default ON.
+    // (send() costs far less CPU than sendto() at the hub's rate). Default ON.
     bool connectedSockets = true;
 
     // AOO sink knobs. These are exported to the process env
@@ -196,6 +162,10 @@ struct FormSpec { int col; const char* key; const char* label; int kind; const c
 const std::vector<FormSpec>& formSpecs();
 
 juce::File dataDir();                    // settings, taps, stats and session history
+// A settings file outside the default folder makes its folder this instance's data folder (log, taps,
+// stats, directory files) and allows a second hub on the machine. Call once at startup.
+bool useSettingsFolderAsDataDir(const juce::File& settingsFile);
+bool hasOwnDataDir();
 juce::File defaultLogFile();
 void applyDefaults(HubLaunchArgs& a);    // fills values that depend on the machine
 void migrateOldDataDir();                // call once, before anything reads dataDir()
@@ -249,10 +219,18 @@ bool relaunchProcess(const std::vector<std::string>& argv, std::string& err);
 // and by the GUI's live apply of a changed log_file. Message thread / main() only.
 void redirectLogFile(const std::string& path);
 
+// Whole-line log writes. After this, std::cout and std::cerr collect each thread's text and pass complete lines to
+// stdout in one write: lines from different threads cannot run into each other, and both streams share one buffer.
+// Call once at the start of main().
+void installLineLog();
+
 // Range/sanity check. Returns an empty string when OK, else a human-readable
 // description of the first problem. load() rejects files that fail this;
 // the GUI refuses to Save them.
 std::string validate(const HubLaunchArgs& a);
+// "Public address" as typed: empty = fine, else why it cannot work (an address inside a private network).
+// Checked when the operator saves; a value already in a settings file only gets a warning in the log.
+std::string publicAddressProblem(const std::string& host);
 
 // Compare two models field-by-field; returns the JSON keys that differ.
 std::vector<std::string> diffKeys(const HubLaunchArgs& x, const HubLaunchArgs& y);

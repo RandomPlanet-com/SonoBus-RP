@@ -54,6 +54,7 @@ public:
 
     void updateState(bool ignorecheck=false);
     void updateLayout();
+    void updateCutTooltips();
 
     void paint(Graphics & g) override;
     void resized() override;

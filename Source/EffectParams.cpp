@@ -27,7 +27,7 @@ static String eqPara1FreqKey("p1freq");
 static String eqPara1QKey("p1q");
 static String eqPara2GainKey("p2gain");
 static String eqPara2FreqKey("p2freq");
-static String eqPara2QKey("p1q");
+static String eqPara2QKey("p2q");
 
 static String delayEnabledKey("enabled");
 static String delayTimeMsKey("delaytimems");
@@ -95,7 +95,7 @@ void ParametricEqParams::setFromValueTree(const ValueTree & item)
     para1Q = item.getProperty(eqPara1QKey, para1Q);
     para2Gain = item.getProperty(eqPara2GainKey, para2Gain);
     para2Freq = item.getProperty(eqPara2FreqKey, para2Freq);
-    para2Q = item.getProperty(eqPara2QKey, para2Q);
+    para2Q = item.getProperty(eqPara2QKey, item.getProperty(eqPara1QKey, para2Q));   // older files kept band 2 under band 1's key
 
 }
 

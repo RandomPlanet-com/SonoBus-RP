@@ -21,6 +21,8 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>   // Local firewall inspection
+#include "SonobusHubCompat.h"
+#if !defined(_WIN32)
 #include <fcntl.h>    // Port check
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -29,6 +31,7 @@
 #include <pwd.h>
 #include <sys/resource.h>
 #include <sys/socket.h>   // disconnectx
+#endif
 #include <cstdlib>
 // One monotonic tick source for the whole hub.
 //   macOS: mach_absolute_time ticks + mach timebase.
@@ -55,6 +58,309 @@
       if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) std::cerr << "[HUB] WARNING: SCHED_FIFO failed for " << who << " (" << strerror(errno) << ") — run as root or grant CAP_SYS_NICE\n";
       else std::cout << "[HUB] " << who << " SCHED_FIFO prio " << sp.sched_priority << "\n";
   }
+#elif defined(_WIN32)
+  // Windows: the performance counter, scaled to nanoseconds by the timebase. Waits use a high-resolution timer for
+  // the bulk and spin for the last stretch, because the timer alone is not exact enough for a sub-millisecond block.
+  struct hub_tb_t { uint32_t numer, denom; };
+  static inline uint64_t hub_qpc_freq() { static const uint64_t f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (uint64_t) q.QuadPart; }(); return f; }
+  static inline void hub_timebase(hub_tb_t* tb) {
+      uint64_t a = 1000000000ULL, b = hub_qpc_freq();
+      uint64_t x = a, y = b; while (y) { const uint64_t t = x % y; x = y; y = t; }
+      tb->numer = (uint32_t) (a / x); tb->denom = (uint32_t) (b / x);
+  }
+  static inline uint64_t hubNowTicks() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return (uint64_t) q.QuadPart; }
+  // Tick switches, read once from the environment:
+  //   SB_HUB_WIN_SPIN_US=<n>  spin for the last n microseconds before a deadline (default 400; each waiting
+  //                           thread spends that share of every block on one core)
+  //   SB_HUB_WIN_TICK=spin    the block tick never sleeps (one whole core; no multimedia task for that thread)
+  //   SB_HUB_WIN_PIN=<cpu>    keep the block tick on one logical processor and the other real-time threads off it
+  //   SB_HUB_WIN_PRIO=normal|high|realtime   process priority class (default high)
+  //   SB_HUB_WIN_MMCSS=0      no multimedia scheduler task for the real-time threads (plain time-critical priority)
+  //   SB_HUB_WIN_KTS=0        no receive timestamps from the stack (arrival times taken at the read)
+  //   SB_HUB_WIN_RXFIRST=1    inside the multimedia class the receive thread outranks the block tick, and the tick
+  //                           outranks the pacer, listener and send threads (default: all equal)
+  //   SB_HUB_WIN_PACER_SPIN_US=<n>  the pacer's own final spin before a slot deadline (default: as SB_HUB_WIN_SPIN_US)
+  //   SB_HUB_TICK_ADAPT=0|1|2 block tick: 0 always the fixed final spin; 1 (default) the fixed spin until this computer's
+  //                           timer proves late, then the tick follows the system timer tick; 2 follows it from the start
+  //   SB_HUB_WIN_TIMER=plain  test aid: the fixed-spin tick uses an ordinary waitable timer (a computer with a late timer)
+  struct hub_win_opts_t { uint64_t spinTicks; uint64_t pacerSpinTicks; bool tickSpin; int pinCpu; int prio; bool mmcss; bool kts; bool rxFirst; int tickAdapt; bool plainTimer; };
+  static inline const hub_win_opts_t& hub_win_opts() {
+      static const hub_win_opts_t o = [] {
+          hub_win_opts_t v; long us = 400; v.tickSpin = false; v.pinCpu = -1; v.prio = 1; v.mmcss = true; v.kts = true; v.rxFirst = false; v.tickAdapt = 1; v.plainTimer = false;
+          if (const char* e = getenv("SB_HUB_TICK_ADAPT"); e && e[0]) v.tickAdapt = std::max(0, std::min(2, atoi(e)));
+          if (const char* e = getenv("SB_HUB_WIN_TIMER"); e && !strcmp(e, "plain")) v.plainTimer = true;
+          if (const char* e = getenv("SB_HUB_WIN_SPIN_US"); e && e[0]) us = std::max(0L, std::min(2000L, atol(e)));
+          long pus = us;
+          if (const char* e = getenv("SB_HUB_WIN_PACER_SPIN_US"); e && e[0]) pus = std::max(0L, std::min(2000L, atol(e)));
+          if (const char* e = getenv("SB_HUB_WIN_RXFIRST"); e && e[0]) v.rxFirst = atoi(e) != 0;
+          v.pacerSpinTicks = hub_qpc_freq() * (uint64_t) pus / 1000000ULL;
+          if (const char* e = getenv("SB_HUB_WIN_TICK"); e && !strcmp(e, "spin")) v.tickSpin = true;
+          if (const char* e = getenv("SB_HUB_WIN_PIN"); e && e[0]) v.pinCpu = std::max(0, std::min(63, atoi(e)));
+          if (const char* e = getenv("SB_HUB_WIN_PRIO"); e && e[0]) v.prio = !strcmp(e, "normal") ? 0 : !strcmp(e, "realtime") ? 2 : 1;
+          if (const char* e = getenv("SB_HUB_WIN_MMCSS"); e && e[0]) v.mmcss = atoi(e) != 0;
+          if (const char* e = getenv("SB_HUB_WIN_KTS"); e && e[0]) v.kts = atoi(e) != 0;
+          v.spinTicks = hub_qpc_freq() * (uint64_t) us / 1000000ULL;
+          return v;
+      }();
+      return o;
+  }
+  // Receive timestamps from the stack (Windows 10 2004 and later), in performance-counter units. The SDK's
+  // names are gated on a newer target version than this build uses, so the few constants are spelled out.
+  struct hub_win_ts_cfg_t { ULONG flags; USHORT txBuffered; };
+  static int hub_win_rx_ts_err = 0;   // last error of the enable, for the log line
+  static inline bool hub_win_rx_ts_enable(int fd) {
+      hub_win_ts_cfg_t cfg; cfg.flags = 0x1 /* RX */; cfg.txBuffered = 0;
+      DWORD got = 0;
+      const bool ok = ::WSAIoctl((SOCKET) fd, 0x980000EBul /* SIO_TIMESTAMPING */, &cfg, sizeof(cfg), nullptr, 0, &got, nullptr, nullptr) == 0;
+      if (!ok) hub_win_rx_ts_err = ::WSAGetLastError();
+      return ok;
+  }
+  static bool hub_win_rx_ts_on = false;   // set once at socket setup, read by the receive and stats threads
+  static inline LPFN_WSARECVMSG hub_win_recvmsg_fn(int fd) {
+      static LPFN_WSARECVMSG fn = [fd] {
+          LPFN_WSARECVMSG f = nullptr; GUID g = WSAID_WSARECVMSG; DWORD got = 0;
+          if (::WSAIoctl((SOCKET) fd, SIO_GET_EXTENSION_FUNCTION_POINTER, &g, sizeof(g), &f, sizeof(f), &got, nullptr, nullptr) != 0) f = nullptr;
+          return f;
+      }();
+      return fn;
+  }
+  static thread_local bool hub_tl_spin_only = false;
+  static thread_local bool hub_tl_pacer = false;
+  static thread_local bool hub_tl_tick = false;
+  // Block tick wait. The default is a high-resolution timer for the bulk and a fixed final spin. On some
+  // computers that timer wakes on the ordinary system timer tick instead, up to a millisecond late, and blocks start
+  // late. The tick counts its late starts; when more than 1 % of blocks start late three seconds in a row, it changes
+  // its way of waiting for the rest of the run: it asks for the finest system timer (0.5 ms), learns where the
+  // timer ticks fall from its own wake-ups, and sleeps only up to the last tick that still leaves a guard before
+  // the deadline; the rest is a spin. With no tick in reach it spins the whole block. The guard follows the measured
+  // scatter of the wake-ups (99th percentile of the last 30 s, at most half a timer period). It never falls back to
+  // spinning every block: a tick thread that never sleeps holds a processor and delays the hub's own receive path.
+  // No lock is taken; the only added system call is the one timer request.
+  struct hub_win_tick_pub_t {   // written by the tick thread once a second, read by the report thread
+      std::atomic<uint32_t> guardUs{0}, errP99Us{0}, errMaxUs{0}, startLateMaxUs{0}, anchors{0}, misses{0};
+      std::atomic<uint64_t> sleeps{0}, blocks{0}, spinTicks{0};
+      std::atomic<int> mode{0};   // 0 fixed spin, 1 follows the timer tick
+      std::atomic<uint32_t> periodUs{0}, switchLate{0}, switchBlocks{0};
+      std::atomic<int> switched{0};   // 1 changed to the timer tick (not yet logged), 2 logged, -1 finer timer refused
+  };
+  static hub_win_tick_pub_t hub_win_tick_pub;
+  typedef LONG (NTAPI *hub_nt_set_res_fn)(ULONG, BOOLEAN, PULONG);
+  typedef LONG (NTAPI *hub_nt_query_res_fn)(PULONG, PULONG, PULONG);
+  static hub_nt_set_res_fn hub_nt_set_res = nullptr;       // looked up at tick thread start, off the block path
+  static hub_nt_query_res_fn hub_nt_query_res = nullptr;
+  // Ask for the finest system timer; returns its period in performance-counter ticks (0 = unknown).
+  static inline uint64_t hub_win_fine_timer() {
+      ULONG lo = 0, hi = 0, cur = 0, got = 0;
+      if (hub_nt_query_res) hub_nt_query_res(&lo, &hi, &cur);
+      if (hub_nt_set_res && hi > 0 && hub_nt_set_res(hi, TRUE, &got) == 0) cur = got;
+      return (uint64_t) cur * hub_qpc_freq() / 10000000ULL;
+  }
+  struct hub_win_tick_t {
+      enum { kBins = 60, kRing = 30 };
+      bool init = false, adapt = false, autoSwitch = false;
+      uint64_t lateT = 0; int badSecs = 0;
+      uint64_t f = 1, fixedT = 0, P = 0, halfP = 0, guardT = 0, guardMinT = 0, guardAddT = 0, binT = 1, secT = 0, maxAgeT = 0, minSleepT = 0;
+      uint64_t anchor = 0; bool anchorOk = false;
+      uint32_t noSleepBlocks = 0;
+      uint64_t winEnd = 0, errMax = 0, lateMax = 0, spinAcc = 0;
+      uint32_t hist[kBins + 1] = {}, winSleeps = 0, winErrN = 0, winMiss = 0, winLate = 0, winBlocks = 0, winAnchors = 0;
+      uint64_t ring[kRing] = {}; int ringN = 0, ringIdx = 0;
+      void setup() {
+          f = hub_qpc_freq();
+          fixedT = hub_win_opts().spinTicks; lateT = f * 300ULL / 1000000ULL;
+          autoSwitch = hub_win_opts().tickAdapt == 1;
+          if (hub_win_opts().tickAdapt == 2) { P = hub_win_fine_timer(); halfP = P / 2; adapt = P > 0; }
+          guardMinT = f * 40ULL / 1000000ULL; guardAddT = f * 25ULL / 1000000ULL; guardT = f * 100ULL / 1000000ULL;
+          binT = std::max<uint64_t>(1, f * 20ULL / 1000000ULL); secT = f; maxAgeT = f / 10; minSleepT = f * 20ULL / 1000000ULL;
+          winEnd = hubNowTicks() + secT; init = true;
+          hub_win_tick_pub.mode.store(adapt ? 1 : 0, std::memory_order_relaxed);
+          hub_win_tick_pub.periodUs.store((uint32_t) (P * 1000000ULL / f), std::memory_order_relaxed);
+          hub_win_tick_pub.guardUs.store((uint32_t) ((adapt ? guardT : fixedT) * 1000000ULL / f), std::memory_order_relaxed);
+      }
+      uint64_t p99T() const {   // upper edge of the bin holding the 99th percentile of this window
+          const uint32_t want = (uint32_t) std::ceil((double) winErrN * 0.99); uint32_t acc = 0;
+          for (int i = 0; i <= kBins; ++i) { acc += hist[i]; if (acc >= want) return (uint64_t) (i + 1) * binT; }
+          return (uint64_t) (kBins + 1) * binT;
+      }
+      void closeWindow(uint64_t now) {
+          auto toUs = [this](uint64_t t) { return (uint32_t) (t * 1000000ULL / f); };
+          hub_win_tick_pub_t& pub = hub_win_tick_pub;
+          if (autoSwitch && !adapt) {
+              // Late starts in more than 1 % of the blocks, three seconds running: this computer's timer is late.
+              badSecs = (winBlocks >= 500 && winLate * 100 >= winBlocks) ? badSecs + 1 : 0;
+              if (badSecs >= 3) {
+                  autoSwitch = false;
+                  P = hub_win_fine_timer(); halfP = P / 2; adapt = P > 0;
+                  pub.switchLate.store(winLate, std::memory_order_relaxed); pub.switchBlocks.store(winBlocks, std::memory_order_relaxed);
+                  pub.periodUs.store(toUs(P), std::memory_order_relaxed);
+                  pub.switched.store(adapt ? 1 : -1, std::memory_order_relaxed);
+                  winErrN = 0; ringN = 0; ringIdx = 0;   // the figures so far belong to the other timer
+              }
+          }
+          if (winErrN >= 32) {
+              const uint64_t p99 = p99T();
+              if (toUs(p99) > pub.errP99Us.load(std::memory_order_relaxed)) pub.errP99Us.store(toUs(p99), std::memory_order_relaxed);
+              ring[ringIdx] = p99; ringIdx = (ringIdx + 1) % kRing; if (ringN < kRing) ++ringN;
+              if (adapt) {
+                  uint64_t need = 0; for (int i = 0; i < ringN; ++i) need = std::max(need, ring[i]);
+                  guardT = std::max(guardMinT, std::min(halfP, need + guardAddT));
+              }
+          }
+          if (adapt) {
+              pub.mode.store(1, std::memory_order_relaxed);
+              pub.guardUs.store(toUs(guardT), std::memory_order_relaxed);
+          }
+          if (toUs(errMax) > pub.errMaxUs.load(std::memory_order_relaxed)) pub.errMaxUs.store(toUs(errMax), std::memory_order_relaxed);
+          if (toUs(lateMax) > pub.startLateMaxUs.load(std::memory_order_relaxed)) pub.startLateMaxUs.store(toUs(lateMax), std::memory_order_relaxed);
+          pub.sleeps.fetch_add(winSleeps, std::memory_order_relaxed); pub.blocks.fetch_add(winBlocks, std::memory_order_relaxed);
+          pub.spinTicks.fetch_add(spinAcc, std::memory_order_relaxed);
+          pub.misses.fetch_add(winMiss, std::memory_order_relaxed); pub.anchors.fetch_add(winAnchors, std::memory_order_relaxed);
+          memset(hist, 0, sizeof(hist)); winSleeps = 0; winErrN = 0; winMiss = 0; winLate = 0; winBlocks = 0; winAnchors = 0; errMax = 0; lateMax = 0; spinAcc = 0;
+          winEnd = now + secT;
+      }
+      void noteErr(uint64_t err) {   // wake-up later than expected, by this much
+          ++hist[std::min<uint64_t>(kBins, err / binT)]; ++winErrN; if (err > errMax) errMax = err;
+      }
+  };
+  static inline bool hubTickSleep(HANDLE timer, uint64_t sleepT) {
+      LARGE_INTEGER due; due.QuadPart = -(LONGLONG) std::max<uint64_t>(1, sleepT * 10000000ULL / hub_qpc_freq());
+      if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) return false;
+      WaitForSingleObject(timer, 50);
+      return true;
+  }
+  static inline void hubTickWaitUntilTicks(uint64_t t) {
+      // Both timers exist from the thread's first block. Following the timer tick uses the ordinary one: it wakes on
+      // the system timer tick with the least scatter.
+      static thread_local HANDLE hiTimer = CreateWaitableTimerExW(nullptr, nullptr, hub_win_opts().plainTimer ? 0 : 0x00000002 /* high resolution */, TIMER_ALL_ACCESS);
+      static thread_local HANDLE tickTimer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+      static thread_local hub_win_tick_t st;
+      if (!st.init) st.setup();
+      uint64_t now = hubNowTicks();
+      if (now >= st.winEnd) st.closeWindow(now);
+      const HANDLE timer = st.adapt ? tickTimer : hiTimer;
+      ++st.winBlocks;
+      bool slept = false;
+      if (!timer || now >= t) {
+          // nothing to wait with, or already due
+      } else if (!st.adapt) {
+          // Fixed final spin: sleep while more than the spin is left.
+          for (;;) {
+              const uint64_t left = t - now;
+              if (left <= st.fixedT) break;
+              const uint64_t sleepT = left - st.fixedT;
+              if (!hubTickSleep(timer, sleepT)) break;
+              const uint64_t woke = hubNowTicks(); slept = true; ++st.winSleeps;
+              st.noteErr(woke > now + sleepT ? woke - (now + sleepT) : 0);
+              now = woke;
+              if (now >= t) break;
+          }
+      } else {
+          const uint64_t left = t - now;
+          const bool fresh = st.anchorOk && now - st.anchor < st.maxAgeT;
+          if (fresh) {
+              // Sleep to the last timer tick that still leaves the guard before the deadline. A wake-up one tick
+              // early is followed by a second sleep.
+              for (int i = 0; i < 3 && t > st.anchor + st.guardT; ++i) {
+                  const uint64_t k = (t - st.guardT - st.anchor) / st.P;
+                  const uint64_t wake = st.anchor + k * st.P;
+                  if (wake <= now + st.minSleepT) break;
+                  const uint64_t dueAt = wake - st.halfP;   // any time inside the timer period before that tick
+                  if (!hubTickSleep(timer, dueAt > now ? dueAt - now : 0)) break;
+                  const uint64_t woke = hubNowTicks(); slept = true; ++st.winSleeps;
+                  const bool early = woke + st.halfP < wake;
+                  const uint64_t err = woke > wake ? woke - wake : 0;
+                  if (!early) st.noteErr(err);
+                  if (err > st.halfP) ++st.winMiss;   // a later tick than the one expected
+                  st.anchor = woke; now = woke;
+                  if (!early || now >= t) break;
+              }
+          } else if (left > st.P + st.guardT + st.guardAddT || (st.noSleepBlocks >= 300 && left > st.halfP)) {
+              // Position of the timer tick unknown: sleep to the next one. Safe when a whole timer period fits; after
+              // 0.2 s without any sleep it is also taken with half a period left (that block may start late).
+              if (hubTickSleep(timer, 0)) {
+                  const uint64_t woke = hubNowTicks(); slept = true; ++st.winSleeps; ++st.winAnchors;
+                  st.anchor = woke; st.anchorOk = true; now = woke;
+              }
+          }
+      }
+      if (slept) st.noSleepBlocks = 0; else ++st.noSleepBlocks;
+      const uint64_t spinFrom = now;
+      while (now < t) { YieldProcessor(); now = hubNowTicks(); }
+      st.spinAcc += now - spinFrom;
+      if (now - t > st.lateMax) st.lateMax = now - t;
+      if (now - t > st.lateT) ++st.winLate;
+  }
+  static inline void hubWaitUntilTicks(uint64_t t) {
+      if (hub_tl_tick) { hubTickWaitUntilTicks(t); return; }
+      static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* high resolution */, TIMER_ALL_ACCESS);
+      const uint64_t spinTicks = hub_tl_pacer ? hub_win_opts().pacerSpinTicks : hub_win_opts().spinTicks;
+      for (;;) {
+          const uint64_t now = hubNowTicks();
+          if (now >= t) return;
+          const uint64_t left = t - now;
+          if (timer && !hub_tl_spin_only && left > spinTicks) {
+              LARGE_INTEGER due; due.QuadPart = -(LONGLONG) ((left - spinTicks) * 10000000ULL / hub_qpc_freq());
+              if (due.QuadPart < 0 && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) { WaitForSingleObject(timer, 50); continue; }
+          }
+          YieldProcessor();
+      }
+  }
+  static inline void hub_set_thread_name(const char* n) {
+      wchar_t w[64]; size_t i = 0; for (; n[i] && i < 63; ++i) w[i] = (wchar_t) (unsigned char) n[i]; w[i] = 0;
+      SetThreadDescription(GetCurrentThread(), w);
+  }
+  // Windows stand-in for the real-time policies: the multimedia class scheduler's "Pro Audio" task plus the
+  // highest ordinary thread priority.
+  static inline void hub_set_fifo(int, const char* who) {
+      const hub_win_opts_t& o = hub_win_opts();
+      static const bool once = [&o] {
+          timeBeginPeriod(1);
+          const DWORD cls = o.prio == 2 ? REALTIME_PRIORITY_CLASS : o.prio == 1 ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
+          const BOOL ok = SetPriorityClass(GetCurrentProcess(), cls);
+          std::cout << "[HUB] process priority class: " << (o.prio == 2 ? "realtime" : o.prio == 1 ? "high" : "normal") << (ok ? "" : " (refused)")
+                    << ", final spin " << (o.spinTicks * 1000000ULL / hub_qpc_freq()) << " us\n";
+          return true;
+      }();
+      (void) once;
+      const bool isTick = !strcmp(who, "audio thread");
+      const bool isRecv = !strcmp(who, "recv thread");
+      const bool spin = isTick && o.tickSpin;
+      hub_tl_spin_only = spin;
+      hub_tl_pacer = !strcmp(who, "pacer thread");
+      if (isTick && !spin) {
+          hub_tl_tick = true;
+          if (HMODULE nt = GetModuleHandleW(L"ntdll.dll")) {
+              hub_nt_set_res = (hub_nt_set_res_fn) (void*) GetProcAddress(nt, "NtSetTimerResolution");
+              hub_nt_query_res = (hub_nt_query_res_fn) (void*) GetProcAddress(nt, "NtQueryTimerResolution");
+          }
+          ULONG lo = 0, hi = 0, cur = 0; if (hub_nt_query_res) hub_nt_query_res(&lo, &hi, &cur);
+          std::cout << "[HUB-TICK] block tick: " << (o.tickAdapt == 0 ? "fixed final spin" : o.tickAdapt == 1 ? "fixed final spin, follows the system timer tick if this computer's timer proves late" : "follows the system timer tick")
+                    << (o.plainTimer ? ", TEST: ordinary timer" : "") << "; system timer " << (cur / 10) << " us, finest " << (hi / 10) << " us\n";
+      }
+      DWORD idx = 0;
+      // A thread that never sleeps would be throttled by the multimedia scheduler, so it stays outside it.
+      const HANDLE h = (spin || !o.mmcss) ? nullptr : AvSetMmThreadCharacteristicsW(L"Pro Audio", &idx);
+      // The receive thread does microseconds of work per datagram; it must not queue behind a thread that spins
+      // towards a deadline, so it takes the top level and the tick the next one.
+      const char* lvl = "";
+      if (h && o.rxFirst) {
+          const AVRT_PRIORITY pr = isRecv ? AVRT_PRIORITY_CRITICAL : isTick ? AVRT_PRIORITY_HIGH : AVRT_PRIORITY_NORMAL;
+          if (AvSetMmThreadPriority(h, pr)) lvl = isRecv ? " (level critical)" : isTick ? " (level high)" : " (level normal)";
+      }
+      const BOOL ok = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+      bool pinned = false;
+      if (o.pinCpu >= 0) {
+          // The tick gets the processor to itself: the hub's other real-time threads stay off it.
+          DWORD_PTR procMask = 0, sysMask = 0;
+          const DWORD_PTR bit = (DWORD_PTR) 1 << o.pinCpu;
+          if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) && (procMask & bit) && (procMask & ~bit)) {
+              if (isTick) pinned = SetThreadAffinityMask(GetCurrentThread(), bit) != 0;
+              else SetThreadAffinityMask(GetCurrentThread(), procMask & ~bit);
+          }
+      }
+      std::cout << "[HUB] " << who << " scheduling: " << (h ? "Pro Audio task" : "no multimedia task") << lvl << ", priority " << (ok ? "time critical" : "unchanged")
+                << (spin ? ", never sleeps" : "") << (pinned ? ", pinned to cpu " + std::to_string(o.pinCpu) : std::string()) << "\n";
+  }
 #endif
 // Flush-to-zero for the calling thread: a number too small to matter is taken as zero, so the audio math never
 // drops into the processor's slow path for such numbers. The mode belongs to the thread, so each one sets it at its
@@ -65,6 +371,9 @@
   #include <float.h>
 #endif
 static int hub_tap_int(const char* name, int def);
+// Test-probe lines ([HUB-CHIRP], [HUB-AUDIO], [HUB-RESAMP], [HUB-CLAY] forwards): off unless SB_HUB_PROBE_LOG=1
+// (launch environment or the hub taps file) for a test run.
+static bool hub_probe_log() { static const bool on = hub_tap_int("SB_HUB_PROBE_LOG", 0) != 0; return on; }
 static bool hub_ftz_on() { static const bool on = hub_tap_int("SB_FTZ", 1) != 0; return on; }
 static void hub_flush_denormals() {
     if (!hub_ftz_on()) return;
@@ -81,6 +390,37 @@ static void hub_flush_denormals() {
 }
 // Recvmsg with the kernel's monotonic receive timestamp (ns, 0 = none).
 // Same semantics as recvfrom (flags 0, source address filled).
+#if defined(_WIN32)
+// Windows: the stack's receive timestamp when the socket has them (SO_TIMESTAMP control data on WSARecvMsg),
+// else the time right after the read, which also holds the wait of the datagram in the socket buffer.
+static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, socklen_t* salen, uint64_t* ktsNs) {
+    hub_tb_t tb; hub_timebase(&tb);
+    *ktsNs = 0;
+    if (hub_win_rx_ts_on) {
+        if (LPFN_WSARECVMSG fn = hub_win_recvmsg_fn(fd)) {
+            WSABUF wb; wb.buf = buf; wb.len = (ULONG) len;
+            alignas(8) char ctrl[64];
+            WSAMSG msg; memset(&msg, 0, sizeof(msg));
+            msg.name = sa; msg.namelen = (INT) *salen; msg.lpBuffers = &wb; msg.dwBufferCount = 1;
+            msg.Control.buf = ctrl; msg.Control.len = sizeof(ctrl);
+            DWORD got = 0;
+            if (fn((SOCKET) fd, &msg, &got, nullptr, nullptr) != 0) return -1;
+            *salen = (socklen_t) msg.namelen;
+            for (WSACMSGHDR* c = WSA_CMSG_FIRSTHDR(&msg); c; c = WSA_CMSG_NXTHDR(&msg, c)) {
+                if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == 0x300A /* SO_TIMESTAMP */ && c->cmsg_len >= WSA_CMSG_LEN(sizeof(UINT64))) {
+                    UINT64 q; memcpy(&q, WSA_CMSG_DATA(c), sizeof(q));
+                    *ktsNs = q * tb.numer / tb.denom;
+                }
+            }
+            if (*ktsNs == 0) *ktsNs = hubNowTicks() * tb.numer / tb.denom;
+            return (ssize_t) got;
+        }
+    }
+    const int n = ::recvfrom((SOCKET) fd, buf, (int) len, 0, sa, salen);
+    if (n >= 0) *ktsNs = hubNowTicks() * tb.numer / tb.denom;
+    return n;
+}
+#else
 static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, socklen_t* salen, uint64_t* ktsNs) {
     struct iovec iov; iov.iov_base = buf; iov.iov_len = len;
     alignas(8) char cbuf[64];
@@ -112,6 +452,7 @@ static ssize_t hubRecvKts(int fd, char* buf, size_t len, struct sockaddr* sa, so
     }
     return n;
 }
+#endif
 // Dissolve a connected UDP socket. macOS: connect(AF_UNSPEC) returns EAFNOSUPPORT for UDP, so
 // disconnectx(2); Linux/BSD: connect() with an AF_UNSPEC address is the documented way.
 static int hubDissolveUdp(int fd) {
@@ -122,13 +463,15 @@ static int hubDissolveUdp(int fd) {
     return ::connect(fd, &sa, sizeof(sa));
 #endif
 }
-static bool hubIdleMaskEnabled() {   // SB_IDLE_MASK=0 disables (A/B measurements)
+static bool hubIdleMaskEnabled() {   // SB_IDLE_MASK=0 disables
     static const bool on = [] { const char* e = std::getenv("SB_IDLE_MASK"); return !(e && e[0] == '0'); }();
     return on;
 }
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
   #include <mach/mach.h>
@@ -159,7 +502,9 @@ static const bool kHubDebug = []() {
 // CPU pause hint for the audio thread's short bounded barrier spin. Pure instruction: no syscall,
 // no scheduler interaction (std::this_thread::yield() on macOS is a swtch_pri syscall per call).
 static inline void hub_cpu_pause() {
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(_MSC_VER)
+    YieldProcessor();
+#elif defined(__aarch64__) || defined(__arm64__)
     asm volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(__i386__)
     __builtin_ia32_pause();
@@ -205,6 +550,9 @@ static void listenerScratchWarm(int blockSize) {
 // reset by statsWriterThread. File-static because the send impls are free functions.
 static std::atomic<uint64_t> gHubSendErrors{0};
 
+// Byte counters count what is on the wire: UDP payload + IP and UDP headers (IPv4 28, IPv6 48), as the player does.
+static inline int64_t hub_ip_udp_header_bytes(int family) { return family == AF_INET6 ? 48 : 28; }
+
 // The one place every datagram to a peer leaves the hub (bare sends, bundle flushes, AOO replies).
 // If the endpoint owns a connect()ed socket, send() on it: no per-datagram route/address lookup in
 // the kernel. Otherwise sendto on the shared socket. A failed send() is not retried via sendto
@@ -231,7 +579,7 @@ static inline int32_t hub_send_bare(HubEndpoint* ep, const char* data, int32_t s
         const int fd = ep->socketFd;
         const struct sockaddr_storage addr = d->addr;
         const socklen_t len = d->addrlen;
-        ep->sentBytes += size;
+        ep->sentBytes += size + hub_ip_udp_header_bytes(addr.ss_family);
         return (int32_t) hub_txhold().send(data, (int) size, [fd, addr, len](const char* p, int n) {
             return (int) ::sendto(fd, p, (size_t) n, 0, (const struct sockaddr*) &addr, len);
         });
@@ -245,9 +593,9 @@ static inline int32_t hub_send_bare_now(HubEndpoint* ep, const char* data, int32
         : ::sendto(ep->socketFd, data, (size_t)size, 0,
                    (const struct sockaddr*)&d->addr, d->addrlen);
     if (result > 0) {
-        ep->sentBytes += result;
+        ep->sentBytes += result + hub_ip_udp_header_bytes(d->addr.ss_family);
     } else if (result < 0) {
-        ep->lastErrno.store(errno, std::memory_order_relaxed);
+        ep->lastErrno.store(hub_sockerr(), std::memory_order_relaxed);
         ep->sendErrors.fetch_add(1, std::memory_order_relaxed);
         gHubSendErrors.fetch_add(1, std::memory_order_relaxed);
     }
@@ -326,7 +674,7 @@ static int32_t hub_client_send_impl(void* user, const char* data, int32_t size, 
     const struct sockaddr* addr = (const struct sockaddr*)raddr;
     socklen_t len = (addr->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
     ssize_t result = ::sendto(ep->socketFd, data, (size_t)size, 0, addr, len);
-    if (result > 0) ep->sentBytes += result;
+    if (result > 0) ep->sentBytes += result + hub_ip_udp_header_bytes(addr->sa_family);
     return (int32_t)result;
 }
 
@@ -361,8 +709,10 @@ SonobusHubServer::~SonobusHubServer() {
 // So the hub derives both from what the machine knows: the LAN address from the interface inside
 // the configured LAN subnet, the WAN address from one STUN binding request. Control path only
 // (start(), before the signaling server exists); nothing on the audio thread.
+#if !defined(_WIN32)
 #include <ifaddrs.h>
 #include <net/if.h>    // IFF_UP / IFF_LOOPBACK
+#endif
 #include <random>
 
 namespace {
@@ -416,7 +766,7 @@ std::string hub_pick_lan_ipv4(InLan inLan, std::string& ifname, bool& matchedSub
             ifname = "default route";
         }
     }
-    ::close(s);
+    hub_close(s);
     return out;
 }
 
@@ -434,7 +784,7 @@ std::string hub_default_route_cidr(std::string& ifname) {
     socklen_t len = sizeof(me);
     bool ok = (::connect(s, (struct sockaddr*)&probe, sizeof(probe)) == 0)
            && (::getsockname(s, (struct sockaddr*)&me, &len) == 0);
-    ::close(s);
+    hub_close(s);
     if (!ok) return {};
     std::string out;
     struct ifaddrs* list = nullptr;
@@ -458,6 +808,81 @@ std::string hub_default_route_cidr(std::string& ifname) {
     return out;
 }
 
+// Name and kind of the adapter that carries `ip`, for the start of the log, e.g.
+// Ethernet "Ethernet 2" (Intel I225-V), 1000 Mbit/s. Empty when it cannot be told. Start-up only.
+std::string hub_adapter_text(const std::string& ip) {
+    struct in_addr want {};
+    if (inet_pton(AF_INET, ip.c_str(), &want) != 1) return {};
+#if defined(_WIN32)
+    ULONG len = 16 * 1024;
+    std::string buf;
+    DWORD rc = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; ++tries) {
+        buf.resize(len);
+        rc = ::GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr,
+                                    (IP_ADAPTER_ADDRESSES*) &buf[0], &len);
+    }
+    if (rc != NO_ERROR) return {};
+    auto utf8 = [](const wchar_t* w) {
+        std::string s;
+        if (!w) return s;
+        const int n = ::WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);   // counts the end mark
+        if (n <= 1) return s;
+        s.resize((size_t) n);
+        ::WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], n, nullptr, nullptr);
+        s.resize((size_t) n - 1);
+        return s;
+    };
+    for (auto* a = (IP_ADAPTER_ADDRESSES*) &buf[0]; a; a = a->Next) {
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            if (((const struct sockaddr_in*) u->Address.lpSockaddr)->sin_addr.s_addr != want.s_addr) continue;
+            std::string t = a->IfType == IF_TYPE_IEEE80211 ? "Wi-Fi" : a->IfType == IF_TYPE_ETHERNET_CSMACD ? "Ethernet" : "Adapter";
+            t += " \"" + utf8(a->FriendlyName) + "\" (" + utf8(a->Description) + ")";
+            const unsigned long long bps = (unsigned long long) a->TransmitLinkSpeed;
+            if (bps >= 1000000ULL && bps < 1000000000000ULL) t += ", " + std::to_string(bps / 1000000ULL) + " Mbit/s";
+            return t;
+        }
+    }
+    return {};
+#else
+    std::string name;
+    struct ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0) return {};
+    for (auto* ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET || !ifa->ifa_name) continue;
+        if (reinterpret_cast<const struct sockaddr_in*>(ifa->ifa_addr)->sin_addr.s_addr == want.s_addr) { name = ifa->ifa_name; break; }
+    }
+    freeifaddrs(list);
+    if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string::npos) return {};
+  #if defined(__APPLE__)
+    // networksetup pairs each port name ("Ethernet", "Wi-Fi") with its device ("en0").
+    std::string ports, port;
+    if (FILE* f = ::popen("/usr/sbin/networksetup -listallhardwareports 2>/dev/null", "r")) { char b[512]; while (fgets(b, sizeof(b), f)) ports += b; ::pclose(f); }
+    std::istringstream in(ports);
+    std::string line, last;
+    while (std::getline(in, line)) {
+        if (line.rfind("Hardware Port: ", 0) == 0) last = line.substr(15);
+        else if (line == "Device: " + name) { port = last; break; }
+    }
+    if (port.empty()) return "Adapter " + name;
+    const bool wifi = port.find("Wi-Fi") != std::string::npos || port.find("AirPort") != std::string::npos;
+    const bool wired = port.find("Ethernet") != std::string::npos || port.find("LAN") != std::string::npos;
+    return std::string(wifi ? "Wi-Fi" : wired ? "Ethernet" : "Adapter") + " \"" + port + "\" (" + name + ")";
+  #else
+    struct stat st;
+    const std::string base = "/sys/class/net/" + name;
+    std::string t = std::string(::stat((base + "/wireless").c_str(), &st) == 0 ? "Wi-Fi" : "Ethernet") + " " + name;
+    if (FILE* f = fopen((base + "/speed").c_str(), "r")) {
+        int mbit = 0;
+        if (fscanf(f, "%d", &mbit) == 1 && mbit > 0) t += ", " + std::to_string(mbit) + " Mbit/s";
+        fclose(f);
+    }
+    return t;
+  #endif
+#endif
+}
+
 // One RFC 5389 STUN Binding request from a throw-away UDP socket; returns the
 // reflexive (public) IPv4 in `ip`. Bounded by timeoutMs per attempt.
 bool hub_stun_public_ipv4(const char* host, int port, int timeoutMs, std::string& ip, std::string& err) {
@@ -472,7 +897,7 @@ bool hub_stun_public_ipv4(const char* host, int port, int timeoutMs, std::string
         return false;
     }
     int s = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { freeaddrinfo(res); err = std::string("socket: ") + strerror(errno); return false; }
+    if (s < 0) { freeaddrinfo(res); err = std::string("socket: ") + strerror(hub_sockerr()); return false; }
 
     uint8_t req[20] = {0};
     req[0] = 0x00; req[1] = 0x01;                 // Binding Request
@@ -508,15 +933,15 @@ bool hub_stun_public_ipv4(const char* host, int port, int timeoutMs, std::string
                 if (!ok && !plain.empty()) { ip = plain; ok = true; }
                 if (!ok) err = "reply without a mapped address";
             } else {
-                err = n < 0 ? std::string("recv: ") + strerror(errno) : "unexpected reply";
+                err = n < 0 ? std::string("recv: ") + strerror(hub_sockerr()) : "unexpected reply";
             }
         } else {
             err = "timeout";
         }
     } else {
-        err = std::string("send: ") + strerror(errno);
+        err = std::string("send: ") + strerror(hub_sockerr());
     }
-    ::close(s);
+    hub_close(s);
     freeaddrinfo(res);
     return ok;
 }
@@ -530,6 +955,7 @@ void SonobusHubServer::resolveAdvertisedAddresses(const std::string& aooServerHo
     mAdvertisedLanHost.clear();
     mAdvertisedPublicHost.clear();
     mAdvertisedPublicPort = 0;
+    mPublicUnknown.store(false);
     if (!hub_host_is_loopback(aooServerHost)) {
         std::cout << "[HUB] Advertised addresses: signaling via " << aooServerHost
                   << " — using the server's observed public address and this connection's local address (no override)\n";
@@ -545,6 +971,8 @@ void SonobusHubServer::resolveAdvertisedAddresses(const std::string& aooServerHo
     } else {
         std::cout << "[HUB] Advertised LAN address: " << mAdvertisedLanHost << ":" << mLocalPort
                   << " (" << ifname << (matched && !mLanSubnetCidr.empty() ? ", in lan subnet " + mLanSubnetCidr : "") << ")\n";
+        if (const std::string adapter = hub_adapter_text(mAdvertisedLanHost); !adapter.empty())
+            std::cout << "[HUB] Network adapter: " + adapter + (adapter.rfind("Wi-Fi", 0) == 0 ? " - a hub belongs on a network cable" : "") + "\n";
     }
     if (!mPublicAddressHost.empty()) {
         std::cout << "[HUB] Advertised public address: " << mPublicAddressHost << " (settings: public_address)\n";
@@ -553,19 +981,25 @@ void SonobusHubServer::resolveAdvertisedAddresses(const std::string& aooServerHo
     static const struct { const char* host; int port; } kStun[] = {
         { "stun.l.google.com", 19302 }, { "stun.cloudflare.com", 3478 },
     };
-    for (auto& srv : kStun) {
-        std::string ip, err;
-        if (hub_stun_public_ipv4(srv.host, srv.port, 800, ip, err)) {
-            mAdvertisedPublicHost = ip;
-            mAdvertisedPublicPort = mLocalPort;   // the router's forward of the hub UDP port (same port as LAN)
-            std::cout << "[HUB] Advertised public address: " << ip << ":" << mLocalPort
-                      << " (STUN " << srv.host << ")\n";
-            return;
+    // Three rounds, a second apart: a network that is still coming up gets a few seconds.
+    for (int round = 0; round < 3; ++round) {
+        if (round > 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+        for (auto& srv : kStun) {
+            std::string ip, err;
+            if (hub_stun_public_ipv4(srv.host, srv.port, 800, ip, err)) {
+                mAdvertisedPublicHost = ip;
+                mAdvertisedPublicPort = mLocalPort;   // the router's forward of the hub UDP port (same port as LAN)
+                std::cout << "[HUB] Advertised public address: " << ip << ":" << mLocalPort
+                          << " (STUN " << srv.host << ")\n";
+                return;
+            }
+            std::cerr << "[HUB] STUN " << srv.host << ":" << srv.port << " failed: " << err << "\n";
         }
-        std::cerr << "[HUB] STUN " << srv.host << ":" << srv.port << " failed: " << err << "\n";
     }
-    std::cerr << "[HUB] WARNING: public address unknown — WAN players will be told 127.0.0.1. "
-                 "Set 'Public address' in Settings (public_address) or check the internet connection.\n";
+    mPublicUnknown.store(true);
+    std::cerr << "[HUB] WARNING: public address unknown. Players outside this network are refused until it is known "
+                 "(they could only be given 127.0.0.1). Check the internet connection and restart the hub, or set "
+                 "'Public address' in Settings (public_address).\n";
 }
 
 // Port check.
@@ -588,6 +1022,20 @@ static bool hub_resolve_ipv4(const std::string& host, struct in_addr& out) {
     out = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
     freeaddrinfo(res);
     return true;
+}
+
+// The required ports an outside probe found closed, e.g. "UDP 12999"; empty = none.
+static std::string hub_closed_required_ports(bool tcpOk, bool udpOk, int serverPort) {
+    if (tcpOk && udpOk) return {};
+    return std::string(!tcpOk && !udpOk ? "TCP and UDP " : !tcpOk ? "TCP " : "UDP ") + std::to_string(serverPort);
+}
+
+// Local wall-clock time for log lines.
+static std::string hub_clock_stamp() {
+    const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    struct tm lt; localtime_r(&t, &lt);
+    char stamp[32]; strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &lt);
+    return stamp;
 }
 
 bool SonobusHubServer::portCheckViaHelper(std::string& text, int& state, bool& answered) {
@@ -638,7 +1086,7 @@ bool SonobusHubServer::portCheckViaHelper(std::string& text, int& state, bool& a
             } catch (...) {}
         }
     }
-    ::close(sock);
+    hub_close(sock);
     if (mRunning.load()) std::this_thread::sleep_for(std::chrono::milliseconds(400));   // late pings
     const bool udpAudio = mPortProbeAudioHits.load(std::memory_order_relaxed) != a0;
     const bool udpServer = aoo_sb_fwprobe_server_hits() != s0;
@@ -654,6 +1102,7 @@ bool SonobusHubServer::portCheckViaHelper(std::string& text, int& state, bool& a
     // server_port (TCP+UDP) is required for outside players. udp_port is optional: players usually get in by
     // hole punching, but forwarding it helps players behind strict routers.
     const bool required = tcpOk == 1 && udpServer;
+    mPortFailScratch = hub_closed_required_ports(tcpOk == 1, udpServer, mLocalServerPort);
     const std::string lan = mAdvertisedLanHost.empty() ? std::string("this Mac") : mAdvertisedLanHost;
     if (!required) text += "   - open TCP+UDP " + std::to_string(mLocalServerPort) + " in your router, forwarded to " + lan + ", or in your cloud firewall";
     else if (!udpAudio) text += "   (UDP " + std::to_string(mLocalPort) + " optional: open it the same way for players behind strict routers)";
@@ -677,6 +1126,8 @@ std::string SonobusHubServer::localPortCheckText() const {
     if (fw.find("disabled") != std::string::npos) t += "macOS firewall off";
     else if (fw.find("enabled") != std::string::npos) t += "macOS firewall ON (allow the hub when macOS asks)";
     else t += "not inspected";
+#elif defined(_WIN32)
+    t += "not inspected (allow sonobus-hub in the Windows firewall when it asks)";
 #else
     const std::string ufw = hub_run_cmd("ufw status 2>/dev/null");
     auto ufwAllows = [&](int port, const char* proto) {
@@ -755,6 +1206,7 @@ bool SonobusHubServer::portCheckViaPlayer(const std::string& user, const std::st
          + "   UDP " + std::to_string(mLocalPort) + " " + mark(udpAudio)
          + "   (verified from " + user + ")";
     const bool required = tcpOk == 1 && udpServer;
+    mPortFailScratch = hub_closed_required_ports(tcpOk == 1, udpServer, mLocalServerPort);
     const std::string lan = mAdvertisedLanHost.empty() ? std::string("this machine") : mAdvertisedLanHost;
     if (!required) text += "   - open TCP+UDP " + std::to_string(mLocalServerPort) + " in your router, forwarded to " + lan + ", or in your cloud firewall";
     else if (!udpAudio) text += "   (UDP " + std::to_string(mLocalPort) + " optional: open it the same way for players behind strict routers)";
@@ -796,9 +1248,17 @@ void SonobusHubServer::portCheckThreadMain() {
     while (mRunning.load()) {
         { std::lock_guard<std::mutex> lk(mPortCheckMutex); mPortCheckText = "Port check: running..."; mPortCheckState = 0; mPortCheckVerifiedAtMs = 0; }
         std::string text; int state = 0;
+        mPortFailScratch.clear();
         const bool done = portCheckOnce(text, state);
-        { std::lock_guard<std::mutex> lk(mPortCheckMutex); mPortCheckText = text; mPortCheckState = state; }
-        std::cout << "[HUB-PORTCHECK] " << text << "\n";
+        if (!mRunning.load()) break;   // cut short by a stop: no verdict
+        // Blocked only on a verdict from outside. No answer from the checker is not a verdict.
+        const std::string failed = state == 2 ? mPortFailScratch : std::string();
+        { std::lock_guard<std::mutex> lk(mPortCheckMutex); mPortCheckText = text; mPortCheckState = state;
+          mPortCheckDone = true; mPortCheckBlocked = !failed.empty(); mPortCheckFailed = failed; }
+        std::cout << "[HUB-PORTCHECK] " + text + "\n";
+        if (!failed.empty())
+            std::cout << "[HUB-PORTCHECK] FAILED: " + failed + " is closed. Players outside this network cannot join, and a listed stage is "
+                         "taken off the stage directory until the check passes. Checked again every 5 minutes.\n";
         // Stay alive — once the required ports pass we only re-run on request (web page button /
         // GUI); while they fail, every 5 min or on request.
         for (int i = 0; mRunning.load() && !mPortCheckRequested.exchange(false, std::memory_order_relaxed) && (done || i < 300); ++i)
@@ -811,11 +1271,11 @@ void SonobusHubServer::portCheckThreadMain() {
 // replyFd is a dup() of the socket the request arrived on (the requester's NAT only lets that source back in).
 static std::atomic<uint64_t> g_hubProbeLastServeMs{0};
 static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int udpPort, int serverPort, int replyFd) {
-    if (udpPort <= 0 || udpPort > 65535 || serverPort <= 0 || serverPort > 65535) { ::close(replyFd); return; }
+    if (udpPort <= 0 || udpPort > 65535 || serverPort <= 0 || serverPort > 65535) { hub_close(replyFd); return; }
     const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     uint64_t last = g_hubProbeLastServeMs.load(std::memory_order_relaxed);
-    if (now - last < 2000 || !g_hubProbeLastServeMs.compare_exchange_strong(last, now)) { ::close(replyFd); return; }
+    if (now - last < 2000 || !g_hubProbeLastServeMs.compare_exchange_strong(last, now)) { hub_close(replyFd); return; }
     std::thread([to, token, udpPort, serverPort, replyFd]() {
         auto ping = [&](int port, const char* what) {
             int s = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -824,27 +1284,27 @@ static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int
             char b[128]; osc::OutboundPacketStream m(b, sizeof(b));
             m << osc::BeginMessage("/sb/fwprobe/ping") << (osc::int64)token << what << osc::EndMessage;
             for (int i = 0; i < 3; ++i) { ::sendto(s, m.Data(), m.Size(), 0, (struct sockaddr*)&d, sizeof(d)); std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
-            ::close(s);
+            hub_close(s);
         };
         ping(udpPort, "udp-audio");
         ping(serverPort, "udp-server");
         int tcpOk = 0;
         int t = ::socket(AF_INET, SOCK_STREAM, 0);
         if (t >= 0) {
-            fcntl(t, F_SETFL, fcntl(t, F_GETFL, 0) | O_NONBLOCK);
+            hub_set_nonblock(t);
             struct sockaddr_in d = to; d.sin_port = htons((uint16_t)serverPort);
             int r = ::connect(t, (struct sockaddr*)&d, sizeof(d));
             if (r == 0) tcpOk = 1;
-            else if (errno == EINPROGRESS) {
+            else if (hub_connect_pending(hub_sockerr())) {
                 struct pollfd pf { t, POLLOUT, 0 };
                 if (::poll(&pf, 1, 2000) == 1) { int err = 0; socklen_t el = sizeof(err); getsockopt(t, SOL_SOCKET, SO_ERROR, &err, &el); tcpOk = err == 0 ? 1 : 0; }
             }
-            ::close(t);
+            hub_close(t);
         }
         char b[128]; osc::OutboundPacketStream m(b, sizeof(b));
         m << osc::BeginMessage("/sb/fwprobe/result") << (osc::int64)token << (int32_t)tcpOk << osc::EndMessage;
         for (int i = 0; i < 2; ++i) ::sendto(replyFd, m.Data(), m.Size(), 0, (const struct sockaddr*)&to, sizeof(to));
-        ::close(replyFd);
+        hub_close(replyFd);
         char ip[INET_ADDRSTRLEN] = {}; inet_ntop(AF_INET, &to.sin_addr, ip, sizeof(ip));
         std::cout << "[HUB-PORTCHECK] checked " << ip << " for another hub (TCP " << serverPort << (tcpOk ? " OK" : " BLOCKED") << ")\n";
     }).detach();
@@ -853,7 +1313,7 @@ static void hub_serve_port_probe(const struct sockaddr_in to, int64_t token, int
 // Entry 1: request on the hub's audio UDP socket (works on a LAN, or where udp_port is forwarded).
 void SonobusHubServer::handlePortProbeRequest(const struct sockaddr_storage* src, int64_t token, int udpPort, int serverPort) {
     if (src->ss_family != AF_INET) return;
-    const int replyFd = ::dup(mSocket);   // own fd: safe even if the hub stops meanwhile
+    const int replyFd = hub_dup(mSocket);   // own fd: safe even if the hub stops meanwhile
     if (replyFd < 0) return;
     hub_serve_port_probe(*(const struct sockaddr_in*)src, token, udpPort, serverPort, replyFd);
 }
@@ -1059,7 +1519,12 @@ void SonobusHubServer::sessionsSaveLocked() const {
     if (!f) return;   // directory not there yet (hub_settings.json never saved) — in memory only until then
     f << o.str(); f.close();
     if (!f) { ::remove(tmp.c_str()); return; }
+#if defined(_WIN32)
+    // rename() does not replace an existing file on Windows
+    if (!MoveFileExA(tmp.c_str(), mSessionsFile.c_str(), MOVEFILE_REPLACE_EXISTING)) ::remove(tmp.c_str());
+#else
     ::rename(tmp.c_str(), mSessionsFile.c_str());
+#endif
 }
 void SonobusHubServer::setSessionsFile(const std::string& path) {
     std::lock_guard<std::mutex> g(mRecentMutex);
@@ -1225,7 +1690,7 @@ static void hub_fwprobe_req_from_server(const char* buf, int len, const struct s
         const int64_t token = it->AsInt64(); ++it;
         const int32_t up = it->AsInt32(); ++it;
         const int32_t sp = it->AsInt32();
-        const int fd = ::dup(replyfd);
+        const int fd = hub_dup(replyfd);
         if (fd < 0) return;
         hub_serve_port_probe(*(const struct sockaddr_in*)from, token, up, sp, fd);
     } catch (...) {}
@@ -1239,6 +1704,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         std::cerr << "[HUB] Already running\n";
         return false;
     }
+    mStartError.clear();
 
     // Open on the control path.
     if (!mDumpPeerName.empty() && mDumpSecs > 0) {
@@ -1256,7 +1722,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     mBlockSize = blockSize;
     mChannels = channels;
     // Mute, solo and gain changes of a feed are ramped: a full-scale change takes kHubGainRampMs.
-    // SB_HUB_GAIN_RAMP=0 = the change is a step between two blocks (former behaviour).
+    // SB_HUB_GAIN_RAMP=0 = the change is a step between two blocks.
     mGainRampStep = (hub_tap_int("SB_HUB_GAIN_RAMP", 1) == 1)
         ? 1.0f / (float) std::max(1, (int) std::lround(kHubGainRampMs * 0.001 * (double) sampleRate)) : 0.0f;
     mGroupName = groupName;
@@ -1274,6 +1740,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     mSocket = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (mSocket < 0) {
         std::cerr << "[HUB] Failed to create UDP socket\n";
+        mStartError = "The system gave the hub no UDP socket.";
         return false;
     }
 
@@ -1298,8 +1765,8 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
             const int probe = ::socket(AF_INET, SOCK_DGRAM, 0);
             if (probe < 0) break;   // cannot probe: fall through to the normal bind
             const int rc = ::bind(probe, (struct sockaddr*)&probeAddr, sizeof(probeAddr));
-            const int err = errno;
-            ::close(probe);
+            const int err = hub_sockerr();
+            hub_close(probe);
             if (rc == 0) { held = false; break; }
             if (err != EADDRINUSE) break;   // anything else: let the real bind below report it
             if (!held) {
@@ -1314,7 +1781,8 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
             std::cerr << "[HUB-SOCK] UDP port " << localUdpPort
                       << " still held after 30 s — refusing to start a second hub on it"
                       << " (quit the previous instance first)\n";
-            ::close(mSocket);
+            mStartError = "UDP port " + std::to_string(localUdpPort) + " (audio) is still held by another hub.";
+            hub_close(mSocket);
             mSocket = -1;
             return false;
         }
@@ -1324,7 +1792,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         int one = 1;
         if (::setsockopt(mSocket, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0
             || ::setsockopt(mSocket, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) != 0) {
-            std::cerr << "[HUB] warning: SO_REUSEADDR/SO_REUSEPORT failed (" << strerror(errno)
+            std::cerr << "[HUB] warning: SO_REUSEADDR/SO_REUSEPORT failed (" << strerror(hub_sockerr())
                       << ") — connected send sockets disabled, using the shared socket\n";
             mConnectedSockets = false;
         }
@@ -1348,16 +1816,16 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         int kts = 1;   // Kernel receive timestamps for [HUB-KJIT]
 #if defined(SO_TIMESTAMP_MONOTONIC)
         if (::setsockopt(mSocket, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &kts, sizeof(kts)) < 0)
-            std::cerr << "[HUB] Warning: SO_TIMESTAMP_MONOTONIC failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_TIMESTAMP_MONOTONIC failed: " << strerror(hub_sockerr()) << "\n";
 #elif defined(SO_TIMESTAMPNS)
         if (::setsockopt(mSocket, SOL_SOCKET, SO_TIMESTAMPNS, &kts, sizeof(kts)) < 0)
-            std::cerr << "[HUB] Warning: SO_TIMESTAMPNS failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_TIMESTAMPNS failed: " << strerror(hub_sockerr()) << "\n";
 #endif
     }
     {
         int rcvbuf = 4 * 1024 * 1024;  // 4 MB
         if (::setsockopt(mSocket, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
-            std::cerr << "[HUB] Warning: SO_RCVBUF setsockopt failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB] Warning: SO_RCVBUF setsockopt failed: " << strerror(hub_sockerr()) << "\n";
         } else {
             int actual = 0;
             socklen_t aLen = sizeof(actual);
@@ -1380,7 +1848,8 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (::bind(mSocket, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
         std::cerr << "[HUB] Failed to bind UDP socket on port " << localUdpPort << "\n";
-        ::close(mSocket);
+        mStartError = "UDP port " + std::to_string(localUdpPort) + " (audio) is in use by another program.";
+        hub_close(mSocket);
         mSocket = -1;
         return false;
     }
@@ -1391,10 +1860,16 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     ::getsockname(mSocket, (struct sockaddr*)&actualAddr, &addrLen);
     mLocalPort = ntohs(actualAddr.sin_port);
     std::cout << "[HUB] UDP socket bound on port " << mLocalPort << "\n";
+#if defined(_WIN32)
+    hub_win_rx_ts_on = hub_win_opts().kts && hub_win_rx_ts_enable(mSocket) && hub_win_recvmsg_fn(mSocket) != nullptr;
+    std::cout << "[HUB] receive timestamps: " << (hub_win_rx_ts_on ? "from the stack" : "taken at the read");
+    if (!hub_win_rx_ts_on && hub_win_opts().kts) std::cout << " (SIO_TIMESTAMPING error " << hub_win_rx_ts_err << (hub_win_recvmsg_fn(mSocket) ? "" : ", no WSARecvMsg") << ")";
+    std::cout << "\n";
+#endif
 
     // Set socket non-blocking for recv thread
-    int flags = fcntl(mSocket, F_GETFL, 0);
-    fcntl(mSocket, F_SETFL, flags | O_NONBLOCK);
+    hub_set_nonblock(mSocket);
+    hub_udp_setup(mSocket);
 
     // LAN subnet is derived from the default-route interface unless a --lan-subnet CLI override was given.
     if (mLanSubnetCidr.empty()) {
@@ -1433,8 +1908,9 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         mAooServer.reset(aoo::net::iserver::create(mLocalServerPort, &err));
         if (!mAooServer || err != 0) {
             std::cerr << "[HUB] Failed to create local AOO server on port " << mLocalServerPort << " (err=" << err << ")\n";
+            mStartError = "Port " + std::to_string(mLocalServerPort) + " (connection, TCP and UDP) is in use by another program.";
             mAooServer.reset();
-            ::close(mSocket);
+            hub_close(mSocket);
             mSocket = -1;
             return false;
         }
@@ -1466,7 +1942,8 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (!mClient) {
         std::cerr << "[HUB] Failed to create AOO client\n";
-        ::close(mSocket);
+        mStartError = "The hub's own connection could not be set up.";
+        hub_close(mSocket);
         mSocket = -1;
         delete clientEndpoint;
         mClientEndpoint = nullptr;
@@ -1559,7 +2036,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     // wire mode. Bundling happens on the emitter: pacer (--send-pace) or
     // listener thread (--cut-through).
     std::cout << "[HUB] DSCP marking: " << (mDscpEnabled ? "EF (voice)" : "off") << "\n";
-    // Send-socket mode banner (A/B anchor for --connected-sockets).
+    // Send-socket mode banner (--connected-sockets).
     std::cout << "[HUB] Send sockets: " << (mConnectedSockets ? "connected per listener" : "shared") << "\n";
     std::cout << "[HUB] Redundancy: LAN " << mRedundancyLan << " / WAN " << mRedundancyWan << " copies per block\n";
     // Send-mode banner (paced / cut-through / legacy inline).
@@ -1613,6 +2090,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (!mConnected.load()) {
         std::cerr << "[HUB] Timed out connecting to AOO server\n";
+        mStartError = "The hub could not reach the connection server at " + aooServerHost + ":" + std::to_string(aooServerPort) + ".";
         stop();
         return false;
     }
@@ -1646,6 +2124,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
 
     if (!mGroupJoined.load()) {
         std::cerr << "[HUB] Timed out joining group\n";
+        mStartError = "The hub could not open its stage on the connection server.";
         stop();
         return false;
     }
@@ -1669,6 +2148,7 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     sessionBegin(mGroupName, mGroupPassword);   // Recent sessions — the hub now serves this group
 
     std::cout << "[HUB] Hub server running. Waiting for peers...\n";
+    mStarted.store(true);
     return true;
 }
 
@@ -1680,6 +2160,7 @@ void SonobusHubServer::stop() {
     // resource teardown below always runs; every step is guarded on the resource existing, so a second
     // call (explicit stop() followed by the destructor) is a clean no-op.
     const bool wasRunning = mRunning.exchange(false);
+    mStarted.store(false);
 
     if (wasRunning) {
     std::cout << "[HUB] Stopping hub server...\n";
@@ -1700,7 +2181,6 @@ void SonobusHubServer::stop() {
     aoo_sb_set_join_gate(nullptr);
     { SonobusHubServer* self = this; g_hubForJoinGate.compare_exchange_strong(self, nullptr); }
     if (mSendThread && mSendThread->joinable()) mSendThread->join();
-    // (mLevelSendThread removed)
     // Wake + join the pacer (its wait predicate checks mRunning).
     mPacerCv.notify_all();
     if (mPacerThread && mPacerThread->joinable()) mPacerThread->join();
@@ -1749,7 +2229,7 @@ void SonobusHubServer::stop() {
     mAooServer.reset();
 
     if (mSocket >= 0) {
-        ::close(mSocket);
+        hub_close(mSocket);
         mSocket = -1;
     }
 
@@ -1803,7 +2283,9 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
     // touches).
     s.bytesInTotal = mBytesInTotal.load(std::memory_order_relaxed);
     s.holdMode = mHoldMode.load(std::memory_order_relaxed);   
-    { std::lock_guard<std::mutex> lk(mPortCheckMutex); s.portCheckText = mPortCheckText; s.portCheckState = mPortCheckState; s.portLocalText = mPortLocalText; s.portCheckVerifiedAtMs = mPortCheckVerifiedAtMs; }
+    { std::lock_guard<std::mutex> lk(mPortCheckMutex); s.portCheckText = mPortCheckText; s.portCheckState = mPortCheckState; s.portLocalText = mPortLocalText; s.portCheckVerifiedAtMs = mPortCheckVerifiedAtMs;
+      s.portCheckBlocked = mPortCheckBlocked; s.portCheckFailed = mPortCheckFailed; }
+    s.publicAddressUnknown = mPublicUnknown.load();
 
     // CPU sample: process user+sys time over at least 0.9 s, so callers on several threads (window, web page,
     // internals) all read the same steady figure instead of a burst over a few milliseconds.
@@ -1858,7 +2340,7 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
         UiPeerSnapshot up;
         up.id = p->id;
         up.userName = p->userName;
-        up.recvChannels = p->uiRecvChannels.load(std::memory_order_relaxed);   // Atomic mirror (was a racy plain-int read)
+        up.recvChannels = p->uiRecvChannels.load(std::memory_order_relaxed);   // Atomic mirror
 
         char ipBuf[INET6_ADDRSTRLEN] = {};
         const auto* sa = (const struct sockaddr*)&p->addr;
@@ -1967,7 +2449,7 @@ void SonobusHubServer::latencyBroadcastTick() {
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         // Interval is a hub tap: SB_HUB_LAT_BCAST_S, default 10 s, 0 = off. Display-only, control path.
-        static const int latBcastS = hub_tap_int("SB_HUB_LAT_BCAST_S", 10);   // 2 s was too chatty; display-only
+        static const int latBcastS = hub_tap_int("SB_HUB_LAT_BCAST_S", 10);   // display-only
         if (latBcastS > 0 && nowMs - mLastLatBroadcastMs >= (int64_t) latBcastS * 1000 && mSocket >= 0) {
             mLastLatBroadcastMs = nowMs; ++mLatBroadcastCount;
             // Hub-originated stock /sb/ping to every player (answered with /sb/pngack, handled
@@ -2130,7 +2612,7 @@ static bool hub_hold_lateness_log(){   // 1 or 2: the sink measures, the 10-s pa
     return v;
 }
 // After a join the hold grows at the first dry spells, keeps growing for cause until the commit, and quick
-// jump and commit come at fixed times after the join. SB_HOLD_EARLY_REACT=0 = former behaviour.
+// jump and commit come at fixed times after the join. SB_HOLD_EARLY_REACT=0 turns this off.
 static bool hub_hold_early(){
     static const bool v = (hub_tap_int("SB_HOLD_EARLY_REACT", 1) == 1);
     return v;
@@ -2150,7 +2632,7 @@ static bool hub_hold_follow(){
     return v;
 }
 // A step down that is taken back within ten minutes doubles the calm time the next one needs.
-// SB_HOLD_FLAP_GUARD=0 = former rules.
+// SB_HOLD_FLAP_GUARD=0 turns this off.
 static bool hub_hold_flap_guard(){
     static const bool v = (hub_tap_int("SB_HOLD_FLAP_GUARD", 1) == 1);
     return v;
@@ -2162,7 +2644,7 @@ static bool hub_hold_fast_decay(){
 }
 static int32_t hub_hold_to_blocks(double ms, double blockMs){ return std::max<int32_t>(2, (int32_t) std::ceil(ms / blockMs - 1e-6)); }
 // The hold comes down only when the last minute had no more gaps above the lower level than the allowance, counting
-// the stalls longer than the ceiling too. SB_HUB_HOLD_DECAY_GATE=0 leaves those stalls out (the former rule).
+// the stalls longer than the ceiling too. SB_HUB_HOLD_DECAY_GATE=0 leaves those stalls out.
 static bool hub_hold_decay_gate(){
     static const bool v = (hub_tap_int("SB_HUB_HOLD_DECAY_GATE", 1) == 1);
     return v;
@@ -2221,11 +2703,11 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
     if (mSocket < 0) return -1;
     if (peerAddr.ss_family != AF_INET || peerAddrLen < (socklen_t)sizeof(struct sockaddr_in)) return -1;
     auto fail = [&](const char* what, int fd) {
-        const int e = errno;   // before close() can clobber it
+        const int e = hub_sockerr();   // before close() can clobber it
         if (errOut) *errOut = e;
         std::cerr << "[HUB-SOCK] '" << userName << "': " << what << " failed (errno " << e << " " << strerror(e)
                   << ") — this peer uses the shared socket\n";
-        if (fd >= 0) ::close(fd);
+        if (fd >= 0) hub_close(fd);
         return -1;
     };
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -2249,12 +2731,14 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
         ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &kts, sizeof(kts));
 #elif defined(SO_TIMESTAMPNS)
         ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &kts, sizeof(kts));
+#elif defined(_WIN32)
+        (void) kts; if (hub_win_rx_ts_on) hub_win_rx_ts_enable(fd);
 #endif
     }
     {
         int rcvbuf = 4 * 1024 * 1024;  // same as mSocket: this socket carries the peer's inbound audio
         if (::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0)
-            std::cerr << "[HUB-SOCK] '" << userName << "': warning: SO_RCVBUF failed: " << strerror(errno) << "\n";
+            std::cerr << "[HUB-SOCK] '" << userName << "': warning: SO_RCVBUF failed: " << strerror(hub_sockerr()) << "\n";
     }
     struct sockaddr_storage local;
     socklen_t localLen = sizeof(local);
@@ -2269,8 +2753,8 @@ int SonobusHubServer::openConnectedSendSocket(const struct sockaddr_storage& pee
 #endif
 
     if (::connect(fd, (const struct sockaddr*)&peerAddr, sizeof(struct sockaddr_in)) != 0) return fail("connect", fd);
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return fail("O_NONBLOCK", fd);
+    if (hub_set_nonblock(fd) < 0) return fail("O_NONBLOCK", fd);
+    hub_udp_setup(fd);
 
     char ipStr[INET_ADDRSTRLEN] = {};
     const auto* sin = reinterpret_cast<const struct sockaddr_in*>(&peerAddr);
@@ -2691,7 +3175,7 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     // pointer table so the audio thread never allocates during sink loop.
     peer->decodedBlock.assign((size_t)mBlockSize * HUB_MAX_CHANNELS_PER_PEER, 0.0f);
     peer->decodedPtrs.resize(HUB_MAX_CHANNELS_PER_PEER);
-    for (int slot = 0; slot < 2; ++slot) {   // Torn-block fix
+    for (int slot = 0; slot < 2; ++slot) {   // double buffer (see decodedBlockSlots)
         peer->decodedBlockSlots[slot].assign((size_t)mBlockSize * HUB_MAX_CHANNELS_PER_PEER, 0.0f);
         peer->decodedPtrSlots[slot].resize(HUB_MAX_CHANNELS_PER_PEER);
         for (int ch = 0; ch < HUB_MAX_CHANNELS_PER_PEER; ++ch)
@@ -2852,7 +3336,7 @@ void SonobusHubServer::removePeer(int32_t peerId) {
                     // macOS: connect(AF_UNSPEC) returns EAFNOSUPPORT for UDP; disconnectx(2) is the XNU way.
                     const int rc = hubDissolveUdp(d->connFd);   // Portable (disconnectx on macOS, connect(AF_UNSPEC) on Linux)
                     std::cout << "[HUB-SOCK] dissolved send socket fd=" << d->connFd << " for departed '"
-                              << rp->userName << "' (rc=" << rc << (rc != 0 ? std::string(" ") + strerror(errno) : std::string(""))
+                              << rp->userName << "' (rc=" << rc << (rc != 0 ? std::string(" ") + strerror(hub_sockerr()) : std::string(""))
                               << ") so a rejoin from the same port is not steered into it\n";
                 }
             }
@@ -2871,7 +3355,7 @@ void SonobusHubServer::removePeer(int32_t peerId) {
                 }
             }
             mPeers.erase(it, mPeers.end());
-            rebuildPeerSnapshotLocked();  // (F10)
+            rebuildPeerSnapshotLocked();
             // Unlink every remaining listener's outFeeds[peerId] now, while we still hold the exclusive lock.
             // A ghost slot keyed by a dead sender id would let a rejoin (new id, same names, same deterministic
             // hubSourceId) give the listener two sources aimed at one sink id. Destruction is deferred to
@@ -2958,7 +3442,7 @@ void SonobusHubServer::rebuildPeerSnapshotLocked() {
         snap->peers.push_back(p);
         const auto* pa = (const struct sockaddr_in*)&p->addr;
         if (pa->sin_family == AF_INET) {
-            snap->byAddr4.emplace(addrKey4(pa), idx);   // emplace: first match wins, as the old scan did
+            snap->byAddr4.emplace(addrKey4(pa), idx);   // emplace: first match wins
         }
         // Pacer view = active peers, mPeers order
         if (p->active) snap->pacerPeers.push_back(p.get());
@@ -3040,7 +3524,7 @@ void SonobusHubServer::drainRetiredSnapshots(bool force) {
             if (rd.dest->connFd >= 0) {
                 std::cout << "[HUB-SOCK] closed retired send socket fd=" << rd.dest->connFd
                           << " for '" << (rd.peer ? rd.peer->userName : std::string("?")) << "'\n";
-                ::close(rd.dest->connFd);
+                hub_close(rd.dest->connFd);
                 rd.dest->connFd = -1;
                 // The 4-tuple is free
                 // again (pcb detached) — healEpipeSockets may re-connect now.
@@ -3349,7 +3833,7 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             }
         }
         if (!sender) {
-            std::cerr << "[HUB-CLAY] /sb/clayinfo from unknown sender (addr not matched)\n";
+            if (hub_probe_log()) std::cerr << "[HUB-CLAY] /sb/clayinfo from unknown sender (addr not matched)\n";
             // (not on the connection log: a joining player's first /sb/clayinfo normally lands a moment before its audio
             //  handshake registers the address — a benign join-order race, not an odd sender)
             return;
@@ -3408,7 +3892,7 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
                 std::cerr << "[HUB-CLAY] forward build failed: " << e.what() << "\n";
             }
         }
-        std::cout << "[HUB-CLAY] forwarded sender='" << sender->userName
+        if (hub_probe_log()) std::cout << "[HUB-CLAY] forwarded sender='" << sender->userName
                   << "' layout to " << forwarded << " listener(s) blobSize="
                   << (int)blobSize << "\n";
         return;
@@ -3846,7 +4330,7 @@ HubOutFeed* SonobusHubServer::allocateOrUpdateFeed(HubPeer* listener, HubPeer* s
         // this brand-new listener right now so they get channel labels even
         // if the sender's last layout broadcast happened before they joined.
         if (!sender->clayinfoBlob.empty() && listener->addrlen > 0) {
-            char outbuf[AOO_MAXPACKETSIZE];   // Same 1500-byte failure as the forward path (28-input layout = 2.9 KB)
+            char outbuf[AOO_MAXPACKETSIZE];   // Sized like the forward path (a 28-input layout is ~2.9 KB)
             try {
                 osc::OutboundPacketStream outmsg(outbuf, sizeof(outbuf));
                 outmsg << osc::BeginMessage(SB_HXFULLMSG_CLAYINFO)
@@ -3857,7 +4341,7 @@ HubOutFeed* SonobusHubServer::allocateOrUpdateFeed(HubPeer* listener, HubPeer* s
                 ::sendto(mSocket, outmsg.Data(), outmsg.Size(), 0,
                          (const struct sockaddr*)&listener->addr,
                          listener->addrlen);
-                std::cout << "[HUB-CLAY] replayed cached layout to new listener='"
+                if (hub_probe_log()) std::cout << "[HUB-CLAY] replayed cached layout to new listener='"
                           << listener->userName << "' sender='" << sender->userName
                           << "' blobSize=" << sender->clayinfoBlob.size() << "\n";
             } catch (const osc::Exception& e) {
@@ -3928,9 +4412,9 @@ int32_t SonobusHubServer::hub_sink_event_handler(void* user, const aoo_event** e
             auto* e = (const aoo_ping_event*)events[i];
             double rttMs = aoo_osctime_duration(e->tt1, e->tt3) * 1000.0;
             if (!(rttMs >= 0.0 && rttMs < 5000.0)) continue;
-            HubPeer* peerForRtt = ctx->peer;   // Deadlock fix: no locks in handlers
+            HubPeer* peerForRtt = ctx->peer;   // no locks in handlers (see the deadlock note in the header)
             if (!peerForRtt) continue;
-            // Median of the last 5 samples instead of an EMA (one late reply no longer inflates the display).
+            // Median of the last 5 samples instead of an EMA (one late reply must not inflate the display).
             peerForRtt->smoothedRttUpMs.store(HubPeer::medianPush(peerForRtt->rttUpRing, peerForRtt->rttUpRingIdx, (float) rttMs), std::memory_order_relaxed);
             continue;
         }
@@ -3941,7 +4425,7 @@ int32_t SonobusHubServer::hub_sink_event_handler(void* user, const aoo_event** e
             || events[i]->type == AOO_BLOCK_RESENT_EVENT
             || events[i]->type == AOO_BLOCK_GAP_EVENT) {
             auto* be = (const aoo_block_lost_event*)events[i];
-            HubPeer* lp = ctx->peer;   // Deadlock fix: no locks in handlers
+            HubPeer* lp = ctx->peer;   // no locks in handlers (see the deadlock note in the header)
             if (lp) {
                 uint32_t cnt = (uint32_t)std::max(1, be->count);
                 switch (events[i]->type) {
@@ -4202,7 +4686,7 @@ int32_t SonobusHubServer::hub_source_event_handler(void* user, const aoo_event**
         double rttMs = aoo_osctime_duration(e->tt1, e->tt3) * 1000.0;
         if (!(rttMs >= 0.0 && rttMs < 5000.0)) continue;  // sanity-clamp out NaN/garbage
 
-        // Deadlock fix: listener passed directly; NO locks here.
+        // Listener passed directly; NO locks here (see the deadlock note in the header).
         HubPeer* listener = ctx->listener;
         if (!listener) continue;
 
@@ -4278,7 +4762,7 @@ void SonobusHubServer::audioProcessThread() {
                       << blockNs << "ns)\n";
         }
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(1, "audio thread");
 #endif
     // Hub clock lock (SB_HUB_CLOCK_LOCK, SB_HUB_CLOCK_REF=<sender name>).
@@ -4953,13 +5437,13 @@ void SonobusHubServer::listenerProcessThread(std::shared_ptr<HubPeer> selfPeer) 
             ? blockNs * 35ULL / 100ULL                                 // Sub-ms blocks (32) claim 35% (≈233µs @667µs; real work 10-50µs)
             : std::min<uint64_t>(std::max<uint64_t>(400000ULL, blockNs / 4), blockNs));  // Floor 400µs; clamped ≤ period for tiny blocks
         policy.constraint  = nsToMachTicks(blockNs);
-        policy.preemptible = 1;                           // Was 0
+        policy.preemptible = 1;
         thread_policy_set(pthread_mach_thread_np(pthread_self()),
                           THREAD_TIME_CONSTRAINT_POLICY,
                           (thread_policy_t)&policy,
                           THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(3, "listener thread");
 #endif
 
@@ -5140,7 +5624,7 @@ uint64_t SonobusHubServer::listenerPumpFeeds(HubPeer* self, int selfIdx, bool in
             float rampEnd = rampTarget;
             for (int ch = 0; ch < fch; ++ch) {
                 tlsListenerGainPtrs[ch] = tlsListenerGainBuf.data() + ch * blockSize;
-                const float* src = rptrs[ch];   // Published slot (torn-block fix)
+                const float* src = rptrs[ch];   // Published slot (double buffer)
                 float* dst = tlsListenerGainPtrs[ch];
                 if (ramping) {
                     float g = feed->rampCoef;   // every channel takes the same slope
@@ -5250,14 +5734,15 @@ void SonobusHubServer::inlineListenersFallback() {
 void SonobusHubServer::drainRtLog() {
     uint32_t tail = mRtLogTail.load(std::memory_order_relaxed);
     const uint32_t head = mRtLogHead.load(std::memory_order_acquire);
+    const bool probes = hub_probe_log();   // records are always taken off the ring; the probe ones print only on request
     while (tail != head) {
         const RtLogRec& r = mRtLogRing[tail % kRtLogRingSize];
         switch ((RtLogTag)r.tag) {
         case RtLogTag::Chirp:
-            std::printf("[HUB-CHIRP] peer='%s' t_ms=%.2f\n", r.peerName, r.f0);
+            if (probes) std::printf("[HUB-CHIRP] peer='%s' t_ms=%.2f\n", r.peerName, r.f0);
             break;
         case RtLogTag::Resamp:
-            std::printf("[HUB-RESAMP] peer='%s' peak_ms=%g\n", r.peerName, r.f0);
+            if (probes) std::printf("[HUB-RESAMP] peer='%s' peak_ms=%g\n", r.peerName, r.f0);
             break;
         case RtLogTag::Clock:   // Hub clock-lock step
             std::printf("[HUB-CLOCK] ref='%s' err_ppm=%.1f adj_ppm=%.1f rx_blocks=%.0f produced=%.0f wall_s=%.3f\n", r.peerName, r.f0, r.f1, r.f2, std::floor(r.f3 / 1e6), std::fmod(r.f3, 1e6) / 1e3);
@@ -5266,7 +5751,7 @@ void SonobusHubServer::drainRtLog() {
             std::printf("[HUB-CLOCK-FAST] ref='%s' step=%d err_ppm=%.1f period_ppm=%.1f measured_ticks=%.3f\n", r.peerName, r.peerIndex, r.f0, r.f1, r.f2);
             break;
         case RtLogTag::Audio:
-            std::printf("[HUB-AUDIO] peer='%s' blocks=%llu non_zero=%llu\n",
+            if (probes) std::printf("[HUB-AUDIO] peer='%s' blocks=%llu non_zero=%llu\n",
                         r.peerName,
                         (unsigned long long)r.f0, (unsigned long long)r.f1);
             break;
@@ -5289,6 +5774,75 @@ void SonobusHubServer::drainRtLog() {
 // Off-audio-thread stats flusher. Reads the mStats atomics every 5 s, computes percentiles from the
 // histogram, snapshots peer/feed counts, appends a CSV row. The CSV can be tailed during live sessions
 // to correlate timing drift with audible quality.
+// ─── [HUB-HOST]: did the hub's own side hold back incoming audio? ─────────────────────────────────
+// Each stream's arrivals between two reports are laid out on the hub's clock; a gap is long when it is over twice
+// that stream's own usual spacing (and at least 3 ms). The line is printed only when every stream from the network
+// is inside a long gap at the same moment. All of it runs on the stats thread from the copy [HUB-JIT] already takes.
+namespace {
+using HostClock = std::chrono::steady_clock;
+struct HostGap { double startMs = 0, endMs = 0; };   // relative to the report time (negative = before it)
+struct HostStream {
+    bool local = false;            // a player on the hub computer itself (never crosses the network card)
+    double usualMs = 0, limitMs = 0;
+    std::vector<HostGap> gaps;     // the long ones, oldest first
+};
+// False = this stream cannot be judged for this window (first report, too few arrivals, an outage over a second).
+bool hub_host_stream(const HubPeer::JitterStats::Order& o, int prevPos, uint64_t prevPackets, HostClock::time_point prevLast,
+                     HostClock::time_point ref, HostStream& out) {
+    constexpr int kRing = HubPeer::JitterStats::kRing;
+    if (prevPos < 0 || o.count < 32 || o.packets - prevPackets >= (uint64_t) kRing) return false;
+    const int n = (o.pos - prevPos + kRing) % kRing;
+    if (n < 32 || n > o.count) return false;
+    std::vector<float> d((size_t) n);
+    double sum = 0;
+    for (int i = 0; i < n; ++i) { d[(size_t) i] = o.ring[(size_t) ((o.pos - n + i + kRing) % kRing)]; sum += d[(size_t) i]; }
+    const double spanMs = std::chrono::duration<double, std::milli>(o.last - prevLast).count();
+    // Arrivals closer than the coalescing step are not in the ring, so the entries add up to a little less than
+    // the true span; the difference is spread evenly. More than a second missing is an outage, not judged here.
+    if (sum <= 0 || spanMs <= 0 || spanMs - sum >= 1000.0) return false;
+    const double scale = spanMs / sum;
+    std::vector<float> sorted(d);
+    std::nth_element(sorted.begin(), sorted.begin() + n / 2, sorted.end());
+    out.usualMs = sorted[(size_t) (n / 2)];
+    out.limitMs = std::max(3.0, 2.0 * out.usualMs);
+    const double t0 = std::chrono::duration<double, std::milli>(prevLast - ref).count();
+    double cum = 0;
+    for (int i = 0; i < n; ++i) {
+        cum += d[(size_t) i];
+        if (d[(size_t) i] > out.limitMs) { const double end = t0 + cum * scale; out.gaps.push_back({ end - d[(size_t) i], end }); }
+    }
+    return true;
+}
+struct HostEvent { double startMs = 0, endMs = 0; bool localToo = false; };
+// Moments when every network stream was inside a long gap for 2 ms or more together.
+std::vector<HostEvent> hub_host_events(const std::vector<HostStream>& streams) {
+    std::vector<HostEvent> ev;
+    const HostStream* first = nullptr;
+    int net = 0;
+    for (auto& s : streams) if (!s.local) { ++net; if (!first || s.gaps.size() < first->gaps.size()) first = &s; }
+    if (net < 2 || first->gaps.empty()) return ev;
+    for (auto& g : first->gaps) {
+        double lo = g.startMs, hi = g.endMs;
+        bool all = true;
+        for (auto& s : streams) {
+            if (s.local || &s == first) continue;
+            double bestLo = 0, bestHi = -1;
+            for (auto& x : s.gaps) {
+                const double l = std::max(lo, x.startMs), h = std::min(hi, x.endMs);
+                if (h - l > bestHi - bestLo) { bestLo = l; bestHi = h; }
+            }
+            if (bestHi - bestLo < 2.0) { all = false; break; }
+            lo = bestLo; hi = bestHi;
+        }
+        if (!all) continue;
+        HostEvent e; e.startMs = lo; e.endMs = hi;
+        for (auto& s : streams) if (s.local) for (auto& x : s.gaps) if (std::min(hi, x.endMs) - std::max(lo, x.startMs) >= 2.0) e.localToo = true;
+        ev.push_back(e);
+    }
+    return ev;
+}
+}
+
 void SonobusHubServer::statsWriterThread() {
     std::cout << "[HUB-STATS] writer thread started.\n";
 
@@ -5327,9 +5881,28 @@ void SonobusHubServer::statsWriterThread() {
     // pacer never wakes otherwise) or when --cut-through is on (listener-thread emitters feed the same
     // atomics; printed as a mode=cut-through line).
     auto nextPaceLog = clock::now() + std::chrono::seconds(10);
+    int pacePeersPrinted = -1;   // players in the last [HUB-PACE] line printed
     // Connected-socket EPIPE self-heal
     // scan, once a second (a dead socket = a deaf listener until healed).
     auto nextHealScan = clock::now() + std::chrono::seconds(1);
+
+    // Tick stalls: this thread reads the tick's worst block-to-block gap of the window every 200 ms and logs a
+    // rise past the limit once, with the time it was seen.
+    struct TickStall { clock::time_point at; double ms; };
+    std::deque<TickStall> tickStalls;   // the last few, for the [HUB-HOST] line
+    uint64_t tickGapSeenNs = 0;
+    const double tickPeriodMs = 1000.0 * mBlockSize / std::max(1, mSampleRate);
+    auto noteTickGap = [&](uint64_t gapNs) {
+        if (gapNs <= tickGapSeenNs) return;
+        tickGapSeenNs = gapNs;
+        const double stallMs = (double) gapNs / 1e6 - tickPeriodMs;
+        if (stallMs < kTickStallLogMs) return;
+        tickStalls.push_back({ clock::now(), stallMs });
+        if (tickStalls.size() > 32) tickStalls.pop_front();
+        char b[200];
+        snprintf(b, sizeof(b), "[HUB-STALL] the hub tick stood still for %.1f ms (seen %s): this computer paused the hub\n", stallMs, hub_clock_stamp().c_str());
+        std::cout << b;
+    };
 
     // Apply hold changes outside mPeerMutex. In whole-block mode the sink takes the new depth in place
     // (a deeper hold is topped up, a shallower one is one splice); a set_buffersize resets its queue.
@@ -5453,6 +6026,7 @@ void SonobusHubServer::statsWriterThread() {
             // keeps the 256-slot ring far from full (worst case ~N peers × 3
             // records per 2s window).
             drainRtLog();
+            noteTickGap(mAudioGapNsMax.load(std::memory_order_relaxed));
             latencyBroadcastTick();   // 10-s /sb/ping + /sb/hxlat cadence, viewer-independent
             // Free retired peer snapshots
             // (and so removed peers) that every RT reader has moved past —
@@ -5485,11 +6059,41 @@ void SonobusHubServer::statsWriterThread() {
                 }
                 {   // Audio-thread block timing, per 10-s window
                     const uint64_t gapNs  = mAudioGapNsMax.exchange(0, std::memory_order_relaxed);
+                    noteTickGap(gapNs);   // a stall since the last look
+                    tickGapSeenNs = 0;    // new window
                     const uint64_t late   = mAudioLateBlocks.exchange(0, std::memory_order_relaxed);
                     const uint64_t workNs = mAudioWorkNsMax.exchange(0, std::memory_order_relaxed);
                     const uint64_t skips  = mAudioSinkSkips.exchange(0, std::memory_order_relaxed);
-                    std::cout << "[HUB-TIMING] gap_max_us=" << (gapNs / 1000) << " late_blocks=" << late
-                              << " work_max_us=" << (workNs / 1000) << " sink_skips=" << skips << " (period_us=" << (1000000.0 * mBlockSize / std::max(1, mSampleRate)) << ")\n";
+                    char line[240];
+                    snprintf(line, sizeof(line), "[HUB-TIMING] gap_max_us=%llu late_blocks=%llu work_max_us=%llu sink_skips=%llu (period_us=%.2f) at %s\n",
+                             (unsigned long long) (gapNs / 1000), (unsigned long long) late, (unsigned long long) (workNs / 1000), (unsigned long long) skips,
+                             1000000.0 * mBlockSize / std::max(1, mSampleRate), hub_clock_stamp().c_str());
+                    std::cout << line;
+#if defined(_WIN32)
+                    {   // The tick's sleeps and final spin, same window
+                        hub_win_tick_pub_t& tp = hub_win_tick_pub;
+                        const uint64_t sleeps = tp.sleeps.exchange(0, std::memory_order_relaxed), blocks = tp.blocks.exchange(0, std::memory_order_relaxed);
+                        const uint64_t spinT = tp.spinTicks.exchange(0, std::memory_order_relaxed);
+                        const int mode = tp.mode.load(std::memory_order_relaxed);
+                        if (const int sw = tp.switched.load(std::memory_order_relaxed); sw == 1 || sw == -1) {
+                            tp.switched.store(sw == 1 ? 2 : -2, std::memory_order_relaxed);
+                            snprintf(line, sizeof(line), "[HUB-TICK] this computer's timer wakes late (%u of %u blocks started late in one second): %s\n",
+                                     (unsigned) tp.switchLate.load(std::memory_order_relaxed), (unsigned) tp.switchBlocks.load(std::memory_order_relaxed),
+                                     sw == 1 ? "the block tick now follows the system timer tick" : "no finer system timer available, the fixed spin stays");
+                            std::cout << line;
+                        }
+                        if (blocks > 0) {
+                            snprintf(line, sizeof(line), "[HUB-TICK] mode=%s %s=%u timer_us=%u wake_late_us p99=%u max=%u slept=%llu of %llu blocks start_late_max_us=%u spin_pct=%.1f resync=%u off_tick=%u\n",
+                                     mode == 0 ? "fixed" : "timer-tick", mode == 0 ? "spin_us" : "guard_us",
+                                     (unsigned) tp.guardUs.load(std::memory_order_relaxed), (unsigned) tp.periodUs.load(std::memory_order_relaxed),
+                                     (unsigned) tp.errP99Us.exchange(0, std::memory_order_relaxed), (unsigned) tp.errMaxUs.exchange(0, std::memory_order_relaxed),
+                                     (unsigned long long) sleeps, (unsigned long long) blocks, (unsigned) tp.startLateMaxUs.exchange(0, std::memory_order_relaxed),
+                                     100.0 * (double) spinT / (10.0 * (double) hub_qpc_freq()),
+                                     (unsigned) tp.anchors.exchange(0, std::memory_order_relaxed), (unsigned) tp.misses.exchange(0, std::memory_order_relaxed));
+                            std::cout << line;
+                        }
+                    }
+#endif
                 }
                 if (mSendPacing.load(std::memory_order_relaxed)) {
                     const uint64_t blocks    = mPaceStatBlocks.exchange(0, std::memory_order_relaxed);
@@ -5502,19 +6106,24 @@ void SonobusHubServer::statsWriterThread() {
                     const uint64_t msgsInB   = mPaceStatMsgsInBundles.exchange(0, std::memory_order_relaxed);
                     char avgBuf[32];
                     snprintf(avgBuf, sizeof(avgBuf), "%.2f", bundles > 0 ? (double)msgsInB / (double)bundles : 0.0);
-                    std::cout << "[HUB-PACE] blocks=" << blocks
+                    // An empty stage prints the line once (peers=0, for scripts that read the last one), then stays quiet.
+                    const int pacePeers = mPaceLastPeers.load(std::memory_order_relaxed);
+                    const uint64_t paceErrs = gHubSendErrors.exchange(0, std::memory_order_relaxed);
+                    const bool paceQuiet = pacePeers == 0 && pacePeersPrinted == 0 && paceErrs == 0;
+                    pacePeersPrinted = pacePeers;
+                    if (!paceQuiet) std::cout << "[HUB-PACE] blocks=" << blocks
                               << " dither=" << (mPaceDither.load(std::memory_order_relaxed) ? 1 : 0)
-                              << " peers=" << mPaceLastPeers.load(std::memory_order_relaxed)
+                              << " peers=" << pacePeers
                               << " slot_us=" << (mPaceLastSlotNs.load(std::memory_order_relaxed) / 1000)
                               << " worst_wake_overshoot_us=" << (overNs / 1000)
-                              << " slots_collapsed=" << collapsed  // (F2a)
+                              << " slots_collapsed=" << collapsed
                               << " bundle=" << (mBundleEnabled.load(std::memory_order_relaxed) ? 1 : 0)
                               << " datagrams=" << dgrams
                               << " msgs_packed=" << msgs
                               << " bundles=" << bundles
                               << " avg_msgs_per_bundle=" << avgBuf
                               << " sock=" << (mConnectedSockets ? "connected" : "shared")   
-                              << " send_err=" << gHubSendErrors.exchange(0, std::memory_order_relaxed)
+                              << " send_err=" << paceErrs
                               << "\n";
                 } else if (mCutThrough.load(std::memory_order_relaxed)) {
                     // Cut-through window — same atomics, fed
@@ -5628,6 +6237,9 @@ void SonobusHubServer::statsWriterThread() {
         // buffer ≈ (p99 − p50) + margin. p50 ≈ packet cadence (block period).
         static int jitTick = 0;
         bool logJitter = ((jitTick++ % 2) == 1);
+        std::vector<HostStream> hostStreams;   // streams judged for [HUB-HOST] in this window
+        const std::string jitStamp = logJitter ? hub_clock_stamp() : std::string();
+        const HostClock::time_point hostRef = HostClock::now();
         {
             std::shared_lock<std::shared_mutex> lock(mPeerMutex);
             for (auto& p : mPeers) {
@@ -5640,7 +6252,8 @@ void SonobusHubServer::statsWriterThread() {
                 if (logJitter) {
                     // Own rate window, so the 1 Hz GUI snapshot cannot clobber the shared pps snapshot this
                     // [HUB-JIT] line reads.
-                    auto q = p->jstats.compute(p->jstats.statsWin);
+                    HubPeer::JitterStats::Order order;
+                    auto q = p->jstats.compute(p->jstats.statsWin, &order);
                     if (q.samples >= 32) {
                         uint32_t lost = p->blkLost.exchange(0, std::memory_order_relaxed);
                         uint32_t reord = p->blkReordered.exchange(0, std::memory_order_relaxed);
@@ -5666,15 +6279,32 @@ void SonobusHubServer::statsWriterThread() {
                                   << " unmatched=" << p->fallbackDispatch.exchange(0, std::memory_order_relaxed)   // Fallback-attributed datagrams per 10 s
                                   << " kbps=" << std::setprecision(0) << ((double)(p->bytesIn.load(std::memory_order_relaxed) - p->jitBytesSnap) * 8.0 / 10.0 / 1000.0)   // Wire rate this 10-s window
                                   << " down_kbps=" << ((double)((uint64_t) std::max<int64_t>(0, p->persistentEndpoint ? reinterpret_cast<HubEndpoint*>(p->persistentEndpoint)->sentBytes : 0) - p->jitBytesOutSnap) * 8.0 / 10.0 / 1000.0)
-                                  << "\n";
+                                  << " at " << jitStamp << "\n";
                         p->jitBytesSnap = p->bytesIn.load(std::memory_order_relaxed);
                         p->jitBytesOutSnap = (uint64_t) std::max<int64_t>(0, p->persistentEndpoint ? reinterpret_cast<HubEndpoint*>(p->persistentEndpoint)->sentBytes : 0);
+                        {   // This window's arrivals, in order, for [HUB-HOST]
+                            HostStream hs;
+                            if (hub_host_stream(order, p->hostPrevPos, p->hostPrevPackets, p->hostPrevLast, hostRef, hs)) {
+                                char ip[INET_ADDRSTRLEN] = {};
+                                const auto* sa4 = (const struct sockaddr_in*) &p->addr;
+                                if (p->addr.ss_family == AF_INET) inet_ntop(AF_INET, &sa4->sin_addr, ip, sizeof(ip));
+                                hs.local = p->addr.ss_family == AF_INET && ((ntohl(sa4->sin_addr.s_addr) >> 24) == 127 || mAdvertisedLanHost == ip);
+                                hostStreams.push_back(std::move(hs));
+                            }
+                            p->hostPrevPos = order.pos; p->hostPrevPackets = order.packets; p->hostPrevLast = order.last;
+                        }
                         {   // The same window from the kernel's receive timestamps
                             auto k = p->kstats.compute(p->kstats.statsWin);
                             if (k.pps > 0)
                                 std::cout << "[HUB-KJIT] peer='" << p->userName << "'" << std::fixed << std::setprecision(2)
                                           << " p50=" << k.p50 << "ms p95=" << k.p95 << "ms p99=" << k.p99 << "ms max=" << k.maxMs
-                                          << "ms gap=" << k.gapPct << "% (kernel ts)\n";
+                                          << "ms gap=" << k.gapPct << "%"
+                                          << " read_lag_max=" << (p->readLagMaxUs.exchange(0, std::memory_order_relaxed) / 1000.0) << "ms"   // stack timestamp -> read, this window
+#if defined(_WIN32)
+                                          << (hub_win_rx_ts_on ? " (kernel ts)\n" : " (read time)\n");
+#else
+                                          << " (kernel ts)\n";
+#endif
                         }
                     }
                 }
@@ -5823,7 +6453,7 @@ void SonobusHubServer::statsWriterThread() {
                             decided = true;
                         }
                         // With lateness sizing the measured target is what the line needs beyond the allowance: a target a
-                        // block or more above the hold is followed at the next sample. Decay is as before.
+                        // block or more above the hold is followed at the next sample.
                         if (!decided && hub_hold_lateness() && target > p->abufCurrentMs + blockMs - 0.01 && p->abufCurrentMs < kHoldCeilMs - 0.5
                             && nowMs - p->holdLastChangeMs >= 10000) {
                             abufApply.push_back({p, target, 8});
@@ -5862,7 +6492,7 @@ void SonobusHubServer::statsWriterThread() {
                             // link: each one doubles the calm time the next step down needs (30 s up to 16 min), counted from
                             // the last change of the hold. Every hour a step down stands takes one doubling off again. Until
                             // the calm time is served, the one-step return goes no lower than the hold the last retraction
-                            // chose, so the way back from a stall stays as fast as before.
+                            // chose, so the way back from a stall stays fast.
                             if (p->holdDownAtMs > 0) {
                                 if (p->abufCurrentMs > p->holdDownToMs + 0.5) {
                                     if (nowMs - p->holdDownAtMs <= kHoldFlapRegretMs) {
@@ -5934,6 +6564,32 @@ void SonobusHubServer::statsWriterThread() {
                 }
             }
         }
+        if (logJitter) {
+            const auto events = hub_host_events(hostStreams);
+            if (!events.empty()) {
+                int net = 0; for (auto& s : hostStreams) if (!s.local) ++net;
+                double longest = 0, tick = 0; bool localToo = false;
+                for (auto& e : events) {
+                    longest = std::max(longest, e.endMs - e.startMs);
+                    localToo = localToo || e.localToo;
+                    // A tick stall is noticed up to 0.2 s after it happened.
+                    for (auto& st : tickStalls) {
+                        const double at = std::chrono::duration<double, std::milli>(st.at - hostRef).count();
+                        if (at >= e.startMs - 50.0 && at <= e.endMs + 450.0) tick = std::max(tick, st.ms);
+                    }
+                }
+                char tickText[64] = "no hub tick stall";
+                if (tick > 0) snprintf(tickText, sizeof(tickText), "hub tick stalled %.1f ms then", tick);
+                const bool computer = tick > 0 || localToo;
+                char b[420];
+                snprintf(b, sizeof(b), "[HUB-HOST] all %d streams from the network stopped arriving together %d time%s in the last 10 s, longest %.1f ms (%s%s): %s, not one player's link (%s)\n",
+                         net, (int) events.size(), events.size() == 1 ? "" : "s", longest, tickText,
+                         localToo ? "; the player on this computer stopped too" : "",
+                         computer ? "this computer paused" : "this computer's network path held them (network card, driver or the line into this site)",
+                         hub_clock_stamp().c_str());
+                std::cout << b;
+            }
+        }
 
         applyHolds(abufApply);
         if (!abufApply.empty() || mHoldResizeAll.load(std::memory_order_relaxed)) mHoldResizeAll.store(false, std::memory_order_relaxed);
@@ -6000,7 +6656,7 @@ void SonobusHubServer::networkRecvThread() {
     }
     if (!rxRt) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     std::cout << "[HUB] receive thread scheduling: " << (rxRt ? "real-time" : "user-interactive") << "\n";
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(10, "recv thread");
 #endif
     std::cout << "[HUB] WAN hold switches: floor " << hub_hold_floor_ms(kHoldFloorMs) << " ms, margin " << hub_hold_margin_ms()
@@ -6087,8 +6743,8 @@ void SonobusHubServer::networkRecvThread() {
                     rdCursor = 0; rdBurst = 0;
                     if (pr <= 0) {
                         rdCount = 0;
-                        if (pr < 0 && errno != EINTR && errno != EAGAIN) {
-                            std::cerr << "[HUB] poll error: " << strerror(errno) << "\n";
+                        if (pr < 0 && hub_sockerr() != EINTR && hub_sockerr() != EAGAIN) {
+                            std::cerr << "[HUB] poll error: " << strerror(hub_sockerr()) << "\n";
                             std::this_thread::sleep_for(std::chrono::milliseconds(10));   // never spin on a hard error
                         }
                         idle = true;
@@ -6140,15 +6796,15 @@ void SonobusHubServer::networkRecvThread() {
                         ep->recvErrors.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                if (n < 0 && hub_sockerr() != EAGAIN && hub_sockerr() != EWOULDBLOCK && hub_sockerr() != EINTR) {
                     if (pfdPeer[rdCursor] >= 0) {
                         auto* ep = reinterpret_cast<HubEndpoint*>(rsnap->peers[(size_t)pfdPeer[rdCursor]]->persistentEndpoint);
                         if (ep) {
-                            ep->lastErrno.store(errno, std::memory_order_relaxed);
+                            ep->lastErrno.store(hub_sockerr(), std::memory_order_relaxed);
                             ep->recvErrors.fetch_add(1, std::memory_order_relaxed);
                         }
                     } else {
-                        std::cerr << "[HUB] recvfrom error: " << strerror(errno) << "\n";
+                        std::cerr << "[HUB] recvfrom error: " << strerror(hub_sockerr()) << "\n";
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));   // as in shared mode: never spin
                     }
                 }
@@ -6208,19 +6864,6 @@ void SonobusHubServer::networkRecvThread() {
 
             if (isNet) {
                 if (type == AOO_TYPE_CLIENT || type == AOO_TYPE_PEER) {
-                    // HUB-UDP-PEER debug log silenced for production.
-                    // Was firing per inbound UDP packet from a peer — debug-only.
-                    // Re-enable by uncommenting if needed for UDP path debugging.
-                    // if (type == AOO_TYPE_PEER) {
-                    //     char srcStr[INET6_ADDRSTRLEN] = {};
-                    //     int srcPortLog = 0;
-                    //     if (((struct sockaddr*)&srcAddr)->sa_family == AF_INET) {
-                    //         auto* sin = (struct sockaddr_in*)&srcAddr;
-                    //         inet_ntop(AF_INET, &sin->sin_addr, srcStr, sizeof(srcStr));
-                    //         srcPortLog = ntohs(sin->sin_port);
-                    //     }
-                    //     std::cout << "[HUB-UDP-PEER] from " << srcStr << ":" << srcPortLog << " size=" << n << "\n";
-                    // }
                     mClient->handle_message(buf, (int32_t)n, &srcAddr);
                 }
                 continue;
@@ -6255,7 +6898,7 @@ void SonobusHubServer::networkRecvThread() {
                 }
             }
             if (matchedPeer && matchedPeer->persistentEndpoint) epForAoo = matchedPeer->persistentEndpoint;
-            if (matchedPeer) matchedPeer->bytesIn.fetch_add((uint64_t)n, std::memory_order_relaxed);   // Per-player Up
+            if (matchedPeer) matchedPeer->bytesIn.fetch_add((uint64_t)(n + hub_ip_udp_header_bytes(srcAddr.ss_family)), std::memory_order_relaxed);   // Per-player Up, as on the wire
 
             // Timestamp inbound
             // sink-bound traffic from the matched peer. Recv-thread only,
@@ -6263,8 +6906,18 @@ void SonobusHubServer::networkRecvThread() {
             // thread never sees any of this. Data packets dominate (≈375/s)
             // so the occasional ping/format message in the mix is noise.
             if (matchedPeer && type == AOO_TYPE_SINK) {
-                matchedPeer->jstats.record(std::chrono::steady_clock::now());
-                if (ktsNs) matchedPeer->kstats.record(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ktsNs)));   
+                const auto readNow = std::chrono::steady_clock::now();
+                matchedPeer->jstats.record(readNow);
+                if (ktsNs) {
+                    matchedPeer->kstats.record(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ktsNs)));
+                    // How long the datagram waited between the stack and this read: the receive thread's own lateness.
+                    const int64_t lagNs = (int64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(readNow.time_since_epoch()).count() - (int64_t) ktsNs;
+                    if (lagNs > 0 && lagNs < 1000000000LL) {
+                        const uint32_t lagUs = (uint32_t) (lagNs / 1000);
+                        uint32_t cur = matchedPeer->readLagMaxUs.load(std::memory_order_relaxed);
+                        while (lagUs > cur && !matchedPeer->readLagMaxUs.compare_exchange_weak(cur, lagUs, std::memory_order_relaxed)) {}
+                    }
+                }
             }
 
             if (type == AOO_TYPE_SINK) {
@@ -6291,7 +6944,7 @@ void SonobusHubServer::networkRecvThread() {
                                 const uint64_t tnow = hubNowTicks();
                                 HubPeer& rp = *matchedPeer;
                                 static const double tbScale = [](){ hub_tb_t tb; hub_timebase(&tb); return (double) tb.denom / (double) tb.numer; }();
-                                const double nomTicks = 1e9 * ((double) mBlockSize / (double) std::max(1, mSampleRate)) * tbScale;   // Was hard-coded 32/48000
+                                const double nomTicks = 1e9 * ((double) mBlockSize / (double) std::max(1, mSampleRate)) * tbScale;
                                 const double dtPrev = rp.arrLastT ? (double)(tnow - rp.arrLastT) : nomTicks;
                                 rp.arrLastT = tnow;
                                 if (rp.arrSeq0 < 0 || seq < rp.arrSeq0){ rp.arrSeq0 = seq; rp.arrT0 = (double) tnow; rp.arrSx = rp.arrSy = rp.arrSxx = rp.arrSxy = 0; rp.arrN = 0; rp.arrWinStart = tnow; }
@@ -6352,7 +7005,7 @@ void SonobusHubServer::networkRecvThread() {
                             peer->sink->handle_message(buf, (int32_t)n, epForAoo,
                                                        (aoo_replyfn)hub_endpoint_send_impl);
                             if (id != AOO_ID_WILDCARD) {
-                                peer->jstats.record(std::chrono::steady_clock::now());   // (hub-jit-lag)
+                                peer->jstats.record(std::chrono::steady_clock::now());
                                 peer->fallbackDispatch.fetch_add(1, std::memory_order_relaxed);
                                 break;
                             }
@@ -6379,10 +7032,17 @@ void SonobusHubServer::networkRecvThread() {
 
             }
         } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (hub_sockerr() == EAGAIN || hub_sockerr() == EWOULDBLOCK) {
+#if defined(_WIN32)
+                // A sleep is at least a millisecond here, which would read the packets in clumps: wait on the
+                // socket itself, so the first datagram wakes the thread.
+                struct pollfd pf; pf.fd = (SOCKET) mSocket; pf.events = POLLIN; pf.revents = 0;
+                ::poll(&pf, 1, 1);
+#else
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
             } else {
-                std::cerr << "[HUB] recvfrom error: " << strerror(errno) << "\n";
+                std::cerr << "[HUB] recvfrom error: " << strerror(hub_sockerr()) << "\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
@@ -6582,7 +7242,7 @@ void SonobusHubServer::pacerThread() {
             : std::min<uint64_t>(std::max<uint64_t>(700000ULL, blockNsRt * 7ULL / 10ULL), blockNsRt);
         thread_time_constraint_policy_data_t pol;
         pol.period      = (uint32_t)(blockNsRt * (uint64_t)tb.denom / (uint64_t)tb.numer);
-        pol.computation = (uint32_t)(compNsRt * (uint64_t)tb.denom / (uint64_t)tb.numer);  // Was absolute 200000ns
+        pol.computation = (uint32_t)(compNsRt * (uint64_t)tb.denom / (uint64_t)tb.numer);
         pol.constraint  = pol.period;
         pol.preemptible = 1;
         thread_policy_set(pthread_mach_thread_np(pthread_self()),
@@ -6590,7 +7250,7 @@ void SonobusHubServer::pacerThread() {
                           (thread_policy_t)&pol,
                           THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     hub_set_fifo(2, "pacer thread");
 #endif
     auto nsToTicks = [&tb](uint64_t ns) -> uint64_t {
@@ -6761,6 +7421,15 @@ SonobusHubServer::StageSettings SonobusHubServer::stageSettings() const {
     return mStage;
 }
 
+int SonobusHubServer::stageListingHold(std::string& why) const {
+    if (!mStarted.load()) { why = "the hub did not start"; return 3; }
+    if (mPublicUnknown.load()) { why = "the hub's public address is unknown"; return 2; }
+    std::lock_guard<std::mutex> lk(mPortCheckMutex);
+    if (!mPortCheckDone) { why = "waiting for the port check"; return 1; }
+    if (mPortCheckBlocked) { why = mPortCheckFailed + " is closed to players outside this network"; return 2; }
+    return 0;
+}
+
 void SonobusHubServer::setStageListingStatus(int state, const std::string& text) {
     std::lock_guard<std::mutex> l(mStageMutex);
     mStageListingState = state;
@@ -6881,12 +7550,23 @@ void SonobusHubServer::removedPlayersSave() {
     const std::string tmp = mRemovedFile + ".tmp";
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     if (!f) {   // the data folder is made by the first settings save; make it here so a removal is never lost
+#if defined(_WIN32)
+        const size_t slash = mRemovedFile.find_last_of("/\\");
+        if (slash != std::string::npos && slash > 0) CreateDirectoryA(mRemovedFile.substr(0, slash).c_str(), nullptr);
+#else
         const size_t slash = mRemovedFile.find_last_of('/');
         if (slash != std::string::npos && slash > 0) ::mkdir(mRemovedFile.substr(0, slash).c_str(), 0755);
+#endif
         f.open(tmp, std::ios::binary | std::ios::trunc);
     }
     if (f) { f << o.str(); f.close(); }
-    if (!f || ::rename(tmp.c_str(), mRemovedFile.c_str()) != 0) {
+#if defined(_WIN32)
+    // rename() does not replace an existing file on Windows
+    const bool moved = f && MoveFileExA(tmp.c_str(), mRemovedFile.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    const bool moved = f && ::rename(tmp.c_str(), mRemovedFile.c_str()) == 0;
+#endif
+    if (!moved) {
         ::remove(tmp.c_str());
         std::cout << "[HUB-REMOVED] could not write " << mRemovedFile << ": permanent removals last only until the hub restarts\n";
     }
@@ -6922,6 +7602,17 @@ void SonobusHubServer::setRemovedPlayersFile(const std::string& path) {
 
 std::string SonobusHubServer::stageJoinRefusal(const std::string& ipRaw, const std::string& user, int othersInStage) {
     const std::string ip = hub_plain_ip(ipRaw);
+    // Without a public address a player on the internet could only be told 127.0.0.1. Players on private
+    // addresses (the hub's own network) are not affected.
+    if (mPublicUnknown.load()) {
+        struct in_addr a4 {};
+        if (inet_pton(AF_INET, ip.c_str(), &a4) == 1) {
+            const uint32_t h = ntohl(a4.s_addr);
+            const bool inside = (h >> 24) == 10 || (h >> 20) == 0xAC1 || (h >> 16) == 0xC0A8 || (h >> 24) == 127 || (h >> 16) == 0xA9FE;
+            if (!inside) return "This stage's hub does not know its public address yet, so players outside its network cannot connect. "
+                                "The host should check the hub's internet connection and restart the hub.";
+        }
+    }
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> l(mStageMutex);
     mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const RemovedPlayer& b) { return hub_removal_over(b, now); }), mStageBlocks.end());

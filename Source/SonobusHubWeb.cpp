@@ -14,6 +14,8 @@
 #include <iomanip>
 #include <iostream>
 #include <vector>
+#include "SonobusHubCompat.h"
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -24,6 +26,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#endif
 
 static long long webNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -59,13 +62,18 @@ SonobusHubWeb::~SonobusHubWeb() { stop(); if (mUpdateThread.joinable()) mUpdateT
 
 bool SonobusHubWeb::start() {
     if (mPort <= 0) return false;
+    // No password, no page: it would show the players and their locations to anyone who reaches the port.
+    if (mPassword.empty()) {
+        std::cout << "[HUB-WEB] web page off: no web page password is set (port " + std::to_string(mPort) + " stays closed). Set a Web password in Settings to turn it on.\n";
+        return false;
+    }
     mListenFd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (mListenFd < 0) { std::cerr << "[HUB-WEB] socket: " << strerror(errno) << "\n"; return false; }
+    if (mListenFd < 0) { std::cerr << "[HUB-WEB] socket: " << strerror(hub_sockerr()) << "\n"; return false; }
     int one = 1; ::setsockopt(mListenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_ANY); sa.sin_port = htons((uint16_t) mPort);
     if (::bind(mListenFd, (struct sockaddr*) &sa, sizeof(sa)) < 0 || ::listen(mListenFd, 16) < 0) {
-        std::cerr << "[HUB-WEB] bind/listen on port " << mPort << ": " << strerror(errno) << "\n";
-        ::close(mListenFd); mListenFd = -1; return false;
+        std::cerr << "[HUB-WEB] bind/listen on port " << mPort << ": " << strerror(hub_sockerr()) << "\n";
+        hub_close(mListenFd); mListenFd = -1; return false;
     }
     mRun = true;
     mThread = std::thread([this] { threadMain(); });
@@ -76,7 +84,7 @@ bool SonobusHubWeb::start() {
 
 void SonobusHubWeb::stop() {
     if (!mRun.exchange(false)) return;
-    if (mListenFd >= 0) { ::shutdown(mListenFd, SHUT_RDWR); ::close(mListenFd); mListenFd = -1; }
+    if (mListenFd >= 0) { ::shutdown(mListenFd, SHUT_RDWR); hub_close(mListenFd); mListenFd = -1; }
     if (mThread.joinable()) mThread.join();
     if (!mSharedGeo) mGeo.stop();
 }
@@ -92,7 +100,7 @@ void SonobusHubWeb::threadMain() {
         struct timeval tv; tv.tv_sec = 3; tv.tv_usec = 0;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         handleClient(fd);
-        ::close(fd);
+        hub_close(fd);
     }
 }
 
@@ -193,18 +201,26 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 .ovl{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:20}
 .dlg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:300px;max-width:90vw}
 .dlg label{display:block;padding:4px 0;cursor:pointer}.dlg input[type=radio]{accent-color:var(--teal);margin-right:8px}.dlg .hint{margin:8px 0 0}
+.updbar{position:sticky;top:0;z-index:15;display:flex;flex-wrap:wrap;align-items:center;gap:10px 28px;margin:-18px -20px 16px;padding:14px 24px;background:#e3c141;color:#17130a;border-bottom:2px solid #8a7420}
+.pcbar{margin:-18px -20px 16px;padding:10px 24px;background:#b3261e;color:#fff;font-size:16px;font-weight:700;text-align:center}
+.updbar .ut{flex:1 1 420px;min-width:0}.updbar .u1{font-size:21px;font-weight:700;line-height:1.25}.updbar .u1 small{font-size:13px;font-weight:500;margin-left:10px;opacity:.8}
+.updbar .u2{font-size:14px;margin-top:3px}.updbar a{color:#17130a;font-weight:700;text-decoration:underline;margin-left:10px}
+.updbar button{background:#17130a;color:#f3d657;border:1px solid #17130a;border-radius:7px;padding:11px 26px;font-size:16px;font-weight:700;cursor:pointer}.updbar button:hover{background:#2c2510}.updbar button:disabled{opacity:.6;cursor:default}
 #grp{width:230px}#gmsg{width:320px}.tools label{color:var(--dim)}.tools input[type=password],.tools input[type=text]{background:#1f1f1f;color:var(--text);border:1px solid #333;border-radius:5px;padding:6px 8px;font:13px inherit;width:230px}
 .tools input[type=text]:focus,.tools input[type=password]:focus{outline:none;border-color:var(--teal)}
 </style></head><body>
+<div class="pcbar" id="pcbar" style="display:none"></div>
+<div class="updbar" id="updbar" style="display:none"><div class="ut"><div class="u1"><span id="upd_t"></span><small id="upd_s"></small></div>
+<div class="u2"><span id="upd_l"></span><a id="upd_n" href="#" target="_blank" rel="noopener" title="Opens the list of changes on the website"></a></div></div>
+<button id="updgo"></button></div>
 <div class="card">
  <div class="head"><img class="logo" src="/icon.png" alt=""><div class="titles"><h1 id="title">SonoBus RP Hub</h1><span class="sub" id="where"></span></div></div>
- <div class="kvs" id="hub"><span class="kv"><b id="k_upd"></b></span><span class="kv">uptime <b class="slot" id="k_up">–</b></span><span class="kv">players <b class="slot" id="k_n">–</b></span><span class="kv">audio <b class="slot" id="k_audio">–</b></span><span class="kv">codec <b class="slot" id="k_codec">–</b></span><span class="kv">hub CPU <b class="slot" id="k_cpu">–</b></span><span class="kv">server <b class="slot" id="k_srv">–</b></span><span class="kv">audio UDP <b class="slot" id="k_udp">–</b></span><span class="kv">version <b class="slot" id="k_ver">–</b> <span class="d" id="k_build"></span></span><span class="kv r" id="k_err"></span></div>
+ <div class="kvs" id="hub"><span class="kv">uptime <b class="slot" id="k_up">–</b></span><span class="kv">players <b class="slot" id="k_n">–</b></span><span class="kv">audio <b class="slot" id="k_audio">–</b></span><span class="kv">codec <b class="slot" id="k_codec">–</b></span><span class="kv">hub CPU <b class="slot" id="k_cpu">–</b></span><span class="kv">server <b class="slot" id="k_srv">–</b></span><span class="kv">audio UDP <b class="slot" id="k_udp">–</b></span><span class="kv">version <b class="slot" id="k_ver">–</b> <span class="d" id="k_build"></span></span><span class="kv r" id="k_err"></span></div>
  <div class="tools">
   <button id="copy" title="Copy this hub's stage link for players">Copy Stage Link</button><span id="link" class="link"></span>
   <span style="flex:1 1 auto"></span>
   <span id="pcwrap" style="display:flex;flex-direction:column;align-items:flex-end;gap:2px"><span id="pc" class="sub"></span><span id="pcl" class="sub d" style="font-size:12px"></span><span id="sdir" class="sub" style="font-size:12px"></span><span id="slim" class="sub d" style="font-size:12px"></span></span><button id="pcbtn" title="Ask a connected player to probe this hub's ports from outside again">Re-run port check</button>
   <button id="restartbtn" class="warn" title="Restart the hub. Every player drops and rejoins.">Restart Hub</button>
-  <button id="updbtn" class="warn" style="display:none" title="Download and install the new hub. The hub restarts, so every player drops and rejoins.">Install Update</button>
   <button id="viewlog" title="Open the hub's connection log in a new window">View Log</button>
  </div>
 </div>
@@ -214,7 +230,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
  <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"><col style="width:56px"></colgroup><thead><tr>
  <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
- <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
+)HTML" R"HTML( <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
  <div id="xwrap" style="display:none">
   <h2 style="margin-top:20px" title="Players the host removed from this stage. Allow back lets a player join again at once.">Removed players</h2>
   <div class="wrap" id="xtwrap"><table id="xtable"><colgroup><col style="width:220px"><col style="width:190px"><col style="width:176px"><col style="width:120px"><col style="width:110px"></colgroup><thead><tr><th title="The name the player had when removed">Player</th><th title="The address the player had when removed. The name and the address are both kept out.">Address</th><th title="When the host removed this player">Removed</th><th title="How long this player is still kept out">Time left</th><th></th></tr></thead><tbody id="removed"></tbody></table></div>
@@ -313,7 +329,7 @@ function drawDetail(){const picked=sessions.find(x=>x.group===selGroup),s=picked
  $('recent').innerHTML=s.players.length?sortRows(s.players,rSort,RKEYS).map(p=>`<tr><td class="user">${esc(p.user)}</td><td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${ft(p.lastJoinMs)}</td><td>${p.lastLeftMs>=p.lastJoinMs?ft(p.lastLeftMs):'<span class="g">connected</span>'}</td><td class="num">${p.joins}</td><td>${p.lan?'LAN':'WAN'}</td><td>${p.lastLeftMs>=p.lastJoinMs?`<button class="srm prm" data-u="${esc(p.user)}" title="Remove this player from this stage's list">✕</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="d">no players recorded on this stage</td></tr>';
  $('recent').querySelectorAll('button.prm').forEach(b=>{b.onclick=async()=>{const u=b.dataset.u;if(!confirm('Remove "'+u+'" from this stage\'s players?'))return;
    try{const r=await fetch(api('/api/sessions/removeplayer'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:s.group,user:u})});const d=await r.json();if(!d.ok){alert(d.error||'remove failed');return;}loadSessions(true);}catch(e){alert('remove failed');}};});
- if(pwPrefillGroup!==selGroup){$('spw').value=s.password||'';pwPrefillGroup=selGroup;}$('spw').placeholder=s.password?'':'(no password — type one to set it)';
+)HTML" R"HTML( if(pwPrefillGroup!==selGroup){$('spw').value=s.password||'';pwPrefillGroup=selGroup;}$('spw').placeholder=s.password?'':'(no password — type one to set it)';
  $('sapply').disabled=restarting;}
 $('sapply').onclick=async()=>{const s=sessions.find(x=>x.group===selGroup);if(!s)return;
  if(!confirm('Switch the hub to stage "'+s.group+'" with the settings it ran with, and restart? Every player will have to rejoin.'))return;
@@ -335,20 +351,22 @@ async function tick(){
  if(restarting){restarting=false;$('smsg').textContent='hub is back up';$('smsg').className='msg ok';loadSettings();$('sdmsg').textContent='hub is back up';$('sdmsg').className='msg ok';$('sapply').disabled=false;loadSessions(true);}
  setT($('title'),'SonoBus RP Hub — '+h.group);
  const tabTitle=(h.group?h.group+' · ':'')+'SonoBus RP Hub';if(document.title!==tabTitle)document.title=tabTitle;
- setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
+ npeers=d.peers.length;setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
  setT($('where'),(h.platform||'')+(h.location?'  ·  '+h.location:''));
  setT($('link'),h.joinLink||'');
  const pcc=h.portCheckState==1?'g':h.portCheckState==2?'r':'d';
  const pcat=h.portVerifiedAtMs>0?' at '+new Date(h.portVerifiedAtMs).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
  setH($('pc'),`<span class="${pcc}">${esc((h.portCheck||'').replace(')',pcat+')'))}</span>`);
  setH($('pcl'),esc(h.portLocal||''));
+ {const pb=$('pcbar'),on=!!h.portCheckBlocked||!!h.publicAddressUnknown;if(on)setT(pb,h.publicAddressUnknown?'Players outside your network cannot join: the hub could not find its public address. Check the internet connection, then restart the hub.':'Players outside your network cannot join: '+(h.portCheckFailed||'a required port')+' is closed.'+((h.stageListingState|0)?' The stage is not listed until the port check passes.':''));
+  if((pb.style.display!=='none')!==on)pb.style.display=on?'block':'none';}
  const tin=(prev&&dt>0)?(h.bytesInTotal-prev.hub.bytesInTotal)/dt:-1,tout=(prev&&dt>0)?(h.bytesOutTotal-prev.hub.bytesOutTotal)/dt:-1;
  const sls=h.stageListingState|0,sdc=sls==1?'g':(sls==2||sls==4)?'y':sls==3?'r':'d';
  setH($('sdir'),`<span class="${sdc}">${esc(sls==0?'Stage directory: not listed (turn on List this stage in Settings)':'Stage directory: '+(h.stageListingText||''))}</span>`);
  setT($('slim'),stageLimits(h.stageMaxPlayers|0,h.stageMaxChannels|0,tout));
  setT($('k_up'),dur(h.uptimeSec));setT($('k_n'),String(d.peers.length));setT($('k_audio'),`${h.sampleRate} Hz / ${h.blockSize} samples`);setT($('k_codec'),h.codec);
  setT($('k_cpu'),h.cpuPct.toFixed(1)+'%');setT($('k_srv'),`${h.publicAddress}:${h.serverPort}`);setT($('k_udp'),String(h.udpPort));
- updUrl=h.updateUrl||'';$('k_upd').style.cursor=updUrl?'pointer':'';if(document.activeElement!==$('grp'))$('grp').value=h.group||'';$('updbtn').style.display=h.updateReady?'':'none';setT($('k_upd'),h.update||'');setT($('k_ver'),'Hub '+(h.hubVersion||''));setT($('k_build'),`(build ${h.build||''}${h.commit?', '+h.commit:''})`);setT($('k_err'),'');
+ drawUpdate(h);if(document.activeElement!==$('grp'))$('grp').value=h.group||'';setT($('k_ver'),'Hub '+(h.hubVersion||''));setT($('k_build'),`(build ${h.build||''}${h.commit?', '+h.commit:''})`);setT($('k_err'),'');
  if(curTab==='status'){
   const seen=new Set();
   for(const p of d.peers){seen.add(p.id);const pp=prev&&prev.peers.find(x=>x.id===p.id);
@@ -421,10 +439,20 @@ $('restartbtn').onclick=async()=>{if(!confirm('Restart the hub? Every player dro
 $('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!confirm('Switch the hub to stage "'+g+'"? The hub restarts and players must rejoin.'))return;try{const r=await post('/api/settings',{values:{group:g},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('gmsgbtn').onclick=async()=>{const t=$('gmsg').value.trim();if(!t)return;try{const r=await post('/api/chat',{message:t});const d=await r.json().catch(()=>({}));needPw(r,d);if(d.ok){$('gmsg').value='';$('gmsgnote').textContent='sent to '+d.sent;setTimeout(()=>$('gmsgnote').textContent='',3000);}}catch(e){}};
 $('gmsg').onkeydown=(e)=>{if(e.key==='Enter')$('gmsgbtn').click();};
-$('k_upd').onclick=()=>{if(updUrl)window.open(updUrl,'_blank');};
-$('updbtn').onclick=async()=>{if(!confirm('Install the update? The hub restarts, so every player drops and rejoins.'))return;
+// Update banner: shown on every tab while a newer hub is on the update server.
+function drawUpdate(h){const bar=$('updbar');updUrl=h.updateUrl||'';updReady=!!h.updateReady;
+ if(!h.updateAvailable){if(bar.style.display!=='none')bar.style.display='none';return;}
+ const v=h.updateVersion||h.updateBuild||'',named=!!h.updateBuild&&v!==h.updateBuild,run='this hub runs '+(h.hubVersion||'');
+ setT($('upd_t'),'Update available: SonoBus RP Hub '+v);setT($('upd_s'),named?'build '+h.updateBuild+' \u00b7 '+run:run);
+ setT($('upd_l'),h.updateState||'Players on the stage will be disconnected for a few seconds.');
+ const n=$('upd_n');setT(n,named?"What's new in "+v:"What's new");if(n.getAttribute('href')!==(h.updateNotesUrl||'#'))n.setAttribute('href',h.updateNotesUrl||'#');
+ const b=$('updgo');setT(b,updReady?'Install and restart':'Download');b.disabled=!!h.updateRunning||(!updReady&&!updUrl);
+ b.title=updReady?'Download and install the new hub, then restart it.':'Open the download page for the new hub.';
+ if(bar.style.display!=='flex')bar.style.display='flex';}
+$('updgo').onclick=async()=>{if(!updReady){if(updUrl)window.open(updUrl,'_blank');return;}
+ if(!confirm('Install the update? The hub restarts, so every player drops and rejoins.'))return;
  try{const r=await fetch(api('/api/update/install'),{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Set a Web password to install updates (HTTP '+r.status+')'));}catch(e){alert('update failed: '+e);}};
-let fields=[],detected='',updUrl='';
+)HTML" R"HTML(let fields=[],detected='',updUrl='',updReady=false,npeers=0;
 function fieldHtml(f){
  const id='f_'+f.key,tip=esc(f.tip||'');let inp;
  if(f.kind==1) inp=`<input type="checkbox" id="${id}" ${f.value=='1'?'checked':''} title="${tip}">`;
@@ -478,7 +506,7 @@ $('reset').onclick=()=>{if(!confirm('Put every setting back to its default? Your
  $('smsg').textContent='Defaults restored. Click Save to keep them.';$('smsg').className='msg';};
 const TIPS={Player:'Player name',Inputs:'How many channels this player sends','First used':'When this stage was first hosted','Last used':'When this stage was last hosted',Players:'How many players have joined this stage',Stage:'The stage name players join','Last joined':'When this player last joined','Last left':'When this player last left',Joins:'How many times this player has joined',Net:'Whether this player is on the local network or the internet'};
 document.querySelectorAll('th:not([title])').forEach(t=>{const m=TIPS[t.textContent.trim()];if(m)t.title=m;});
-const KV={k_upd:'Whether a newer hub is available',k_up:'How long the hub has been running',k_n:'Players connected right now',k_audio:'Sample rate and block size',k_codec:'Audio format',k_cpu:'CPU used by the hub',k_srv:'The address and port players connect to',f_in:'Total audio coming into the hub',f_out:'Total audio going out of the hub'};
+const KV={k_up:'How long the hub has been running',k_n:'Players connected right now',k_audio:'Sample rate and block size',k_codec:'Audio format',k_cpu:'CPU used by the hub',k_srv:'The address and port players connect to',f_in:'Total audio coming into the hub',f_out:'Total audio going out of the hub'};
 for(const k in KV){const e=$(k);if(e&&e.parentElement)e.parentElement.title=KV[k];}
 hookSort('stable',sSort,SKEYS,drawSessions);hookSort('rtable',rSort,RKEYS,drawDetail);
 drawSortMarks();
@@ -587,11 +615,12 @@ std::string SonobusHubWeb::buildStatusJson() const {
       << "\"publicAddress\":\"" << jsonEscape(s.publicAddressHost.empty() ? s.advertisedPublicHost : s.publicAddressHost) << "\","
       << "\"serverPort\":" << s.aooServerPort << ",\"udpPort\":" << s.localUdpPort << ","
       << "\"bytesInTotal\":" << s.bytesInTotal << ",\"bytesOutTotal\":" << s.bytesOutTotal << ","
-      << "\"portCheck\":\"" << jsonEscape(s.portCheckText) << "\",\"portCheckState\":" << s.portCheckState << ",\"portLocal\":\"" << jsonEscape(s.portLocalText) << "\","
-      << "\"version\":\"" << jsonEscape(std::string(SONOBUS_HUB_VERSION)) << "\","   // Marketing version (was upstream 1.7.2)
+      << "\"portCheck\":\"" << jsonEscape(s.portCheckText) << "\",\"portCheckState\":" << s.portCheckState << ",\"portCheckBlocked\":" << (s.portCheckBlocked ? "true" : "false") << ",\"publicAddressUnknown\":" << (s.publicAddressUnknown ? "true" : "false") << ",\"portCheckFailed\":\"" << jsonEscape(s.portCheckFailed) << "\"" << ",\"portLocal\":\"" << jsonEscape(s.portLocalText) << "\","
+      << "\"version\":\"" << jsonEscape(std::string(SONOBUS_HUB_VERSION)) << "\","   // Marketing version
       // The hub's OWN version (independent of upstream SonoBus 1.7.2) + build id
       << "\"hubVersion\":\"" << jsonEscape(std::string(SONOBUS_HUB_VERSION)) << "\",\"build\":\"" << jsonEscape(hubBuildId()) << "\",\"commit\":\"" << jsonEscape(hubCommitId()) << "\",\"built\":\"" << jsonEscape(std::string(__DATE__)) << "\","
       << "\"update\":\"" << jsonEscape(updateLine()) << "\",\"updateUrl\":\"" << jsonEscape(mUpdateCheck != nullptr ? mUpdateCheck->url().toStdString() : std::string()) << "\",\"updateReady\":" << (updateReady() ? "true" : "false") << ","
+      << updateInfoJson()
       << "\"geoip\":" << (geoEnabled() ? "true" : "false") << ","
       << "\"platform\":\"" << jsonEscape(webPlatform()) << "\",\"location\":\"" << jsonEscape(mLocation) << "\","
       << "\"settingsEnabled\":" << ((mArgs && !mPassword.empty() && mSettingsFile != juce::File()) ? "true" : "false") << ",\"pollMs\":1000,"
@@ -931,6 +960,16 @@ bool SonobusHubWeb::updateReady() const {
     return mUpdateCheck != nullptr && mUpdateCheck->zip().url.isNotEmpty() && sb_hub_gui::hubCanUpdateInPlace();
 }
 
+// Fields for the update banner. updateState carries the install progress while one runs.
+std::string SonobusHubWeb::updateInfoJson() const {
+    const auto info = mUpdateCheck != nullptr ? mUpdateCheck->info() : sb_hub_gui::HubUpdateInfo{};
+    std::string state;
+    { std::lock_guard<std::mutex> g(mUpdateLock); state = mUpdateState; }
+    return std::string("\"updateAvailable\":") + (info.available ? "true" : "false")
+         + ",\"updateVersion\":\"" + jsonEscape(info.version.toStdString()) + "\",\"updateBuild\":\"" + jsonEscape(info.build.toStdString())
+         + "\",\"updateNotesUrl\":\"" + jsonEscape(info.notesUrl.toStdString()) + "\",\"updateState\":\"" + jsonEscape(state) + "\",\"updateRunning\":" + (mUpdateRunning.load() ? "true" : "false") + ",";
+}
+
 std::string SonobusHubWeb::updateLine() const {
     { std::lock_guard<std::mutex> g(mUpdateLock); if (!mUpdateState.empty()) return mUpdateState; }
     return mUpdateCheck != nullptr ? mUpdateCheck->line().upToFirstOccurrenceOf("  (", false, false).toStdString() : std::string();
@@ -1054,6 +1093,7 @@ std::string SonobusHubWeb::applySettings(const std::string& body, bool& ok) {
         }
     }
     if (const std::string problem = hs::validate(n); !problem.empty()) return "{\"ok\":false,\"error\":\"" + jsonEscape(problem) + "\"}";
+    if (const std::string problem = hs::publicAddressProblem(n.publicAddressHost); !problem.empty()) return "{\"ok\":false,\"error\":\"" + jsonEscape(problem) + "\"}";
     const auto changed = hs::diffKeys(*mArgs, n);
     std::string err;
     if (!hs::save(mSettingsFile, n, err)) return "{\"ok\":false,\"error\":\"save failed: " + jsonEscape(err) + "\"}";

@@ -77,7 +77,12 @@ public:
 
     void updateMiscState();
 
+    // Narrowest panel width that keeps the title and the control row whole
+    int getMinimumWidth() const;
+
 private:
+    void updateBoardSelectorTooltip();
+
     
 #if JUCE_IOS || JUCE_ANDROID
     constexpr static const float MENU_BUTTON_WIDTH = 36;

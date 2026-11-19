@@ -908,8 +908,8 @@ void dynamic_resampler::update(double srfrom, double srto){
 
 extern "C" int32_t aoo_sb_resamp_flat_on();
 
-// Kaiser-windowed sinc, normalised per phase: beta 3.9 / cutoff 1.0 is flat to 20 kHz; the former beta 8 / cutoff 0.92
-// trades 2 dB at 20 kHz for a wider stopband. Built on first use
+// Kaiser-windowed sinc, normalised per phase: beta 3.9 / cutoff 1.0 (default) is flat to 20 kHz; beta 8 / cutoff 0.92
+// (SB_AOO_RESAMP_FLAT=0) trades 2 dB at 20 kHz for a wider stopband. Built on first use
 // (setup time, never on the audio thread's first call — see sink do_update which touches it).
 const float* dynamic_resampler::sinc_table(){
     static std::vector<float> tab;

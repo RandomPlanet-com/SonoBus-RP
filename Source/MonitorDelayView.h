@@ -135,7 +135,8 @@ public:
         //checkBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(enablewidth, minitemheight, enableButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0));
-        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1));
+        const int titleWidth = SbTextFit::labelWidth(titleLabel);   // the long title stays on one line
+        checkBox.items.add(FlexItem(titleWidth, minitemheight, titleLabel).withMargin(0).withFlex(1));
         //checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
         //checkBox.items.add(FlexItem(24, minitemheight, dragButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
@@ -167,8 +168,9 @@ public:
 
 
 
-        minBounds.setSize(jmax(180, ipw + 10), iph + 10);
-        minHeaderBounds.setSize(jmax(180, ipw),  minitemheight + 8);
+        const int headerWidth = enablewidth + 2 + titleWidth + 2;
+        minBounds.setSize(jmax(180, ipw + 10, headerWidth), iph + 10);
+        minHeaderBounds.setSize(jmax(180, ipw, headerWidth),  minitemheight + 8);
 
     }
 

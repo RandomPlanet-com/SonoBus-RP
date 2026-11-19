@@ -386,7 +386,7 @@ void drawMeterBars (juce::Graphics& g,
                 if (! maxNum.isEmpty())
                     drawMaxNumber(g, meterType, maxNum, source->getMaxOverallLevel (channel));
 
-                // (tick marks moved to drawMeterBarsOverlay — static, cacheable)
+                // (tick marks: drawMeterBarsOverlay, static, cacheable)
             }
         }
         else
@@ -417,7 +417,7 @@ void drawMeterBars (juce::Graphics& g,
                 if (! maxNum.isEmpty())
                     drawMaxNumber(g, meterType, maxNum, source->getMaxOverallLevel (channel));
 
-                // (tick marks moved to drawMeterBarsOverlay — static, cacheable)
+                // (tick marks: drawMeterBarsOverlay, static, cacheable)
             }
         }
     }

@@ -337,12 +337,9 @@ public:
 
     virtual int32_t request_source_codec_change(void *endpoint, int32_t id, aoo_format & f) = 0;
 
-    // Ask a known source to (re)send its /format. The sink
-    // only ever requests a format on its own when an explicit-id data packet
-    // arrives with an unknown salt; compact ("/d") data is matched BY salt, so
-    // a source_desc that never received a format (salt 0 from invite_source)
-    // silently drops every packet forever. Message-thread only; just sets the
-    // stream_state flag the sink's send() thread already polls.
+    // Ask a known source to (re)send its /format. Needed when a source_desc never received one (salt 0
+    // from invite_source): compact ("/d") data is matched by salt and would be dropped. Message thread
+    // only; sets the stream_state flag the sink's send() thread polls.
     virtual int32_t request_source_format(void *endpoint, int32_t id) = 0;
 
     virtual int32_t set_sourceoption(void *endpoint, int32_t id,

@@ -71,11 +71,9 @@ int32_t aoo::source::set_option(int32_t opt, void *ptr, int32_t size)
     // resume
     case aoo_opt_start:
     {
-        // Start on a source that is already playing must not call update: a new salt + sequence reset
-        // is a full stream restart, so every sink would dump the history buffer (an emergency drain, a
-        // click) and the hub's inbound sink would re-request the format. The client calls start() from
-        // several housekeeping paths (send-allow/mute restore, hub hello/join retries, peer connect).
-        // Only a stopped source needs update().
+        // Only a stopped source needs update(): on a playing one the new salt + sequence reset is a full
+        // stream restart (every sink drains its buffer, the hub re-requests the format). start() is called
+        // from several housekeeping paths.
         if (!play_.load()) {
             unique_lock lock(update_mutex_); // writer lock!
             update();
@@ -582,16 +580,10 @@ int32_t aoo::source::process(const aoo_sample **data, int32_t n, uint64_t t){
         dll_.setup(samplerate_, blocksize_, bandwidth_, 0);
     } else if (state == timer::state::error){
         if (synthetic_clock_.load(std::memory_order_relaxed)){
-            // Resync, don't skip. This source is driven by a synthetic monotonic
-            // block clock (hub feed pump): a timer error here means the pump thread
-            // slipped on the wall clock, not that any audio was lost; every produced
-            // block is still queued in audioqueue_. Scheduling dropped_ empties would
-            // make the sinks discard real audio and (at blocksize 64) permanently
-            // starve clients. Instead, mirror the timer::state::reset path: re-setup
-            // the DLL from nominal rate and reset the timer, exactly like a fresh
-            // stream start. dll_/timer_/bandwidth_ access matches the reset branch
-            // above (same thread, same locking discipline). Flag 0 = the path below,
-            // used by client sources.
+            // Resync, don't skip: on a synthetic block clock (hub feed pump) a timer error means the pump
+            // slipped, not that audio was lost; every block is still queued. Scheduling dropped_ empties
+            // would make the sinks discard real audio. Same as the reset branch above (same thread, same
+            // locking). Flag 0 = the path below, used by client sources.
             LOG_VERBOSE("aoo_source: synthetic clock timer error ("
                         << error << " s) — resync DLL, no skip");
             dll_.setup(samplerate_, blocksize_, bandwidth_, 0);
@@ -600,13 +592,9 @@ int32_t aoo::source::process(const aoo_sample **data, int32_t n, uint64_t t){
             // skip blocks
             double period = (double)blocksize_ / (double)samplerate_;
             int nblocks = error / period + 0.5;
-            // Cap dropped_ at the audioqueue capacity in blocks (cached by update()
-            // as queue_nbuffers_; audioqueue_ itself must not be touched here, outside
-            // update_mutex_). More debt than the queue can even hold audio for is pure
-            // starvation credit the sink pays with silence; send_data() drains ALL of
-            // dropped_ in one call, so the cap bounds that burst too.
-            // CAS loop: race is only vs send_data()'s exchange(0), two threads, no
-            // starvation; never resurrects drained debt.
+            // Cap dropped_ at the audioqueue capacity in blocks (queue_nbuffers_, cached by update(); audioqueue_
+            // must not be touched here, outside update_mutex_). send_data() drains all of dropped_ in one call,
+            // so the cap also bounds that burst. CAS loop against send_data()'s exchange(0).
             const int32_t cap = std::max<int32_t>(1,
                 queue_nbuffers_.load(std::memory_order_relaxed));
             LOG_VERBOSE("skip " << nblocks << " blocks (cap " << cap << ")");
@@ -749,12 +737,8 @@ int32_t aoo::source::process(const aoo_sample **data, int32_t n, uint64_t t){
             if (!didconsume && samplesleft > availsamples) {
                 // didn't consume any, and we can't fit any more
                 //LOG_WARNING("resampler could not handle all input samples, " << samplesleft << " unprocessed, avail " << availsamples << " audioqu_wravail: " << audioqueue_.write_available()  << " audqbs: " << audioqueue_.blocksize() << " encbs: " << encoder_->blocksize());
-                // We are discarding the caller's input because audioqueue_/srqueue_ are full, but the
-                // resampler still holds up to ~2.5 blocks of older samples, which would resume the stream
-                // with stale audio (silent latency add) once the queue drains. Drop them too:
-                // reset_positions() zeroes rd/wr/balance but preserves ratio_ (clear() would reset ratio_
-                // to 1 and break active resampling until the next update()). Four scalar stores, no
-                // locks/allocs/IO: audio-thread safe.
+                // Input is discarded (queues full): drop the resampler's older samples too, or the stream resumes
+                // late. reset_positions() keeps ratio_ (clear() would reset it to 1); no locks or allocations.
                 resampler_.reset_positions();
                 static std::atomic<int32_t> discard_log_n{0};
                 int32_t dn = discard_log_n.fetch_add(1, std::memory_order_relaxed);
@@ -999,12 +983,8 @@ int32_t source::set_userformat(void * ptr, int32_t size){
         auto cptr = static_cast<char*>(ptr);
         userformat_.assign(cptr, cptr+size);
     }
-    // Update mints a NEW SALT and resets the sequence (a full stream restart): every sink then treats
-    // the source as a new stream and gets the whole history buffer dumped on it, an emergency drain on
-    // every listener. The hub pushes each sender's userformat into all of its feed sources on EVERY
-    // format event, and the client does the same to its own upstream on parameter changes.
-    // A userformat change only needs the /format message re-sent; the sink applies it in place when the
-    // salt is unchanged (sink handle_format resets only if salt != salt_). So: flag the resend, keep the stream.
+    // A userformat change only re-sends /format (the sink applies it in place when the salt is unchanged);
+    // update() would mint a new salt, a full stream restart with a buffer drain on every listener.
     format_changed_ = true;
 
     return 1;
@@ -1318,20 +1298,14 @@ bool source::send_data(){
 
     data_packet d;
     int32_t salt = salt_;
-    bool sentempty = false;   // (F5)
-    bool sentaudio = false;   // (F5)
+    bool sentempty = false;
+    bool sentaudio = false;
 
     // *first* check for dropped blocks
-    // Drain ALL pending dropped_ empties in one call, then CONTINUE to the
-    // normal audio send below in the SAME call: if a skipped block cost two
-    // send passes while the skip only added one, a transient timer error would
-    // become a permanent emission-rate deficit under a rate-limited pacer.
-    // dropped_ is only zeroed here; a concurrent process()-side add lands in
-    // the next call. It is capped at the audioqueue block capacity (see
-    // process()), so this burst is bounded.
-    // Wire safety: each empty is an independent /data datagram built purely
-    // from (id, salt, d), see endpoint::send_data, so N empties from one
-    // call are byte-identical to N empties over N calls.
+    // Drain ALL pending dropped_ empties in one call, then continue to the normal audio send in the SAME
+    // call, so a timer error never becomes a lasting emission-rate deficit under a rate-limited pacer.
+    // dropped_ is only zeroed here and is capped in process(), so the burst is bounded. Each empty is an
+    // independent /data datagram, so N empties from one call equal N empties over N calls.
     int32_t ndropped = dropped_.exchange(0, std::memory_order_relaxed);
     if (ndropped > 0){
         double nominalsr = encoder_->samplerate(); // use nominal samplerate
@@ -1356,7 +1330,7 @@ bool source::send_data(){
             // send empty block
             d.sequence = seqbase + b;   // Reserved above under the lock
             d.samplerate = nominalsr;
-            d.channel = 0;   // Was uninitialized stack
+            d.channel = 0;
             d.totalsize = 0;
             d.nframes = 0;
             d.framenum = 0;
@@ -1549,10 +1523,8 @@ void source::handle_format_request(void *endpoint, aoo_replyfn fn,
             formatrequestqueue_.write(aoo::endpoint { endpoint, fn, id });
         }
     } else {
-        // Rate-limit this warning. After a client quit/relaunch the hub's outbound feed sources
-        // (deterministic source IDs) get re-created but listeners' sinks still hold stale subscriptions
-        // and keep sending /format requests; unconditional logging would flood stderr and hammer the
-        // hub thread. LATER: proper source/sink lifecycle on reconnect.
+        // Rate-limited: after a client reconnect, stale listener sinks keep requesting /format from
+        // re-created hub feed sources.
         static std::atomic<int> fmt_nofound_log_n{0};
         int n = fmt_nofound_log_n.fetch_add(1);
         if (n < 30 || (n % 200) == 0) {
@@ -1586,7 +1558,7 @@ void source::handle_data_request(void *endpoint, aoo_replyfn fn,
             }
         }
     } else {
-        // Rate-limit, same reasoning as the /format spam fix above.
+        // Rate-limited, as above.
         static std::atomic<int> data_nofound_log_n{0};
         int n = data_nofound_log_n.fetch_add(1);
         if (n < 30 || (n % 200) == 0) {

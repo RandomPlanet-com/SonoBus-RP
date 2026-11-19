@@ -58,6 +58,7 @@ public:
     ip_address public_address;
     ip_address local_address;
     int64_t token;
+    std::string sb_close_why;   // why the connection ends, for the connection log
 private:
     std::shared_ptr<user> user_;
     ip_address addr_;

@@ -11,6 +11,7 @@
 
 //==============================================================================
 class WaveformTransportComponent  : public Component,
+                           public SettableTooltipClient,
                            public ChangeListener,
                            public FileDragAndDropTarget,
                            public ChangeBroadcaster,
@@ -54,7 +55,7 @@ public:
         addAndMakeVisible (currentPositionMarker);
 
         selcolor = Colour::fromFloatRGBA(0.6, 0.6, 0.6, 0.3);
-        loopcolor = Colour::fromFloatRGBA(0.18, 0.76, 0.70, 0.35);   // Icon teal (was magenta)
+        loopcolor = Colour::fromFloatRGBA(0.18, 0.76, 0.70, 0.35);   // Icon teal
         
         currentLoopRect.setFill (selcolor);
         currentLoopRect.setCornerSize(Point<float>(4.0f,4.0f));
@@ -107,6 +108,7 @@ public:
 
             double lensec = transportSource.getLengthInSeconds();
             totLabel.setText(SonoUtility::durationToString(lensec, true), dontSendNotification);
+            resized();   // the name column depends on the length readout
 
             selRangeStart = 0;
             selRangeEnd = lensec;
@@ -115,6 +117,7 @@ public:
             String fname = url.getFileName().isNotEmpty() ? url.getLocalFile().getFileNameWithoutExtension() : "";
             
             nameLabel.setText(fname, dontSendNotification);
+            updateNameTip();
             
             updatePositionLabels();
             
@@ -226,9 +229,24 @@ public:
 
         int labheight = getHeight();
         
-        nameLabel.setBounds(4, 2, getWidth() - 8, labheight - 4);
+        // The file name wraps between the two time readouts (the length is the wider one) so it never runs over
+        // them; when that column is too narrow it takes one line across the top, above the readouts
+        const int timeW = (int) std::ceil (totLabel.getLookAndFeel().getLabelFont (totLabel).getStringWidthFloat (totLabel.getText())) + 10 + 4;
+        if (getWidth() - 8 - 2 * timeW >= 80)
+            nameLabel.setBounds(4 + timeW, 2, getWidth() - 8 - 2 * timeW, labheight - 4);
+        else
+            nameLabel.setBounds(4, 2, getWidth() - 8, jmin (labheight - 4, (int) std::ceil (nameLabel.getLookAndFeel().getLabelFont (nameLabel).getHeight()) + 4));
         totLabel.setBounds(0.5 * getWidth() + 4, 2, 0.5*getWidth() - 8, labheight - 4);
         posLabel.setBounds(4, 2, 0.5*getWidth() - 8, labheight - 4);
+        updateNameTip();
+    }
+
+    // Whole file name in the hover whenever it does not fit on one line
+    void updateNameTip()
+    {
+        const String name = nameLabel.getText();
+        const bool cut = nameLabel.getLookAndFeel().getLabelFont (nameLabel).getStringWidthFloat (name) > (float) (nameLabel.getWidth() - 10);
+        setTooltip (cut ? name : String());
     }
 
     void changeListenerCallback (ChangeBroadcaster* source) override

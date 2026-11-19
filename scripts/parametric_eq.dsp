@@ -19,7 +19,7 @@ with{
         FP1 = pq1_group(hslider("[1] peak frequency [unit:Hz] [style:knob] [tooltip: Peak
                 Frequency in Hz]",400,40,10000,1)) : si.smooth(0.999);
         Q1 = pq1_group(hslider("[2] peak q [style:knob] [scale:log] [tooltip: Quality factor
-                (Q) of the peak = center-frequency/bandwidth]",40,1,1000,0.1));
+                (Q) of the peak = center-frequency/bandwidth]",40,1,1000,0.1)) : si.smoo;
 
         BP1 = FP1/Q1;
 

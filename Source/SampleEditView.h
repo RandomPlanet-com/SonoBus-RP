@@ -214,6 +214,7 @@ private:
     String* lastOpenedDirectory = nullptr;
 
     int minContentWidth = 320;
+    StringArray playbackCaptions;   // every caption the playback option buttons can show
     int minContentHeight = 300;
 
     FlexBox buttonBox;

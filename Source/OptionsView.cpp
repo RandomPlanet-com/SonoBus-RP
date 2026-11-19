@@ -4,6 +4,7 @@
 
 #include "OptionsView.h"
 #include "SonobusPlusVersion.h"
+#include "SbTextFit.h"
 
 #if JUCE_ANDROID
 #include "juce_core/native/juce_BasicNativeHeaders.h"
@@ -12,6 +13,18 @@
 #endif
 
 using namespace SonoAudio;
+
+// Toggle width that shows its caption whole on two lines (best split at a space)
+static int twoLineToggleWidth (ToggleButton& t, int height)
+{
+    const auto text = t.getButtonText().trim();
+    const float fontSize = jmin (15.0f, (float) height * 0.75f);
+    const Font f (fontSize);
+    int best = SbTextFit::textWidth (f, text);
+    for (int i = text.indexOfChar (' '); i > 0; i = text.indexOfChar (i + 1, ' '))
+        best = jmin (best, jmax (SbTextFit::textWidth (f, text.substring (0, i)), SbTextFit::textWidth (f, text.substring (i + 1))));
+    return (int) (fontSize * 1.1f) + 10 + best + 4;   // tick box and gap as in toggleWidth
+}
 
 class SonobusOptionsTabbedComponent : public TabbedComponent
 {
@@ -561,7 +574,10 @@ juce::Rectangle<int> OptionsView::getMinimumContentBounds() const {
 
 juce::Rectangle<int> OptionsView::getPreferredContentBounds() const
 {
-    return Rectangle<int> (0, 0, 300, prefHeight);
+    int h = prefHeight;
+    if (mAudioDeviceSelector)   // the Audio tab shows whole without scrolling when the window has the room
+        h = jmax(h, mAudioDeviceSelector->getHeight() + mSettingsTab->getTabBarDepth() + 12);
+    return Rectangle<int> (0, 0, 300, h);
 }
 
 
@@ -700,6 +716,7 @@ void OptionsView::updateState(bool ignorecheck)
         if (dispath.startsWith(".")) dispath = recdir.getFullPathName();
     }
     mRecLocationButton->setButtonText(dispath);
+    updateCutTooltips();
 
     CompressorParams limparams;
     processor.getInputLimiterParams(0, limparams);
@@ -763,9 +780,11 @@ void OptionsView::updateLayout()
 
     optionsLanguageBox.items.clear();
     optionsLanguageBox.flexDirection = FlexBox::Direction::row;
-    optionsLanguageBox.items.add(FlexItem(minButtonWidth-10, minitemheight, *mOptionsLanguageLabel).withMargin(0).withFlex(0.5f));
-    optionsLanguageBox.items.add(FlexItem(minButtonWidth, minitemheight, *mOptionsLanguageChoice).withMargin(0).withFlex(3));
-    optionsLanguageBox.items.add(FlexItem(minButtonWidth-10, minitemheight, *mOptionsUnivFontButton).withMargin(0).withFlex(1.0));
+    // Label and toggle at their measured widths, the language list takes the rest; the toggle may wrap to two lines
+    optionsLanguageBox.items.add(FlexItem(SbTextFit::labelWidth(*mOptionsLanguageLabel), minitemheight, *mOptionsLanguageLabel).withMargin(0).withFlex(0));
+    optionsLanguageBox.items.add(FlexItem(60, minitemheight, *mOptionsLanguageChoice).withMargin(0).withFlex(1));
+    optionsLanguageBox.items.add(FlexItem(SbTextFit::toggleWidth(*mOptionsUnivFontButton, minitemheight), minitemheight, *mOptionsUnivFontButton)
+                                 .withMinWidth(twoLineToggleWidth(*mOptionsUnivFontButton, minitemheight)).withMargin(0).withFlex(0, 1));
 
     //optionsHearlatBox.items.clear();
     //optionsHearlatBox.flexDirection = FlexBox::Direction::row;
@@ -929,14 +948,17 @@ void OptionsView::updateLayout()
 
     int indentw = 40;
 
+    // One label column for both rows, as wide as the wider label
+    const int recLabelWidth = jmax(SbTextFit::labelWidth(*mRecLocationStaticLabel), SbTextFit::labelWidth(*mRecFormatStaticLabel));
+
     optionsRecordDirBox.items.clear();
     optionsRecordDirBox.flexDirection = FlexBox::Direction::row;
-    optionsRecordDirBox.items.add(FlexItem(115, minitemheight, *mRecLocationStaticLabel).withMargin(0).withFlex(0));
+    optionsRecordDirBox.items.add(FlexItem(recLabelWidth, minitemheight, *mRecLocationStaticLabel).withMargin(0).withFlex(0));
     optionsRecordDirBox.items.add(FlexItem(minButtonWidth, minitemheight, *mRecLocationButton).withMargin(0).withFlex(3));
 
     optionsRecordFormatBox.items.clear();
     optionsRecordFormatBox.flexDirection = FlexBox::Direction::row;
-    optionsRecordFormatBox.items.add(FlexItem(115, minitemheight, *mRecFormatStaticLabel).withMargin(0).withFlex(0));
+    optionsRecordFormatBox.items.add(FlexItem(recLabelWidth, minitemheight, *mRecFormatStaticLabel).withMargin(0).withFlex(0));
     optionsRecordFormatBox.items.add(FlexItem(minButtonWidth, minitemheight, *mRecFormatChoice).withMargin(0).withFlex(1));
     optionsRecordFormatBox.items.add(FlexItem(2, 4));
     optionsRecordFormatBox.items.add(FlexItem(80, minitemheight, *mRecBitsChoice).withMargin(0).withFlex(0.25));
@@ -1018,6 +1040,16 @@ void OptionsView::resized()  {
     if (mAudioDeviceSelector) {
         mAudioDeviceSelector->setBounds(Rectangle<int>(0,0,innerbounds.getWidth() - 10,mAudioDeviceSelector->getHeight()));
     }
+    // The version line takes a second line when the pop-up is too narrow for it
+    for (auto & item : optionsBox.items) {
+        if (item.associatedComponent == mVersionLabel.get()) {
+            const int oneLine = 15;
+            const bool fits = SbTextFit::labelWidth(*mVersionLabel) <= innerbounds.getWidth() - 10 - 4;
+            const float h = fits ? oneLine : 2 * mVersionLabel->getFont().getHeight() + 4;
+            minOptionsHeight += (int) (h - item.minHeight);
+            item.minHeight = item.height = h;
+        }
+    }
     mOptionsComponent->setBounds(Rectangle<int>(0,0,innerbounds.getWidth() - 10, minOptionsHeight));
     mRecOptionsComponent->setBounds(Rectangle<int>(0,0,innerbounds.getWidth() - 10, minRecOptionsHeight));
 
@@ -1035,6 +1067,18 @@ void OptionsView::resized()  {
 
     mOptionsAutoDropThreshLabel->setBounds(mOptionsAutoDropThreshSlider->getBounds().removeFromLeft(mOptionsAutoDropThreshSlider->getWidth()*0.75));
 
+    updateCutTooltips();
+}
+
+void OptionsView::updateCutTooltips()
+{
+    // The record folder path is the user's: when the button cannot show it whole, the hover shows it
+    SbTextFit::tooltipIfCut(*mRecLocationButton, mRecLocationButton->getButtonText(),
+                            SbTextFit::buttonWidth(*mRecLocationButton, mRecLocationButton->getHeight()));
+
+    // Same for the language list when the window leaves it little room
+    const auto lang = mOptionsLanguageChoice->getCurrentText();
+    SbTextFit::tooltipIfCut(*mOptionsLanguageChoice, lang, SbTextFit::textWidth(Font(15.0f), lang) + 22 + 10);
 }
 
 void OptionsView::showAudioTab()
@@ -1346,6 +1390,7 @@ void OptionsView::choiceButtonSelected(SonoChoiceButton *comp, int index, int id
                 }
             }
         }));
+        updateCutTooltips();
     }
 
 }

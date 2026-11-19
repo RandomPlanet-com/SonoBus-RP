@@ -149,7 +149,7 @@ public:
     
     void setupLayout()
     {
-        int minKnobWidth = 54;
+        int minKnobWidth = knobColumnWidth (54, { &thresholdLabel, &ratioLabel, &attackLabel, &releaseLabel, &holdLabel });
         int minitemheight = 32;
         int knoblabelheight = 18;
         int knobitemheight = 62;
@@ -192,7 +192,7 @@ public:
         //checkBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(enablewidth, minitemheight, enableButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0));
-        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(120));
+        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(jmax(120, SbTextFit::labelWidth(titleLabel))));
         //checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
         checkBox.items.add(FlexItem(24, minitemheight, dragButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
@@ -252,8 +252,7 @@ public:
         }
         else if (buttonThatWasClicked == &resetButton) {   // Start over (same defaults as a new channel)
             const bool wasEnabled = mParams.enabled;
-            mParams = SonoAudio::CompressorParams();
-            mParams.thresholdDb = -60.0f; mParams.ratio = 2.0f; mParams.attackMs = 1.0f; mParams.releaseMs = 200.0f; mParams.holdMs = 150.0f; mParams.gate = false;
+            mParams = SonoAudio::gateDefaultParams();
             mParams.enabled = wasEnabled;
             updateParams(mParams);
         }

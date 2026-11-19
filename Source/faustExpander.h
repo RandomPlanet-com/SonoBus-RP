@@ -943,7 +943,7 @@ class faustExpander : public faustdsp {
 			float fTemp5 = ((fRec2[1] > fTemp4) ? fSlow8 : fSlow5);
 			fRec3[0] = ((fRec3[1] * fTemp5) + (fTemp4 * (1.0f - fTemp5)));
 			fRec2[0] = fRec3[0];
-			float fTemp6 = std::max<float>(0.0f, (fSlow2 - (20.0f * std::log10(std::max<float>(fRec0[0], fRec2[0])))));
+			float fTemp6 = std::max<float>(0.0f, (fSlow2 - (20.0f * std::log10(std::max<float>(1.00000001e-10f, std::max<float>(fRec0[0], fRec2[0]))))));
 			float fTemp7 = (fSlow0 * (fTemp6 * std::min<float>(1.0f, std::max<float>(0.0f, (fSlow9 * fTemp6)))));
 			fHbargraph0 = FAUSTFLOAT(fTemp7);
 			float fTemp8 = std::pow(10.0f, (0.0500000007f * fTemp7));

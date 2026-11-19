@@ -367,17 +367,12 @@ typedef enum aoo_option
     // ---
     // Could be used for any purpose (channel layouts, labels, etc)
     aoo_opt_userformat,
-    // Synthetic-clock source
-    // (int32_t, 0/1, default 0). Set by the hub on its outbound FEED sources
-    // only: their process() timestamps come from the hub's synthetic
-    // monotonic block clock (base + n*period), so a timer::state::error there
-    // means the PUMP slipped, not that audio was lost — the audioqueue still
-    // holds every produced block. With this flag set, the source re-setups
-    // its DLL and resets its timer instead of scheduling "dropped" empty
-    // blocks (which would discard real queued audio at the sinks).
-    // Client code never sets this; behavior with flag 0 is bit-identical.
-    // NOTE: appended at the END of the enum on purpose — mid-enum inserts
-    // renumber every later option and break wire/ABI compat (known hazard).
+    // Synthetic-clock source (int32_t, 0/1, default 0). Set by the hub on its outbound FEED sources only:
+    // their timestamps come from the hub's monotonic block clock, so a timer error means the pump slipped,
+    // not that audio was lost. With the flag set the source resets its DLL and timer instead of scheduling
+    // "dropped" empty blocks. Client code never sets it.
+    // NOTE: appended at the END of the enum on purpose: mid-enum inserts renumber every later option and
+    // break wire/ABI compatibility.
     aoo_opt_synthetic_clock,
     // SINK option — LAN-isochronous receive depth in BLOCKS
     // (int32_t; 0 = off). Per peer, because each RemotePeer owns its sink.
@@ -404,7 +399,7 @@ typedef enum aoo_option
     // AOO_PROTOCOL_FLAG_IDLE_MASK, otherwise the source sends plain PCM.
     aoo_opt_idle_mask,
     // Sink per-source option (read-only, int32 → uint32 wrap is fine for rate deltas):
-    // bytes received for this source's stream, counted as payload + 52 (AOO compact header + UDP + IP) per packet.
+    // bytes received for this source's stream as on the wire: the whole datagram + 28 (IPv4 + UDP headers) per packet.
     aoo_opt_rx_bytes,
     // READ-ONLY per-source sink option — the adaptive receive buffer's DECISION
     // ring (aoo_adapt_events*): quick/commit/grow/emergency/decay with the depth in blocks. The caller sets `since`
@@ -416,7 +411,10 @@ typedef enum aoo_option
     aoo_opt_iso_max_blocks,
     // READ-ONLY per-source sink option: the last 60 s of late arrivals against the stream's own schedule
     // (aoo_late_window*). Appended at the END.
-    aoo_opt_late_window
+    aoo_opt_late_window,
+    // READ-ONLY per-source sink option (int32, wraps): audio payload bytes received for this stream, without any
+    // headers. With aoo_opt_rx_bytes it tells how much of a stream is packet overhead. Appended at the END.
+    aoo_opt_rx_payload_bytes
 } aoo_option;
 
 #define AOO_LATE_BUCKETS 66

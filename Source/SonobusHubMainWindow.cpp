@@ -8,6 +8,7 @@
 #include "SonobusPlusVersion.h"   // About window (version + commit from Info.plist)
 #include "SonobusHubGeo.h"        // HubBuildId
 #include "HubBinaryData.h"        // hub icon for the About window (juce_add_binary_data SonoBusHubData)
+#include "SbTextFit.h"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <iostream>
 
 #ifdef _WIN32
+#include "SonobusHubCompat.h"   // windows.h after winsock2.h, ssize_t
 #include <process.h>
 #define getpid _getpid
 #else
@@ -38,6 +40,29 @@ namespace pal {
     static const juce::Colour yellow          = juce::Colour::fromRGB(0xd6, 0xb0, 0x3e);
     static const juce::Colour orange          = juce::Colour::fromRGB(0xe0, 0x8a, 0x3c);
     static const juce::Colour red             = juce::Colour::fromRGB(0xc7, 0x5a, 0x5a);
+}
+
+// Width a text button needs for its caption on one line, as the default look and feel draws it
+// (side indent = min(0.6 x font height, 2 + a quarter of the corner size)).
+static int hubButtonWidth(juce::TextButton& b, int height, const juce::String& text = {}) {
+    const auto f = b.getLookAndFeel().getTextButtonFont(b, height);
+    const int indent = std::min(juce::roundToInt(f.getHeight() * 0.6f), 2 + (height / 2) / 2);
+    return SbTextFit::textWidth(f, text.isNotEmpty() ? text : b.getButtonText()) + 2 * indent + 2;
+}
+// Widest of several captions on the same button
+static int hubButtonWidth(juce::TextButton& b, int height, std::initializer_list<juce::String> texts) {
+    int w = 0;
+    for (const auto& t : texts) w = std::max(w, hubButtonWidth(b, height, t));
+    return w;
+}
+// One table cell: drawn shortened only when it does not fit, then remembered for the hover tooltip
+static void hubCell(juce::Graphics& g, CutCells& cut, const juce::String& text, int x, int y, int w, int h) {
+    g.drawText(text, x, y, w, h, juce::Justification::centredLeft);
+    if (g.getCurrentFont().getStringWidthFloat(text) > (float) w) cut.push_back({ { x, y, w, h }, text });
+}
+static juce::String hubCutTextAt(const CutCells& cut, juce::Point<int> p) {
+    for (const auto& c : cut) if (c.first.contains(p)) return c.second;
+    return {};
 }
 
 // Logging stays plain stdout/stderr (tail -f hub.log or Console.app). A mutex-guarded tee would make the AOO
@@ -73,7 +98,7 @@ static juce::String hubClockShort(int64_t epochMs) {
 }
 
 StatusHeader::StatusHeader() {
-    mIcon = juce::ImageCache::getFromMemory(HubBinaryData::sonobus_hub_icon_mac_256_png, HubBinaryData::sonobus_hub_icon_mac_256_pngSize);   // 
+    mIcon = juce::ImageCache::getFromMemory(HubBinaryData::sonobus_hub_icon_mac_256_png, HubBinaryData::sonobus_hub_icon_mac_256_pngSize);
     mPlatform = juce::String::fromUTF8(hubPlatformString().c_str());
 }
 
@@ -91,16 +116,22 @@ void StatusHeader::paint(juce::Graphics& g) {
     int64_t uptimeS = (mSnap.hubStartedAtMs > 0) ? (nowMs - mSnap.hubStartedAtMs) / 1000 : 0;
 
     auto bounds = getLocalBounds().reduced(14, 10);
+    mCutLines.clear();
+    // One line of text; when it is drawn shortened its full text goes into the hover tooltip
+    auto line = [&](const juce::String& t, juce::Rectangle<int> r) {
+        g.drawText(t, r, juce::Justification::centredLeft);
+        if (g.getCurrentFont().getStringWidthFloat(t) > (float) r.getWidth()) mCutLines.add(t);
+    };
     // icon top-left, title + platform line beside it
     const int iconSz = 56;
     if (mIcon.isValid()) g.drawImage(mIcon, juce::Rectangle<float>((float) bounds.getX(), (float) bounds.getY(), (float) iconSz, (float) iconSz), juce::RectanglePlacement::centred);
     auto titleArea = bounds.removeFromTop(iconSz).withTrimmedLeft(iconSz + 12);
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     g.setColour(pal::accent);
-    g.drawText(juce::String::fromUTF8("SonoBus RP Hub \xe2\x80\x94 ") + juce::String::fromUTF8(mSnap.groupName.c_str()), titleArea.removeFromTop(30), juce::Justification::centredLeft);
+    line(juce::String::fromUTF8("SonoBus RP Hub \xe2\x80\x94 ") + juce::String::fromUTF8(mSnap.groupName.c_str()), titleArea.removeFromTop(30));
     g.setFont(juce::Font(16.0f));
     g.setColour(pal::textDim);
-    g.drawText(mPlatform + (mLocation.isNotEmpty() ? juce::String::fromUTF8("  \xc2\xb7  ") + mLocation : juce::String()), titleArea.removeFromTop(22), juce::Justification::centredLeft);
+    line(mPlatform + (mLocation.isNotEmpty() ? juce::String::fromUTF8("  \xc2\xb7  ") + mLocation : juce::String()), titleArea.removeFromTop(22));
 
     bounds.removeFromTop(6);
     // key/value line
@@ -115,28 +146,30 @@ void StatusHeader::paint(juce::Graphics& g) {
         { "server", host + (mSnap.aooServerPort > 0 ? ":" + juce::String(mSnap.aooServerPort) : juce::String()), "" },
         { "audio UDP", juce::String(mSnap.localUdpPort), "65535" },
         { "version", juce::String("Hub ") + SONOBUS_HUB_VERSION + "  (build " + juce::String(hubBuildId()) + ", " + juce::String(hubCommitId()) + ")", "" } };   // Date build id
+    // The pairs flow onto a second row when the window is narrower than the line (the header keeps room for it)
     auto kvRow = bounds.removeFromTop(24);
     int x = kvRow.getX();
     const juce::Font fk(15.0f), fv(15.0f, juce::Font::bold);
     for (auto& kv : kvs) {
+        const int kw = (int) fk.getStringWidthFloat(kv.k) + 6;
+        const int vw = (int) std::max(fv.getStringWidthFloat(kv.v), fv.getStringWidthFloat(kv.widest)) + 22;
+        if (x > kvRow.getX() && x + kw + (vw - 22) > kvRow.getRight()) { kvRow = bounds.removeFromTop(24); x = kvRow.getX(); }
         g.setFont(fk); g.setColour(pal::textDim);
-        int w = (int) fk.getStringWidthFloat(kv.k) + 6;
-        g.drawText(kv.k, x, kvRow.getY(), w, kvRow.getHeight(), juce::Justification::centredLeft); x += w;
+        g.drawText(kv.k, x, kvRow.getY(), kw, kvRow.getHeight(), juce::Justification::centredLeft); x += kw;
         g.setFont(fv); g.setColour(pal::text);
-        w = (int) std::max(fv.getStringWidthFloat(kv.v), fv.getStringWidthFloat(kv.widest)) + 22;
-        g.drawText(kv.v, x, kvRow.getY(), w, kvRow.getHeight(), juce::Justification::centredLeft); x += w;
+        g.drawText(kv.v, x, kvRow.getY(), vw, kvRow.getHeight(), juce::Justification::centredLeft); x += vw;
     }
     // Port check: local tier (dim) + external tier (coloured)
     g.setFont(juce::Font(15.0f));
     if (!mSnap.portLocalText.empty()) {
         g.setColour(pal::textDim);
-        g.drawText(juce::String(mSnap.portLocalText), bounds.removeFromTop(20), juce::Justification::centredLeft);
+        line(juce::String(mSnap.portLocalText), bounds.removeFromTop(20));
     }
     if (!mSnap.portCheckText.empty()) {
         juce::String t(mSnap.portCheckText);
         if (mSnap.portCheckVerifiedAtMs > 0) t = t.replaceFirstOccurrenceOf(")", " at " + hubClockShort(mSnap.portCheckVerifiedAtMs) + ")");
         g.setColour(mSnap.portCheckState == 1 ? pal::green : mSnap.portCheckState == 2 ? pal::red : pal::textDim);
-        g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
+        line(t, bounds.removeFromTop(20));
     }
     {   // Stage directory listing
         const int st = mSnap.stageListingState;
@@ -145,7 +178,7 @@ void StatusHeader::paint(juce::Graphics& g) {
         else t << (!mSnap.stageListingText.empty() ? juce::String::fromUTF8(mSnap.stageListingText.c_str())
                                                      : juce::String(st == 4 ? "checking" : st == 1 ? "listed" : "not listed"));
         g.setColour(st == 1 ? pal::green : (st == 2 || st == 4) ? pal::yellow : st == 3 ? pal::red : pal::textDim);
-        g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
+        line(t, bounds.removeFromTop(20));
     }
     {   // Limits, the upload a full stage needs (every player gets every other player's stream) and the upload now
         const int mp = mSnap.stageMaxPlayers, mc = mSnap.stageMaxChannels;
@@ -162,18 +195,107 @@ void StatusHeader::paint(juce::Graphics& g) {
             t << " Upload now " << hubRateText(mOutBytesPerSec) << ".";
         }
         g.setColour(pal::textDim);
-        g.drawText(t, bounds.removeFromTop(20), juce::Justification::centredLeft);
+        line(t, bounds.removeFromTop(20));
     }
-    if (mUpdateLine.isNotEmpty()) {   // Update check against randomplanet.com
-        g.setColour(mUpdateUrl.isNotEmpty() ? juce::Colours::orange : pal::textDim);
-        g.drawText(mUpdateLine, bounds.removeFromTop(20), juce::Justification::centredLeft);
-    }
+}
+
+juce::String StatusHeader::getTooltip() {
+    const auto base = juce::SettableTooltipClient::getTooltip();
+    return mCutLines.isEmpty() ? base : mCutLines.joinIntoString("\n") + "\n\n" + base;
+}
+
+// ─── UpdateBanner ─────────────────────────────────────────────────────────────
+namespace updcol {
+    static const juce::Colour bar    = juce::Colour::fromRGB(0xe3, 0xc1, 0x41);
+    static const juce::Colour edge   = juce::Colour::fromRGB(0x8a, 0x74, 0x20);
+    static const juce::Colour ink    = juce::Colour::fromRGB(0x17, 0x13, 0x0a);
+    static const juce::Colour button = juce::Colour::fromRGB(0x2c, 0x25, 0x10);
+    static const juce::Colour label  = juce::Colour::fromRGB(0xf3, 0xd6, 0x57);
+}
+
+UpdateBanner::UpdateBanner() {
+    mButton.setColour(juce::TextButton::buttonColourId, updcol::ink);
+    mButton.setColour(juce::TextButton::buttonOnColourId, updcol::button);
+    mButton.setColour(juce::TextButton::textColourOffId, updcol::label);
+    mButton.setColour(juce::TextButton::textColourOnId, updcol::label);
+    mButton.setColour(juce::ComboBox::outlineColourId, updcol::ink);
+    mButton.onClick = [this]() {
+        if (mCanInstall) { if (onInstall) onInstall(); }
+        else if (mInfo.url.isNotEmpty()) juce::URL(mInfo.url).launchInDefaultBrowser();
+    };
+    mNotes.setColour(juce::HyperlinkButton::textColourId, updcol::ink);
+    mNotes.setTooltip("Opens the list of changes on the website");
+    addAndMakeVisible(mButton);
+    addAndMakeVisible(mNotes);
+}
+
+static bool updateNamed(const HubUpdateInfo& i) { return i.build.isNotEmpty() && i.version != i.build; }
+
+void UpdateBanner::setInfo(const HubUpdateInfo& info, const juce::String& runningVersion, bool canInstall, const juce::String& state) {
+    if (info.available == mInfo.available && info.version == mInfo.version && info.build == mInfo.build && info.notesUrl == mInfo.notesUrl
+        && info.url == mInfo.url && runningVersion == mRunning && canInstall == mCanInstall && state == mState) return;
+    mInfo = info; mRunning = runningVersion; mCanInstall = canInstall; mState = state;
+    mButton.setButtonText(mCanInstall ? "Install and restart" : "Download");
+    mButton.setTooltip(mCanInstall ? "Download and install the new hub, then restart it." : "Open the download page for the new hub.");
+    mButton.setEnabled(mCanInstall || mInfo.url.isNotEmpty());
+    mNotes.setButtonText(updateNamed(mInfo) ? "What's new in " + mInfo.version : juce::String("What's new"));
+    mNotes.setURL(juce::URL(mInfo.notesUrl));
+    resized();
+    repaint();
+}
+
+static juce::String updateLine2(const juce::String& state) {
+    return state.isNotEmpty() ? state : juce::String("Players on the stage will be disconnected for a few seconds.");
+}
+
+// The link follows the second line but never runs under the button; a long second line is shortened instead
+// and shown whole in the hover tooltip.
+void UpdateBanner::layoutLink() {
+    const juce::Font lf(14.0f, juce::Font::bold);
+    const int linkW = SbTextFit::textWidth(lf, mNotes.getButtonText()) + 6;
+    const int need = SbTextFit::textWidth(juce::Font(14.0f, juce::Font::plain), updateLine2(mState));
+    mLine2W = std::max(0, std::min(need, getWidth() - 236 - 24 - 12 - linkW));
+    mNotes.setFont(lf, false, juce::Justification::centredLeft);
+    mNotes.setBounds(24 + mLine2W + 12, 42, linkW, 20);
+}
+
+void UpdateBanner::resized() {
+    const int bw = std::max(220, 48 + hubButtonWidth(mButton, 44, { "Install and restart", "Download" }));
+    mButton.setBounds(getLocalBounds().removeFromRight(bw).reduced(24, 15));
+    layoutLink();
+}
+
+void UpdateBanner::paint(juce::Graphics& g) {
+    g.fillAll(updcol::bar);
+    g.setColour(updcol::edge);
+    g.fillRect(0, getHeight() - 2, getWidth(), 2);
+    g.setColour(updcol::ink);
+    const juce::Font tf(21.0f, juce::Font::bold), sf(13.0f, juce::Font::plain);
+    const juce::String title = "Update available: SonoBus RP Hub " + mInfo.version;
+    const juce::String run = "this hub runs " + mRunning;
+    const juce::String small = updateNamed(mInfo) ? "build " + mInfo.build + juce::String::fromUTF8(" \xc2\xb7 ") + run : run;
+    juce::StringArray cut;
+    g.setFont(tf);
+    g.drawText(title, 24, 12, getWidth() - 260, 28, juce::Justification::centredLeft);
+    if (tf.getStringWidthFloat(title) > (float) (getWidth() - 260)) cut.add(title);
+    const int tx = 24 + (int) tf.getStringWidthFloat(title) + 10;
+    g.setFont(sf);
+    g.setColour(updcol::ink.withAlpha(0.8f));
+    g.drawText(small, tx, 16, std::max(0, getWidth() - 260 - tx), 24, juce::Justification::centredLeft);
+    if (sf.getStringWidthFloat(small) > (float) (getWidth() - 260 - tx)) cut.add(small);
+    g.setColour(updcol::ink);
+    const juce::Font lf(14.0f, juce::Font::plain);
+    g.setFont(lf);
+    g.drawText(updateLine2(mState), 24, 42, mLine2W, 20, juce::Justification::centredLeft);
+    if (lf.getStringWidthFloat(updateLine2(mState)) > (float) mLine2W) cut.add(updateLine2(mState));
+    setTooltip(cut.joinIntoString("\n"));
 }
 
 // ─── PeerTable ────────────────────────────────────────────────────────────────
 void PeerTable::setSnapshot(std::vector<SonobusHubServer::UiPeerSnapshot> peers) {
     mPeers = std::move(peers);
     applySort();   // The chosen column order survives the 1-s refresh
+    layoutColumns();
     repaint();
 }
 
@@ -261,7 +383,7 @@ void PeerTable::mouseDown(const juce::MouseEvent& e) {
     repaint();
 }
 
-// The sort arrow is DRAWN
+// The sort arrow is drawn, not a glyph
 static void hubDrawSortArrow(juce::Graphics& g, float x, float cy, bool desc) {
     const float w = 4.0f, h = 3.5f, cx = x + w + 1.0f;
     juce::Path p;
@@ -269,31 +391,68 @@ static void hubDrawSortArrow(juce::Graphics& g, float x, float cy, bool desc) {
     else      p.addTriangle(cx - w, cy + h, cx + w, cy + h, cx, cy - h);
     g.fillPath(p);
 }
-void PeerTable::paint(juce::Graphics& g) {
-    // Same columns as the web page, all left-aligned: Player, Instrument, Location, Inputs, Signal, Up / Down,
-    // Lost (hub), To / From hub, JitBuf, Net jitter, Hub / Player buf (A/M), Dropouts (xN = overloads), Lat feed,
-    // Device, Connected, Version. The address is in the name's tooltip. The Player, Instrument and Location
-    // columns grow to their longest text, so nothing truncates.
+// Same columns as the web page, all left-aligned: Player, Instrument, Location, Inputs, Signal, Up / Down,
+// Lost (hub), To / From hub, JitBuf, Net jitter, Hub / Player buf (A/M), Dropouts (xN = overloads), Lat feed,
+// Device, Connected, Version. The address is in the name's tooltip.
+namespace peercols {
     constexpr int kNumCols = 16;
-    const int paddingX = 10;
-    auto rowFont = juce::Font(16.0f);
-    auto unitFont = juce::Font(12.0f);
-    auto headFont = juce::Font(14.0f, juce::Font::bold);
-    static const int colWFixed[kNumCols] = { 150, 110, 110, 64, 86, 126, 94, 152, 70, 112, 166, 112, 78, 86, 106, 134 };
-    static const char* colName[kNumCols] = { "Player", "Instrument", "Location", "Inputs", "Signal", "Up / Down Mb/s", "Lost (hub)", "To / From hub",
-                                             "JitBuf", "Net jitter", "Hub / Player buf", "Dropouts", "Lat feed", "Device", "Connected", "Version" };
-    int colW[kNumCols]; for (int i = 0; i < kNumCols; ++i) colW[i] = colWFixed[i];
-    {
-        int w = colWFixed[0], iw = colWFixed[1], lw = colWFixed[2];
-        for (auto& p : mPeers) {
-            w = std::max(w, rowFont.getStringWidth(juce::String::fromUTF8(p.userName.c_str())) + 40);   // + record dot
-            iw = std::max(iw, rowFont.getStringWidth(juce::String::fromUTF8(p.clientInstrument.c_str())) + 18);
-            lw = std::max(lw, rowFont.getStringWidth(juce::String::fromUTF8(p.location.c_str())) + 18);
-        }
-        mUserColW = w; colW[0] = w; colW[1] = iw; colW[2] = lw;
+    constexpr int kPaddingX = 10, kCellInset = 6, kGap = 10, kArrowW = 14;
+    static const char* const kName[kNumCols] = { "Player", "Instrument", "Location", "Inputs", "Signal", "Up / Down Mb/s", "Lost (hub)", "To / From hub",
+                                                 "JitBuf", "Net jitter", "Hub / Player buf", "Dropouts", "Lat feed", "Device", "Connected", "Version" };
+    static juce::Font rowFont()  { return juce::Font(16.0f); }
+    static juce::Font unitFont() { return juce::Font(12.0f); }
+    static juce::Font headFont() { return juce::Font(14.0f, juce::Font::bold); }
+    // A cell made of pieces in the row font, " ms" pieces in the small unit font (as cellParts draws them)
+    static int partsWidth(std::initializer_list<const char*> parts) {
+        int w = 0;
+        for (const char* p : parts) w += (std::string(p) == " ms" ? unitFont() : rowFont()).getStringWidth(p);
+        return w;
     }
+}
+
+// Every column is as wide as its heading (with room for the sort arrow) or its widest realistic value, whichever is
+// more, plus a gap. The text columns (Player, Instrument, Location, Version) follow what the players send.
+void PeerTable::layoutColumns() {
+    using namespace peercols;
+    const auto rf = rowFont(), hf = headFont();
+    auto textW = [&](const juce::String& t) { return SbTextFit::textWidth(rf, t); };
+    int cell[kNumCols] = {
+        0, 0, textW(juce::String::fromUTF8("\xe2\x80\xa6")), textW("99"),
+        std::max({ textW(juce::String::fromUTF8("\xe2\x97\x8f sending")), textW(juce::String::fromUTF8("\xe2\x97\x8f silent")), textW(juce::String::fromUTF8("\xe2\x97\x8f muted")) }),
+        partsWidth({ "999.9", " / ", "999.9" }), textW("999999"),
+        partsWidth({ "999.9", " ms", " / ", "999.9", " ms" }), textW("100%"),
+        partsWidth({ "99.9", " ms", " WAN" }),
+        partsWidth({ "99.9", " ms", " !", " / ", "999.9", " ms", " A" }),
+        partsWidth({ "9999", " (+99)", " x99" }), textW("999s"), textW("1024 @ 44.1k"), textW("999h 59m"), 0 };
+    for (auto& p : mPeers) {
+        cell[0] = std::max(cell[0], textW(juce::String::fromUTF8("\xe2\x97\x8f ") + juce::String::fromUTF8(p.userName.c_str())));   // with the record dot
+        cell[1] = std::max(cell[1], textW(juce::String::fromUTF8(p.clientInstrument.c_str())));
+        cell[2] = std::max(cell[2], textW(juce::String::fromUTF8(p.location.c_str())));
+        const juce::String full = juce::String::fromUTF8(p.clientVersion.c_str());
+        juce::String v = full.upToFirstOccurrenceOf(" (", false, false);
+        if (full.contains("-dev")) v << " dev";
+        if (v.isNotEmpty() && ! p.clientOs.empty()) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientOs.c_str());
+        cell[15] = std::max(cell[15], textW(v));
+    }
+    mColW.assign(kNumCols, 0);
     mColX.assign(kNumCols + 1, 0);
-    { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { mColX[i] = x; x += colW[i]; } mColX[kNumCols] = x; mRequiredWidth = x + paddingX; }
+    int x = kPaddingX;
+    for (int i = 0; i < kNumCols; ++i) {
+        mColW[(size_t) i] = std::max(SbTextFit::textWidth(hf, kName[i]) + kArrowW, cell[i] + kCellInset) + kGap;
+        mColX[(size_t) i] = x;
+        x += mColW[(size_t) i];
+    }
+    mColX[kNumCols] = x;
+    mRequiredWidth = x + kPaddingX;
+}
+
+void PeerTable::paint(juce::Graphics& g) {
+    using namespace peercols;
+    if (mColW.size() != (size_t) kNumCols) layoutColumns();
+    mCut.clear();
+    const auto rowFont = peercols::rowFont(), unitFont = peercols::unitFont(), headFont = peercols::headFont();
+    const int* colW = mColW.data();
+    const char* const* colName = kName;
     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
     auto area = getLocalBounds();
@@ -328,14 +487,18 @@ void PeerTable::paint(juce::Graphics& g) {
         g.setColour((r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int c = 0;
-        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); g.drawText(text, mColX[c], y, colW[c] - 6, kRowH, juce::Justification::centredLeft); ++c; };
+        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, mColX[(size_t) c], y, colW[c] - kCellInset, kRowH); ++c; };
         auto cellParts = [&](const std::vector<Part>& parts) {
-            int x = mColX[c]; const int right = mColX[c] + colW[c] - 6;
+            int x = mColX[(size_t) c]; const int right = mColX[(size_t) c] + colW[c] - kCellInset;
             for (auto& pt : parts) {
                 const juce::Font& f = pt.unit ? unitFont : rowFont;
                 const juce::String t = pt.text.trimStart();   // spaces become plain gaps
                 const int w = f.getStringWidth(pt.text), lead = w - f.getStringWidth(t);
-                if (x + w > right) break;
+                if (x + w > right) {   // a value wider than the column was measured for: the whole value in the hover
+                    juce::String all; for (auto& q : parts) all << q.text;
+                    mCut.push_back({ { mColX[(size_t) c], y, colW[c] - kCellInset, kRowH }, all.trim() });
+                    break;
+                }
                 g.setFont(f); g.setColour(pt.colour);
                 g.drawText(t.trimEnd(), x + lead, y + (pt.unit ? 2 : 0), w - lead + 2, kRowH, juce::Justification::centredLeft);
                 x += w;
@@ -417,7 +580,8 @@ void PeerTable::paint(juce::Graphics& g) {
         if (y > area.getBottom()) break;
     }
 
-    if (mPeers.empty()) {
+    if (mPeers.empty()) {   // centred in the part of the table that is in view
+        if (auto* vp = findParentComponentOfClass<juce::Viewport>()) area = area.withX(vp->getViewPositionX()).withWidth(vp->getViewWidth());
         g.setColour(pal::textDim);
         g.setFont(juce::Font(16.0f, juce::Font::italic));
         g.drawText("(no players connected)", area, juce::Justification::centred);
@@ -435,6 +599,7 @@ void PeerTable::mouseMove(const juce::MouseEvent& e) {
 
 juce::String PeerTable::getTooltip() {
     if (mHoverRow < 0 || mHoverRow >= (int) mPeers.size()) return {};
+    if (const auto t = hubCutTextAt(mCut, getMouseXYRelative()); t.isNotEmpty() && mHoverCol != 0 && mHoverCol != 7) return t;
     const auto& p = mPeers[(size_t) mHoverRow];
     if (mHoverCol == 0) {   // Player: the address, as on the web page (+ feed warning); the audio device has its own column
         juce::String t = juce::String(p.ipAddr) + ":" + juce::String(p.port);
@@ -533,7 +698,15 @@ void RecentTable::paint(juce::Graphics& g) {
     const int paddingX = 10;
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
-    { int fixed = 0; for (int i = 1; i < kNumCols; ++i) fixed += colW[i]; colW[0] = std::max(110, area.getWidth() - 2 * paddingX - fixed); }
+    {   // Location grows to the longest place shown (the Player column keeps at least 160), Player takes the rest
+        const juce::Font cf(14.0f);
+        int locNeed = 0; for (const auto& p : mRows) locNeed = std::max(locNeed, SbTextFit::textWidth(cf, juce::String::fromUTF8(p.location.c_str())) + 6 + 12);
+        const int avail = area.getWidth() - 2 * paddingX;
+        int others = 0; for (int i = 2; i < kNumCols; ++i) others += colW[i];
+        colW[1] = std::max(colW[1], std::min(locNeed, avail - others - 160));
+        colW[0] = std::max(110, avail - others - colW[1]);
+    }
+    mCut.clear();
     auto header = area.removeFromTop(kHeaderH);
     g.setColour(pal::panelLight); g.fillRect(header);
     g.setColour(pal::textDim); g.setFont(juce::Font(13.0f, juce::Font::bold));
@@ -550,7 +723,7 @@ void RecentTable::paint(juce::Graphics& g) {
         g.setColour((r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int x = paddingX, c = 0;
-        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); g.drawText(text, x, y, colW[c] - 6, kRowH, juce::Justification::centredLeft); x += colW[c]; ++c; };
+        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
         cell(juce::String::fromUTF8(p.user.c_str()), pal::text);
         cell(p.location.empty() ? juce::String("-") : juce::String::fromUTF8(p.location.c_str()), p.location.empty() ? pal::textDim : pal::text);
         cell(when(p.lastJoinMs), pal::text);
@@ -566,6 +739,11 @@ void RecentTable::paint(juce::Graphics& g) {
         g.setColour(pal::textDim); g.setFont(juce::Font(14.0f, juce::Font::italic));
         g.drawText("(no players yet)", area, juce::Justification::centred);
     }
+}
+
+juce::String RecentTable::getTooltip() {
+    const auto t = hubCutTextAt(mCut, getMouseXYRelative());
+    return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
 }
 
 // ─── RemovedTable ───────────────────────────────────────
@@ -617,7 +795,13 @@ void RemovedTable::paint(juce::Graphics& g) {
     const int paddingX = 10;
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
-    { int fixed = 0; for (int i = 1; i < kNumCols; ++i) fixed += colW[i]; colW[0] = std::max(110, std::min(420, area.getWidth() - 2 * paddingX - fixed)); }
+    {   // Address grows to the longest address (IPv6), the Player column takes the rest
+        const juce::Font cf(14.0f);
+        for (const auto& p : mRows) colW[1] = std::max(colW[1], SbTextFit::textWidth(cf, juce::String::fromUTF8(p.ip.c_str())) + 6 + 12);
+        int fixed = 0; for (int i = 1; i < kNumCols; ++i) fixed += colW[i];
+        colW[0] = std::max(110, std::min(420, area.getWidth() - 2 * paddingX - fixed));
+    }
+    mCut.clear();
     mButtonX = paddingX + colW[0] + colW[1] + colW[2] + colW[3];
     auto header = area.removeFromTop(kHeaderH);
     g.setColour(pal::panelLight); g.fillRect(header);
@@ -631,7 +815,7 @@ void RemovedTable::paint(juce::Graphics& g) {
         g.setColour((r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int x = paddingX, c = 0;
-        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); g.drawText(text, x, y, colW[c] - 6, kRowH, juce::Justification::centredLeft); x += colW[c]; ++c; };
+        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
         cell(juce::String::fromUTF8(p.user.c_str()), pal::text);
         cell(p.ip.empty() ? juce::String("-") : juce::String::fromUTF8(p.ip.c_str()), p.ip.empty() ? pal::textDim : pal::text);
         cell(p.removedAtMs > 0 ? juce::Time(p.removedAtMs).toString(true, true, false, false) : juce::String("-"), pal::text);
@@ -646,6 +830,11 @@ void RemovedTable::paint(juce::Graphics& g) {
         y += kRowH;
         if (y > area.getBottom()) break;
     }
+}
+
+juce::String RemovedTable::getTooltip() {
+    const auto t = hubCutTextAt(mCut, getMouseXYRelative());
+    return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
 }
 
 // ─── SessionTable ───────────────────────────────────────
@@ -751,6 +940,25 @@ void SessionTable::paint(juce::Graphics& g) {
     const int paddingX = 10;
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
+    auto when = [](int64_t ms) { return ms > 0 ? juce::Time(ms).toString(true, true, false, false) : juce::String("-"); };
+    auto stageText = [this](const SonobusHubServer::SessionRecord& sd) {
+        juce::String name = juce::String::fromUTF8(sd.group.c_str());
+        if (!sd.password.empty()) name += "  pw: " + juce::String::fromUTF8(sd.password.c_str());   // Password in clear, plain text
+        if (sd.group == mCurrentGroup) name += "  (current)";
+        return name;
+    };
+    {   // Dates as wide as the widest date shown; Stage grows to its longest text while the link column keeps 300
+        const juce::Font cf(14.0f);
+        int dateNeed = SbTextFit::textWidth(cf, "28 May 2026 12:59pm"), stageNeed = 0;
+        for (const auto& sd : mRows) {
+            dateNeed = std::max({ dateNeed, SbTextFit::textWidth(cf, when(sd.firstUsedMs)), SbTextFit::textWidth(cf, when(sd.lastUsedMs)) });
+            stageNeed = std::max(stageNeed, SbTextFit::textWidth(cf, stageText(sd)));
+        }
+        colW[1] = colW[2] = std::max(colW[1], dateNeed + 6 + 12);
+        const int avail = area.getWidth() - 2 * paddingX;
+        colW[0] = std::max(colW[0], std::min(stageNeed + 6 + 12, avail - colW[1] - colW[2] - colW[3] - colW[5] - 300));
+    }
+    mCut.clear();
     {   // the link column takes what the fixed columns (incl. the X column at the far right) leave
         int fixed = 0; for (int i = 0; i < kNumCols; ++i) if (i != kNumCols - 2) fixed += colW[i];
         colW[kNumCols - 2] = std::max(80, area.getWidth() - 2 * paddingX - fixed);
@@ -766,7 +974,6 @@ void SessionTable::paint(juce::Graphics& g) {
           if (i == mSortCol) hubDrawSortArrow(g, (float) x + hf.getStringWidthFloat(label) + 4.0f, (float) header.getCentreY(), mSortDesc);   // Drawn arrow
           x += colW[i]; } mColX.push_back(x); }
     g.setFont(juce::Font(14.0f));
-    auto when = [](int64_t ms) { return ms > 0 ? juce::Time(ms).toString(true, true, false, false) : juce::String("-"); };
     int y = area.getY();
     for (size_t r = (size_t) std::max(0, mFirstRow); r < mRows.size(); ++r) {
         const auto& sd = mRows[r];
@@ -774,11 +981,8 @@ void SessionTable::paint(juce::Graphics& g) {
         g.setColour(sel ? pal::accentSoft : (r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int x = paddingX, c = 0;
-        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); g.drawText(text, x, y, colW[c] - 6, kRowH, juce::Justification::centredLeft); x += colW[c]; ++c; };
-        juce::String name = juce::String::fromUTF8(sd.group.c_str());
-        if (!sd.password.empty()) name += "  pw: " + juce::String::fromUTF8(sd.password.c_str());   // Password in clear, plain text
-        if (sd.group == mCurrentGroup) name += "  (current)";
-        cell(name, sd.group == mCurrentGroup ? pal::green : pal::text);
+        auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
+        cell(stageText(sd), sd.group == mCurrentGroup ? pal::green : pal::text);
         cell(when(sd.firstUsedMs), pal::text);
         cell(when(sd.lastUsedMs), pal::text);
         cell(juce::String((int) sd.players.size()), pal::text);
@@ -790,7 +994,7 @@ void SessionTable::paint(juce::Graphics& g) {
             g.drawText(copied ? "Copied" : "Copy link", btn, juce::Justification::centred);
             g.setFont(juce::Font(14.0f));
             const juce::String link = linkFor ? juce::String::fromUTF8(linkFor(sd).c_str()) : juce::String();
-            g.setColour(pal::textDim); g.drawText(link, x + 92, y, colW[c] - 98, kRowH, juce::Justification::centredLeft);
+            g.setColour(pal::textDim); hubCell(g, mCut, link, x + 92, y, colW[c] - 98, kRowH);
             x += colW[c]; ++c;
         }
         if (sd.group != mCurrentGroup) {   // "X" removes the session (drawn, not a glyph)
@@ -808,12 +1012,22 @@ void SessionTable::paint(juce::Graphics& g) {
     }
 }
 
+juce::String SessionTable::getTooltip() {
+    const auto t = hubCutTextAt(mCut, getMouseXYRelative());
+    return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
+}
+
 
 // ─── StatusPage ───────────────────────────────────────────────────────────────
 StatusPage::StatusPage() {
     addAndMakeVisible(header);
     addAndMakeVisible(peerLabel);
-    addAndMakeVisible(peerTable);
+    addAndMakeVisible(peerView);
+    peerView.setViewedComponent(&peerTable, false);
+    peerView.setScrollBarsShown(false, true);   // sideways only, and only while the table is wider than the page
+    peerView.getHorizontalScrollBar().setColour(juce::ScrollBar::thumbColourId, pal::accent);
+    peerView.getHorizontalScrollBar().setColour(juce::ScrollBar::trackColourId, pal::panelLight.brighter(0.25f));
+    peerTable.setSnapshot({});   // measured columns before the first refresh
     peerLabel.setText("  Players", juce::dontSendNotification);
     peerLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     peerLabel.setColour(juce::Label::textColourId, pal::accent);
@@ -907,37 +1121,36 @@ StatusPage::StatusPage() {
     addAndMakeVisible(copyLinkButton);
     addAndMakeVisible(linkLabel);
     addAndMakeVisible(portCheckButton);
-    addChildComponent(installUpdateButton);
     linkLabel.setFont(juce::Font(juce::Font::getDefaultMonospacedFontName(), 14.0f, juce::Font::plain));
     linkLabel.setColour(juce::Label::textColourId, pal::textDim);
     linkLabel.setMinimumHorizontalScale(1.0f);
     copyLinkButton.onClick = [this]() {
         if (onCopyLink) onCopyLink();
         copyLinkButton.setButtonText("Copied");
-        juce::Timer::callAfterDelay(1500, [sp = juce::Component::SafePointer<StatusPage>(this)]() { if (sp) sp->copyLinkButton.setButtonText("Copy Stage Link"); });
+        juce::Component::SafePointer<StatusPage> sp(this);   // outside the inner lambda (MSVC)
+        juce::Timer::callAfterDelay(1500, [sp]() { if (sp) sp->copyLinkButton.setButtonText("Copy Stage Link"); });
     };
     portCheckButton.onClick = [this]() { if (onRerunPortCheck) onRerunPortCheck(); };
 }
 
 void StatusPage::resized() {
     auto bounds = getLocalBounds();
-    // Header bumped 76 → 100 for larger title + two info lines.
     header.setBounds(bounds.removeFromTop(210));   // Icon + title + platform + KV + local/external port check + stage directory + limits (+ update line)
     // Tool row — Copy Stage Link, the link, Re-run port check (right).
+    // Fixed captions keep their width at least as wide as their measured text.
     auto trow = bounds.removeFromTop(40).reduced(14, 4);
-    portCheckButton.setBounds(trow.removeFromRight(170));
-    if (installUpdateButton.isVisible()) { trow.removeFromRight(8); installUpdateButton.setBounds(trow.removeFromRight(130)); }
-    copyLinkButton.setBounds(trow.removeFromLeft(160));
+    portCheckButton.setBounds(trow.removeFromRight(std::max(170, hubButtonWidth(portCheckButton, trow.getHeight()))));
+    copyLinkButton.setBounds(trow.removeFromLeft(std::max(160, hubButtonWidth(copyLinkButton, trow.getHeight(), { "Copy Stage Link", "Copied" }))));
     trow.removeFromLeft(10);
     linkLabel.setBounds(trow);
     // Group row under the header.
     auto grow = bounds.removeFromTop(44).reduced(14, 6);
-    groupLabel.setBounds(grow.removeFromLeft(64));
+    groupLabel.setBounds(grow.removeFromLeft(std::max(64, SbTextFit::labelWidth(groupLabel))));
     groupEditor.setBounds(grow.removeFromLeft(260));
     grow.removeFromLeft(10);
-    groupApply.setBounds(grow.removeFromLeft(200));
+    groupApply.setBounds(grow.removeFromLeft(std::max(200, hubButtonWidth(groupApply, grow.getHeight()))));
     grow.removeFromLeft(24);
-    messageSend.setBounds(grow.removeFromRight(80));
+    messageSend.setBounds(grow.removeFromRight(std::max(80, hubButtonWidth(messageSend, grow.getHeight()))));
     grow.removeFromRight(8);
     messageEditor.setBounds(grow);
     // A fixed strip at the bottom: recent sessions (left 55 %) | the selected session's players with the password
@@ -956,9 +1169,9 @@ void StatusPage::resized() {
     sessionsLabel.setBounds(srow.removeFromTop(28));
     sessionTable.setBounds(srow.withTrimmedBottom(6));
     auto arow = strip.removeFromBottom(38).reduced(0, 4);
-    sessionApply.setBounds(arow.removeFromRight(170));
+    sessionApply.setBounds(arow.removeFromRight(std::max(170, hubButtonWidth(sessionApply, arow.getHeight()))));
     arow.removeFromRight(10);
-    sessionPwLabel.setBounds(arow.removeFromLeft(78));
+    sessionPwLabel.setBounds(arow.removeFromLeft(std::max(78, SbTextFit::labelWidth(sessionPwLabel))));
     sessionPwEditor.setBounds(arow.removeFromLeft(std::min(260, arow.getWidth())));
     recentLabel.setBounds(strip.removeFromTop(28));
     recentTable.setBounds(strip);
@@ -968,7 +1181,11 @@ void StatusPage::resized() {
         removedTable.setBounds(rrow.withTrimmedBottom(6));
     }
     peerLabel.setBounds(bounds.removeFromTop(28));
-    peerTable.setBounds(bounds);
+    // The table keeps every column whole; a window narrower than the table scrolls it sideways
+    peerView.setBounds(bounds);
+    const bool sideways = peerTable.requiredWidth() > bounds.getWidth();
+    peerTable.setBounds(0, 0, std::max(bounds.getWidth(), peerTable.requiredWidth()),
+                        std::max(0, bounds.getHeight() - (sideways ? peerView.getScrollBarThickness() : 0)));
 }
 
 // ─── LogView / LogWindow ──────────────────────────────
@@ -1002,8 +1219,8 @@ void LogView::resized() {
     auto b = getLocalBounds().reduced(14, 10);
     if (mShowControls) {
         auto row = b.removeFromTop(32);
-        mConnOnly.setBounds(row.removeFromLeft(190));
-        mViewLog.setBounds(row.removeFromRight(120));
+        mConnOnly.setBounds(row.removeFromLeft(std::max(190, SbTextFit::toggleWidth(mConnOnly, row.getHeight()))));
+        mViewLog.setBounds(row.removeFromRight(std::max(120, hubButtonWidth(mViewLog, row.getHeight()))));
         b.removeFromTop(6);
     }
     mText.setBounds(b);
@@ -1047,7 +1264,6 @@ namespace {
 constexpr int kRowH = 28;
 constexpr int kSectionH = 26;
 constexpr int kNameW = 215;
-constexpr int kTagW = 150;
 
 // Form layout spec lives in hub_settings::formSpecs() (shared with the web page's
 // Settings section). The stage password has its own block (never shown, Set and Remove actions);
@@ -1146,6 +1362,7 @@ struct SettingsPanel::Row : public juce::Component {
             break;
         }
         const juce::String tip(juce::CharPointer_UTF8(hub_settings::tipFor(key)));
+        tipText = tip;
         name.setTooltip(tip);
         if (editor) editor->setTooltip(tip);
         if (toggle) toggle->setTooltip(tip);
@@ -1218,24 +1435,28 @@ struct SettingsPanel::Row : public juce::Component {
         if (kind == StagePassword) {
             auto l1 = b.removeFromTop(kRowH);
             name.setBounds(l1.removeFromLeft(nameW));
-            tag.setBounds(l1.removeFromRight(kTagW));
+            tag.setBounds(l1.removeFromRight(tagW));
             state.setBounds(l1.reduced(4, 3));
             auto l2 = b.removeFromTop(kRowH);
             name2.setBounds(l2.removeFromLeft(nameW));
-            setButton.setBounds(l2.removeFromRight(kTagW).reduced(4, 3));
+            setButton.setBounds(l2.removeFromRight(tagW).reduced(4, 3));
             editor->setBounds(l2.reduced(4, 3));
             auto l3 = b.removeFromTop(kRowH);
             l3.removeFromLeft(nameW);
-            if (removeButton.isVisible()) removeButton.setBounds(l3.removeFromLeft(170).reduced(4, 3));
+            if (removeButton.isVisible()) removeButton.setBounds(l3.removeFromLeft(hubButtonWidth(removeButton, kRowH - 6) + 8).reduced(4, 3));
             hint.setBounds(l3.reduced(4, 0));
+            SbTextFit::tooltipIfCut(hint, hint.getText(), SbTextFit::labelWidth(hint));
             return;
         }
         name.setBounds(b.removeFromLeft(nameW));
-        tag.setBounds(b.removeFromRight(kTagW));
+        tag.setBounds(b.removeFromRight(tagW));
         auto c = b.reduced(4, 3);
         if (editor) editor->setBounds(c);
         if (toggle) toggle->setBounds(c);
         if (combo)  combo->setBounds(c);
+        if (editor && placeholder.isNotEmpty())   // the shown-when-empty text (indent 4 + border 1 each side)
+            editor->setTooltip(SbTextFit::textWidth(editor->getFont(), placeholder) + 6 >= c.getWidth() ? tipText + "\n" + placeholder : tipText);
+        if (combo) SbTextFit::tooltipIfCut(*combo, tipText + "\n" + combo->getText(), SbTextFit::comboWidth(*combo, c.getHeight(), combo->getText()), tipText);
     }
 
     std::string key;
@@ -1248,6 +1469,8 @@ struct SettingsPanel::Row : public juce::Component {
     juce::StringArray choices;
     bool invalid = false;
     int nameW = kNameW;
+    int tagW = 0;   // set by the panel: widest tag text, never narrower than the Set password button
+    juce::String tipText, placeholder;
     std::function<void(Row&)> onEdited;
     // Stage password block
     juce::Label state, name2, hint;
@@ -1356,9 +1579,10 @@ void SettingsPanel::buildRows() {
                 applyStagePassword(pw);
             };
             r->onRemovePassword = [this]() {
+                juce::Component::SafePointer<SettingsPanel> self(this);   // outside the inner lambda (MSVC)
                 juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Remove password",
                     "Remove the password? Anyone with the stage name can then join.", "Remove password", "Cancel", this,
-                    juce::ModalCallbackFunction::create([self = juce::Component::SafePointer<SettingsPanel>(this)](int ok) {
+                    juce::ModalCallbackFunction::create([self](int ok) {
                         if (ok && self) self->applyStagePassword({});
                     }));
             };
@@ -1372,7 +1596,15 @@ void SettingsPanel::buildRows() {
     // The name column fits the longest label, so no label is ever shortened.
     int nameW = kNameW;
     for (auto& r : mRows) nameW = std::max(nameW, r->name.getFont().getStringWidth(r->name.getText()) + 14);
-    for (auto& r : mRows) r->nameW = nameW;
+    // The tag column is as wide as the longest tag it can show; the editors get the rest
+    int tagW = 0;
+    for (auto& r : mRows) {
+        for (const char* t : { "\xe2\x97\x8f relaunch \xc2\xb7 CLI \xc2\xb7 env", "\xe2\x97\x8f restart \xc2\xb7 CLI \xc2\xb7 env",
+                               "\xe2\x97\x8f live \xc2\xb7 CLI \xc2\xb7 env", "invalid" })
+            tagW = std::max(tagW, SbTextFit::labelWidth(r->tag, juce::String::fromUTF8(t)));
+        if (r->kind == Row::StagePassword) tagW = std::max(tagW, hubButtonWidth(r->setButton, kRowH - 6) + 8);
+    }
+    for (auto& r : mRows) { r->nameW = nameW; r->tagW = tagW; }
 }
 
 void SettingsPanel::setDetectedAddress(const juce::String& address) {
@@ -1381,9 +1613,9 @@ void SettingsPanel::setDetectedAddress(const juce::String& address) {
     mDetectedShown = true;
     for (auto& r : mRows) {
         if (r->key != "public_address" || !r->editor) continue;
-        r->editor->setTextToShowWhenEmpty(address.isNotEmpty() ? address + " (auto-detected)"
-                                                               : juce::String("Not detected, enter your address"),
-                                          pal::text.withAlpha(0.65f));
+        r->placeholder = address.isNotEmpty() ? address + " (auto-detected)" : juce::String("Not detected, enter your address");
+        r->editor->setTextToShowWhenEmpty(r->placeholder, pal::text.withAlpha(0.65f));
+        r->resized();   // tooltip follows whether the text fits
         r->editor->repaint();
     }
 }
@@ -1432,13 +1664,14 @@ void SettingsPanel::layoutForm() {
 void SettingsPanel::resized() {
     auto b = getLocalBounds().reduced(14, 10);
     auto bottom = b.removeFromBottom(40);
-    mSaveRestartButton.setBounds(bottom.removeFromRight(200));
+    const int bh = bottom.getHeight();
+    mSaveRestartButton.setBounds(bottom.removeFromRight(std::max(200, hubButtonWidth(mSaveRestartButton, bh))));
     bottom.removeFromRight(10);
-    mSaveButton.setBounds(bottom.removeFromRight(110));
+    mSaveButton.setBounds(bottom.removeFromRight(std::max(110, hubButtonWidth(mSaveButton, bh))));
     bottom.removeFromRight(10);
-    mRevertButton.setBounds(bottom.removeFromRight(110));
+    mRevertButton.setBounds(bottom.removeFromRight(std::max(110, hubButtonWidth(mRevertButton, bh))));
     bottom.removeFromRight(10);
-    mResetButton.setBounds(bottom.removeFromRight(150));
+    mResetButton.setBounds(bottom.removeFromRight(std::max(150, hubButtonWidth(mResetButton, bh))));
     bottom.removeFromRight(14);
     mStatus.setBounds(bottom);
     b.removeFromBottom(8);
@@ -1446,6 +1679,13 @@ void SettingsPanel::resized() {
     b.removeFromTop(4);
     mViewport.setBounds(b);
     layoutForm();
+    updateCutTips();
+}
+
+// Status and path lines: the whole text in the hover once it no longer fits on one line
+void SettingsPanel::updateCutTips() {
+    SbTextFit::tooltipIfCut(mStatus, mStatus.getText(), SbTextFit::labelWidth(mStatus));
+    SbTextFit::tooltipIfCut(mPathLabel, mPathLabel.getText(), SbTextFit::labelWidth(mPathLabel));
 }
 
 void SettingsPanel::paint(juce::Graphics& g) {
@@ -1550,6 +1790,7 @@ void SettingsPanel::refreshStatus(const juce::String& transient) {
         s << " (Save & Restart drops them so the file applies).";
     }
     mStatus.setText(s, juce::dontSendNotification);
+    updateCutTips();
 
     const bool canSave = mInvalid.empty() && mMeta.file != juce::File();
     mSaveButton.setEnabled(canSave);
@@ -1560,6 +1801,11 @@ bool SettingsPanel::doSave() {
     if (!mInvalid.empty()) { refreshStatus("Fix the invalid field(s) first"); return false; }
     if (auto problem = hub_settings::validate(mEdit); !problem.empty()) {
         refreshStatus("Invalid: " + juce::String(problem));
+        return false;
+    }
+    if (auto problem = hub_settings::publicAddressProblem(mEdit.publicAddressHost); !problem.empty()) {
+        refreshStatus("Not saved");
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Public address", juce::String(problem));
         return false;
     }
     std::string err;
@@ -1589,7 +1835,7 @@ HubContent::HubContent(SonobusHubServer* hub,
                        std::function<void(const std::string&, const std::string&)> applySessionFn)
     : mHub(hub), mRelaunchFn(settingsCb.relaunch), mRestartFn(std::move(restartFn)), mQuitFn(std::move(quitFn)),
       mSettings(running, meta, std::move(settingsCb)) {
-    (void) applyHoldFn;   // Jam/Print switch removed
+    (void) applyHoldFn;   // unused: the hold has one policy
     // Status-page group field.
     mStatusPage.groupEditor.setText(juce::String(running.groupName), juce::dontSendNotification);
     styleButton(mStatusPage.groupApply, pal::accentSoft, pal::text);
@@ -1679,9 +1925,15 @@ HubContent::HubContent(SonobusHubServer* hub,
     mStatusPage.copyLinkButton.setTooltip("Copy a link that opens this stage in SonoBus RP.");
     mStatusPage.linkLabel.setTooltip("The link players use to join this stage.");
     mStatusPage.portCheckButton.setTooltip("Test whether players outside your network can reach this hub.");
-    styleButton(mStatusPage.installUpdateButton, pal::accent, pal::bg);
-    mStatusPage.installUpdateButton.setTooltip("Download and install the new hub. The hub restarts, so every player drops and rejoins.");
-    mStatusPage.installUpdateButton.onClick = [this]() { startInstallUpdate(); };
+    addChildComponent(mUpdateBanner);
+    addChildComponent(mPortAlert);
+    mPortAlert.setColour(juce::Label::backgroundColourId, pal::red);
+    mPortAlert.setColour(juce::Label::textColourId, juce::Colours::white);
+    mPortAlert.setFont(juce::Font(16.0f, juce::Font::bold));
+    mPortAlert.setJustificationType(juce::Justification::centred);
+    mPortAlert.setMinimumHorizontalScale(0.6f);
+    mPortAlert.setTooltip("Closed port: forward it in your router to this computer, or open it in your cloud firewall. The hub checks again every 5 minutes; Re-run port check tests at once. Unknown public address: the hub looks for it when it starts.");
+    mUpdateBanner.onInstall = [this]() { startInstallUpdate(); };
     setTooltip("Total audio traffic through the hub right now.");
     auto& tabBar = mTabs.getTabbedButtonBar();
     tabBar.getTabButton(0)->setTooltip("Players, stage link and recent stages.");
@@ -1728,12 +1980,14 @@ void HubContent::startInstallUpdate() {
     const auto zip = mUpdateCheck->zip();
     if (zip.url.isEmpty()) return;
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Install Update",
-        "Install SonoBus RP Hub " + mUpdateCheck->latest() + "?\n\nThe hub restarts, so every player drops and rejoins.",
+        "Install SonoBus RP Hub " + mUpdateCheck->info().version + "?\n\nThe hub restarts, so every player drops and rejoins.",
         "Install", "Cancel", this,
         juce::ModalCallbackFunction::create([this, zip](int result) {
             if (result != 1) return;
+            mUpdateFailure.clear();
             mUpdateRun = std::make_unique<HubUpdateRun>(zip, [this](juce::Result r) {
                 mUpdateRun.reset();
+                if (r.failed() && r.getErrorMessage() != "Cancelled") mUpdateFailure = "Update failed: " + r.getErrorMessage();
                 std::string err;
                 if (r.wasOk() && mRelaunchFn && mRelaunchFn(err)) return;
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Update not installed",
@@ -1767,10 +2021,13 @@ void HubContent::resized() {
 
     // Bottom control bar (58 px): bandwidth on the left, Restart + Quit on right.
     auto controlBar = bounds.removeFromBottom(58).reduced(14, 10);
-    mQuitButton.setBounds(controlBar.removeFromRight(130));
+    mQuitButton.setBounds(controlBar.removeFromRight(std::max(130, hubButtonWidth(mQuitButton, controlBar.getHeight()))));
     controlBar.removeFromRight(10);
-    mRestartButton.setBounds(controlBar.removeFromRight(160));
+    mRestartButton.setBounds(controlBar.removeFromRight(std::max(160, hubButtonWidth(mRestartButton, controlBar.getHeight()))));
 
+    // Update banner on top while one is available, so it shows on every tab.
+    if (mUpdateBanner.isVisible()) mUpdateBanner.setBounds(bounds.removeFromTop(UpdateBanner::kHeight));
+    if (mPortAlert.isVisible()) mPortAlert.setBounds(bounds.removeFromTop(34));
     // Tabs take everything above the control bar.
     mTabs.setBounds(bounds);
 }
@@ -1813,7 +2070,13 @@ void HubContent::timerCallback() {
     }
 
     for (auto& p : snap.peers) p.location = mGeo.locationFor(p.ipAddr, p.isLan, mGeoEnabled);   
-    mStatusPage.linkLabel.setText(juce::String::fromUTF8(SonobusHubWeb::joinLink(snap).c_str()), juce::dontSendNotification);
+    {   // The full link in the hover when the window is too narrow for it
+        const auto link = juce::String::fromUTF8(SonobusHubWeb::joinLink(snap).c_str());
+        auto& ll = mStatusPage.linkLabel;
+        ll.setText(link, juce::dontSendNotification);
+        const juce::String tip("The link players use to join this stage.");
+        SbTextFit::tooltipIfCut(ll, tip + "\n" + link, SbTextFit::labelWidth(ll, link), tip);
+    }
     mStatusPage.header.setOutRate(haveRate ? mOutBytesPerSec : -1.0f);   // before setSnapshot, which repaints
     mStatusPage.header.setSnapshot(snap);
     mSettings.setDetectedAddress(juce::String::fromUTF8(snap.advertisedPublicHost.c_str()));
@@ -1821,16 +2084,26 @@ void HubContent::timerCallback() {
         mLogCheckTicks = 0;
         if (mLogFile.getSize() >= 50 * 1024 * 1024) hub_settings::redirectLogFile(mLogFile.getFullPathName().toStdString());
     }
-    if (mUpdateCheck) mStatusPage.header.setUpdate(mUpdateCheck->line(), mUpdateCheck->url());   
-    if (mUpdateCheck && !mStatusPage.installUpdateButton.isVisible() && mUpdateCheck->zip().url.isNotEmpty() && hubCanUpdateInPlace()) {
-        mStatusPage.installUpdateButton.setVisible(true);
-        mStatusPage.resized();
+    if (mUpdateCheck) {
+        const auto info = mUpdateCheck->info();
+        const bool canInstall = info.available && mUpdateCheck->zip().url.isNotEmpty() && hubCanUpdateInPlace();
+        mUpdateBanner.setInfo(info, SONOBUS_HUB_VERSION, canInstall, mUpdateFailure);
+        if (mUpdateBanner.isVisible() != info.available) { mUpdateBanner.setVisible(info.available); resized(); }
     }
+    const bool alert = snap.portCheckBlocked || snap.publicAddressUnknown;
+    if (snap.publicAddressUnknown)
+        mPortAlert.setText("Players outside your network cannot join: the hub could not find its public address. Check the internet connection, then press Restart.",
+                           juce::dontSendNotification);
+    else if (snap.portCheckBlocked)
+        mPortAlert.setText("Players outside your network cannot join: " + juce::String(snap.portCheckFailed)
+                           + " is closed." + (snap.stageListingState != 0 ? " The stage is not listed until the port check passes." : ""),
+                           juce::dontSendNotification);
+    if (mPortAlert.isVisible() != alert) { mPortAlert.setVisible(alert); resized(); }
     mStatusPage.peerTable.setHubFormat(snap.sampleRate, snap.blockSize);   
-    {   // Re-layout when the player count changes (table height follows it)
-        const int before = mStatusPage.peerTable.numRows();
+    {   // Re-layout when the player count (table height) or the table's measured width changes
+        const int before = mStatusPage.peerTable.numRows(), beforeW = mStatusPage.peerTable.requiredWidth();
         mStatusPage.peerTable.setSnapshot(snap.peers);
-        if (mStatusPage.peerTable.numRows() != before) mStatusPage.resized();
+        if (mStatusPage.peerTable.numRows() != before || mStatusPage.peerTable.requiredWidth() != beforeW) mStatusPage.resized();
     }
     // Heading: connected now, and distinct players since the hub started
     mStatusPage.peerLabel.setText(juce::String("  Players     ") + juce::String((int) snap.peers.size()) + " now" + juce::String::fromUTF8("  \xc2\xb7  ")
@@ -1900,7 +2173,7 @@ HubMainWindow::HubMainWindow(const juce::String& title,
 {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
-    setResizeLimits(1180, 760, 8000, 8000);   // Below ~760 pt the sessions strip overlapped the password row
+    setResizeLimits(1180, 760, 8000, 8000);   // lower, the sessions strip would overlap the password row
     setContentOwned(new HubContent(hub, running, meta, std::move(settingsCb),
                                    std::move(restartFn), std::move(quitFn), std::move(applyGroupFn), std::move(applyHoldFn), std::move(applySessionFn)), true);
     {   // Wide enough for the whole Players table, never wider than the main display
@@ -1914,8 +2187,17 @@ HubMainWindow::HubMainWindow(const juce::String& title,
 }
 
 void HubMainWindow::closeButtonPressed() {
+#if JUCE_WINDOWS
+    if (auto* app = dynamic_cast<HubJuceApp*>(juce::JUCEApplication::getInstance())) { app->userRequestedStop(); return; }
+#endif
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
+
+#if JUCE_WINDOWS
+static const char* const kThisComputer = "this computer";
+#else
+static const char* const kThisComputer = "this Mac";
+#endif
 
 // ─── HubJuceApp ───────────────────────────────────────────────────────────────
 HubJuceApp::HubJuceApp(const HubLaunchArgs& args, const HubSettingsMeta& meta, std::vector<std::string> argv)
@@ -1943,11 +2225,60 @@ static void forceRegularActivationPolicy() {
 }
 #endif
 
+#if JUCE_WINDOWS
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+// The Windows counterpart of the Mac's App Nap opt-out, plus the window thread's place below the audio threads.
+static void windowsGuiSetup() {
+    FreeConsole();   // the window needs no console (the log goes to hub.log); a console left attached would stay open
+    // The window's thread stays below the hub's time-critical threads (and a player's audio thread on this PC),
+    // also when Windows would boost it for input or painting.
+    const BOOL pr = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    const BOOL nb = SetThreadPriorityBoost(GetCurrentThread(), TRUE);
+    // A minimised or covered window must not slow the process down or coarsen its timer (power throttling).
+    auto optOut = [](ULONG what) {
+        PROCESS_POWER_THROTTLING_STATE st;
+        memset(&st, 0, sizeof(st));
+        st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        st.ControlMask = what;
+        st.StateMask = 0;
+        return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof(st)) != 0;
+    };
+    const bool speed = optOut(PROCESS_POWER_THROTTLING_EXECUTION_SPEED);
+    const bool timer = optOut(PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION);   // Windows 11; refused on Windows 10
+    std::cout << "[HUB] window thread: priority " << (pr ? "below normal" : "unchanged") << ", boost " << (nb ? "off" : "on")
+              << "; power throttling off: speed " << (speed ? "yes" : "no") << ", timer " << (timer ? "yes" : "no") << "\n";
+}
+
+// The Stop file writes QUIT into the data folder; looked for once a second on the message thread.
+namespace {
+class QuitFileWatch : public juce::Timer {
+public:
+    explicit QuitFileWatch(std::function<void()> fn) : mFn(std::move(fn)) { mFile.deleteFile(); startTimer(1000); }
+    void timerCallback() override {
+        if (!mFile.existsAsFile()) return;
+        mFile.deleteFile();
+        stopTimer();
+        std::cout << "[HUB] QUIT file found, shutting down...\n";
+        mFn();
+    }
+private:
+    juce::File mFile = hub_settings::dataDir().getChildFile("QUIT");
+    std::function<void()> mFn;
+};
+}
+#endif
+
 void HubJuceApp::initialise(const juce::String&) {
     // Text that does not fit elides instead of compressing the glyphs
     juce::Font::setDefaultMinimumHorizontalScaleFactor(1.0f);
 #if JUCE_MAC
     forceRegularActivationPolicy();
+#endif
+#if JUCE_WINDOWS
+    windowsGuiSetup();
+    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); });
 #endif
     const bool firstLaunch = !mMeta.loadedFromFile && mMeta.loadError.empty()
                              && mMeta.file != juce::File() && mMeta.cliKeys.count("group") == 0;
@@ -1958,19 +2289,27 @@ void HubJuceApp::initialise(const juce::String&) {
 // Nothing is hosted until the operator has named the group.
 void HubJuceApp::askFirstLaunch() {
     auto* w = new juce::AlertWindow("Welcome to SonoBus RP Hub",
-                                    "Choose a stage name. Players use it to join this hub.",
+                                    "Choose a stage name. Players use it to join this hub.\n\n"
+                                    "Web page password: protects the hub's web page (players list, settings). "
+                                    "Leave empty to turn the web page off.",
                                     juce::MessageBoxIconType::NoIcon);
+    const bool askWeb = mMeta.cliKeys.count("web_password") == 0 && mMeta.cliKeys.count("web_port") == 0;
     w->addTextEditor("group", "", "Stage name");
     w->addTextEditor("password", "", "Password (optional)");
+    if (askWeb) w->addTextEditor("webpw", "", "Web page password (empty = web page off)", '*');
     w->addButton("Start Hub", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("Quit", 0);
     juce::Process::makeForegroundProcess();
-    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int result) {
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w, askWeb](int result) {
         if (result == 0) { quit(); return; }
         const auto group = w->getTextEditorContents("group").trim();
         if (group.isEmpty()) { askFirstLaunch(); return; }
         mArgs.groupName = group.toStdString();
         mArgs.groupPassword = w->getTextEditorContents("password").toStdString();
+        if (askWeb) {
+            mArgs.webPassword = w->getTextEditorContents("webpw").toStdString();
+            mArgs.webPort = mArgs.webPassword.empty() ? 0 : (mArgs.webPort > 0 ? mArgs.webPort : 18080);
+        }
         std::string err;
         if (hub_settings::save(mMeta.file, mArgs, err)) mMeta.loadedFromFile = true;
         else std::cerr << "[HUB] first-launch settings save FAILED: " << err << "\n";
@@ -2002,7 +2341,7 @@ void HubJuceApp::startHubAndWindow() {
               << "=====================================\n";
 
     mHub = std::make_unique<SonobusHubServer>();
-    hub_settings::applyToHub(*mHub, mArgs);   // One shared setter path (was three copies)
+    hub_settings::applyToHub(*mHub, mArgs);   // One shared setter path
     if (mMeta.file != juce::File()) mHub->setSessionsFile(mMeta.file.getSiblingFile("hub_sessions.json").getFullPathName().toStdString());   // Recent sessions (+ their players) persist next to hub_settings.json
     if (mMeta.file != juce::File()) mHub->setRemovedPlayersFile(mMeta.file.getSiblingFile("hub_removed_players.json").getFullPathName().toStdString());   // permanent removals, next to the settings
 
@@ -2020,11 +2359,12 @@ void HubJuceApp::startHubAndWindow() {
     if (mStartFailed) {
         // Most likely a player launched before the hub on the same Mac (err 48).
         // Say it on screen, with the most likely cause, not only in the log.
+        const std::string why = mHub ? mHub->startError() : std::string();
         juce::AlertWindow::showMessageBoxAsync(
             juce::MessageBoxIconType::WarningIcon, "Hub failed to start",
-            juce::String("Could not open UDP port ") + juce::String(mArgs.localServerPort)
-                + " (or the server could not be reached).\n\nMost likely another SonoBus (or an older hub) is "
-                  "already running on this Mac. Quit it, then press Restart.");
+            (why.empty() ? juce::String("The hub could not start. The log names the cause.") : juce::String::fromUTF8(why.c_str()))
+                + "\n\nMost likely another SonoBus RP Hub (or an older hub) is already running on "
+                + juce::String(kThisComputer) + ". Quit it, then press Restart.");
     }
 }
 
@@ -2033,6 +2373,12 @@ void HubJuceApp::doRestart() {
     // args. Posted to the message thread so we don't tear the hub down
     // inside the button-click stack frame.
     juce::MessageManager::callAsync([this]() {
+        // One restart at a time. A second click made while the first one runs is delivered right after it.
+        if (mRestartQueued || juce::Time::currentTimeMillis() - mRestartDoneAtMs < 3000) {
+            std::cout << "[HUB] GUI: Restart already running; second request ignored.\n";
+            return;
+        }
+        mRestartQueued = true;
         std::cout << "[HUB] GUI: Restart requested.\n";
         mWeb.reset();   // References the hub we are about to replace
         if (mStageDirectory) { mStageDirectory->setLeaveOnStop(false); mStageDirectory.reset(); }   // the stage stays listed across a restart
@@ -2052,6 +2398,10 @@ void HubJuceApp::doRestart() {
                          mArgs.groupPassword, mArgs.udpPort, mArgs.sampleRate,
                          mArgs.blockSize, mArgs.channels)) {
             std::cerr << "[HUB] GUI: Restart failed to bring server back up.\n";
+            const std::string why = mHub->startError();
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Hub failed to start",
+                (why.empty() ? juce::String("The hub could not start. The log names the cause.") : juce::String::fromUTF8(why.c_str()))
+                    + "\n\nQuit any other SonoBus RP Hub on " + juce::String(kThisComputer) + ", then press Restart.");
         } else {
             std::cout << "[HUB] GUI: Restart complete.\n";
         }
@@ -2061,14 +2411,14 @@ void HubJuceApp::doRestart() {
         makeWindow();
         startWeb();   // After the new window: the page binds to that window's geo resolver
         startStageDirectory();
+        mRestartQueued = false;
+        mRestartDoneAtMs = juce::Time::currentTimeMillis();
     });
 }
 
 void HubJuceApp::makeWindow() {
     auto restartFn = [this]() { doRestart(); };
-    auto quitFn = []() {
-        juce::JUCEApplication::getInstance()->systemRequestedQuit();
-    };
+    auto quitFn = [this]() { userRequestedStop(); };
     SettingsPanel::Callbacks cb;
     cb.save = [this](const HubLaunchArgs& a, std::string& err) { return applySavedSettings(a, err); };
     cb.relaunch = [this](std::string& err) { return doRelaunch(err); };
@@ -2084,12 +2434,67 @@ void HubJuceApp::makeWindow() {
     auto applyGroupFn = [this](const std::string& g) { applyGroupAndRestart(g); };
     auto applyHoldFn = [this](bool print) { applyHoldMode(print); };
     auto applySessionFn = [this](const std::string& g, const std::string& pw) { applySessionAndRestart(g, pw); };   
+    juce::String title("SonoBus RP Hub");
+   #if JUCE_MAC
+    {   // A renamed copy of the app (a second stage on the same Mac) keeps its own name in the title
+        const auto bundle = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getFileNameWithoutExtension();
+        if (bundle.startsWith(title)) title = bundle;
+    }
+   #endif
+    if (!mArgs.groupName.empty())   // Which stage this window serves
+        title << ": " << juce::String::fromUTF8(mArgs.groupName.c_str());
     mWindow = std::make_unique<HubMainWindow>(
-        "SonoBus RP Hub", mHub.get(), mArgs, mMeta, std::move(cb), restartFn, quitFn, applyGroupFn, applyHoldFn, applySessionFn);
+        title, mHub.get(), mArgs, mMeta, std::move(cb), restartFn, quitFn, applyGroupFn, applyHoldFn, applySessionFn);
+#if JUCE_WINDOWS
+    mWindow->setIcon(juce::ImageCache::getFromMemory(HubBinaryData::sonobus_hub_icon_mac_256_png, HubBinaryData::sonobus_hub_icon_mac_256_pngSize));
+    attachWindowMenu();
+#endif
+}
+
+// Close button and Quit. Windows asks first while players are on the stage; the Mac quits at once.
+void HubJuceApp::userRequestedStop() {
+#if JUCE_WINDOWS
+    if (mHub && mHub->getNumConnectedPeers() > 0) {
+        if (mStopAsked) return;
+        mStopAsked = true;
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Stop the hub?",
+            "Stop the hub? Players on the stage will be disconnected.", "Stop", "Cancel", nullptr,
+            juce::ModalCallbackFunction::create([this](int result) {
+                mStopAsked = false;
+                if (result == 1) quit();
+            }));
+        return;
+    }
+#endif
+    quit();
+}
+
+void HubJuceApp::anotherInstanceStarted(const juce::String&) {
+#if JUCE_WINDOWS
+    if (!mWindow) return;
+    if (mWindow->isMinimised()) mWindow->setMinimised(false);
+    mWindow->toFront(true);
+#endif
 }
 
 // ─── "About SonoBus RP Hub" in the application menu ──────────────────
 namespace {
+// Third-party notices: inside the bundle on a Mac, next to the program on Windows.
+juce::File noticesFile() {
+#if JUCE_MAC
+    return juce::File::getSpecialLocation(juce::File::currentApplicationFile).getChildFile("Contents/Resources/LICENSES-HUB.txt");
+#else
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("LICENSES-HUB.txt");
+#endif
+}
+juce::String noticesPath() {
+#if JUCE_MAC
+    return "Contents/Resources/LICENSES-HUB.txt";
+#else
+    return "LICENSES-HUB.txt next to sonobus-hub.exe";
+#endif
+}
+
 class HubAboutComponent : public juce::Component {
 public:
     HubAboutComponent() {
@@ -2098,9 +2503,9 @@ public:
                                                HubBinaryData::sonobus_hub_icon_mac_256_pngSize);
         // Third-party notices ship in the bundle (LICENSES-HUB.txt, copied by CMake POST_BUILD)
         addAndMakeVisible(noticesButton);
-        noticesButton.setTooltip("Reveal Contents/Resources/LICENSES-HUB.txt (AOO, oscpack, Opus, MD5, JUCE notices)");
+        noticesButton.setTooltip("Reveal " + noticesPath() + " (AOO, oscpack, Opus, MD5, JUCE notices)");
         noticesButton.onClick = [] {
-            const juce::File f = juce::File::getSpecialLocation(juce::File::currentApplicationFile).getChildFile("Contents/Resources/LICENSES-HUB.txt");
+            const juce::File f = noticesFile();
             if (f.existsAsFile()) f.revealToUser();
         };
         setSize(600, 360);
@@ -2139,7 +2544,7 @@ public:
                          "(Sonosaurus). Free software under the GNU General Public License v3.",
                          r.removeFromTop(64), juce::Justification::topLeft, 4, 1.0f);
         r.removeFromTop(4);
-        g.drawText("Third-party notices: Contents/Resources/LICENSES-HUB.txt", r.removeFromTop(18), juce::Justification::centredLeft);   
+        g.drawText("Third-party notices: " + noticesPath(), r.removeFromTop(18), juce::Justification::centredLeft);   
     }
 private:
     SonobusPlusVersion::Info info;
@@ -2147,12 +2552,28 @@ private:
     juce::TextButton noticesButton { "Third-party notices" };   
 };
 
-// A menu bar with no menus of its own: it exists so the Apple menu can carry our About item.
+// Mac: a menu bar with no menus of its own: it exists so the Apple menu can carry our About item.
+// Windows: one "Hub" menu inside the window with About and the data folder.
 class HubMenuModel : public juce::MenuBarModel {
 public:
+    std::function<void()> onAbout;
+#if JUCE_WINDOWS
+    juce::StringArray getMenuBarNames() override { return { "Hub" }; }
+    juce::PopupMenu getMenuForIndex(int, const juce::String&) override {
+        juce::PopupMenu m;
+        m.addItem(1, "About SonoBus RP Hub");
+        m.addItem(2, "Open the Settings and Log Folder");
+        return m;
+    }
+    void menuItemSelected(int id, int) override {
+        if (id == 1 && onAbout) onAbout();
+        if (id == 2) hub_settings::dataDir().startAsProcess();
+    }
+#else
     juce::StringArray getMenuBarNames() override { return {}; }
     juce::PopupMenu getMenuForIndex(int, const juce::String&) override { return {}; }
     void menuItemSelected(int, int) override {}
+#endif
 };
 }
 
@@ -2175,6 +2596,21 @@ void HubJuceApp::installAppMenu() {
     about.setAction([this]() { showAbout(); });
     extras.addItem(about);
     juce::MenuBarModel::setMacMainMenu(mMenuModel.get(), &extras);
+#elif JUCE_WINDOWS
+    auto model = std::make_unique<HubMenuModel>();
+    model->onAbout = [this]() { showAbout(); };
+    mMenuModel = std::move(model);
+    attachWindowMenu();
+#endif
+}
+
+void HubJuceApp::attachWindowMenu() {
+#if JUCE_WINDOWS
+    if (!mWindow || !mMenuModel) return;
+    const int mh = mWindow->getLookAndFeel().getDefaultMenuBarHeight();
+    mWindow->setMenuBar(mMenuModel.get(), mh);
+    mWindow->setResizeLimits(1180, 760 + mh, 8000, 8000);   // the content keeps the Mac window's room
+    if (mWindow->getHeight() < 760 + mh) mWindow->setSize(mWindow->getWidth(), 760 + mh);
 #endif
 }
 
@@ -2278,6 +2714,7 @@ bool HubJuceApp::applySavedSettings(const HubLaunchArgs& a, std::string& err) {
 }
 
 bool HubJuceApp::doRelaunch(std::string& err) {
+    if (mRelaunching) return true;   // a second Save & Restart click: the replacement is already on its way
     // The child must re-derive SB_AOO_* from the settings file, not inherit
     // whatever this process exported at its own startup.
     hub_settings::clearSinkEnv();
@@ -2288,6 +2725,7 @@ bool HubJuceApp::doRelaunch(std::string& err) {
     }
     // The child waits (--wait-for-pid) for us to be gone before it binds
     // ports or takes JUCE's single-instance lock — so quit cleanly now.
+    mRelaunching = true;
     std::cout << "[HUB] GUI: Save & Restart — replacement spawned; quitting this instance.\n";
     juce::MessageManager::callAsync([this]() { systemRequestedQuit(); });
     return true;
@@ -2303,6 +2741,10 @@ void HubJuceApp::shutdown() {
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
+#if JUCE_WINDOWS
+    mQuitWatch.reset();
+    if (mWindow) mWindow->setMenuBar(nullptr);   // the window's menu bar refers to the model
+#endif
     mMenuModel.reset();
     mStageDirectory.reset();   // removes the listing while the hub still exists
     mWeb.reset();   // FIRST — the web thread uses the window's geo resolver (HubContent::mGeo) and the hub;
@@ -2311,6 +2753,10 @@ void HubJuceApp::shutdown() {
     mWindow.reset();
     if (mHub) mHub->stop();
     mHub.reset();
+#if JUCE_WINDOWS
+    std::cout << "[HUB] stopped\n";
+    std::cout.flush();
+#endif
 }
 
 // The Mac hub serves the same status/settings page as the Linux hub
@@ -2350,7 +2796,11 @@ int runGui(const HubLaunchArgs& args, const HubSettingsMeta& meta, int argc, cha
     gPendingMeta = meta;
     gPendingArgv.assign(argv, argv + argc);
     juce::JUCEApplicationBase::createInstance = createJuceAppInstance;
+#if JUCE_WINDOWS
+    return juce::JUCEApplicationBase::main();   // a windowed Windows program reads its command line itself
+#else
     return juce::JUCEApplicationBase::main(argc, (const char**)argv);
+#endif
 }
 
 } // namespace sb_hub_gui

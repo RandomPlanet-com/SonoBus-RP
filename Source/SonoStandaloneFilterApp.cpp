@@ -95,7 +95,7 @@ static void sbLogUnhandled(const char* where, const char* what, const char* file
 #ifdef __GNUG__
     if (auto* ti = abi::__cxa_current_exception_type()) { int st = 0; if (char* dm = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &st)) tname = dm; else tname = ti->name(); }
 #else
-    tname = "(exception type not available on this platform)";   // (Windows port)
+    tname = "(exception type not available on this platform)";
 #endif
     char ts[32]; ::std::time_t now = ::std::time(nullptr); ::std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", ::std::localtime(&now));
     fprintf(stderr, "[SB-EXC] %s %s type=%s what=%s at %s:%d\n", ts, where, tname, what ? what : "", file ? file : "?", line);
@@ -167,7 +167,7 @@ public:
        #endif
 
         appProperties.setStorageParameters (options);
-        {   // / carry the player's settings over from the previous app name, once
+        {   // carry the player's settings over from the previous app name, once
             const File newf = options.getDefaultFile();
             if (!newf.existsAsFile()) {
                 for (const char* prev : { "SonoBus Plus.settings", "SonoBus Plus Beta.settings" }) {
@@ -211,7 +211,7 @@ public:
     const String getApplicationName() override
     {
        #if SONOBUSPLUS_BUILD
-        return "SonoBus RP";   // No more "Beta"
+        return "SonoBus RP";
        #else
         return JucePlugin_Name;
        #endif
@@ -321,7 +321,7 @@ public:
                 data.replaceAll(filtxml.toUTF8(), filtxml.getNumBytesAsUTF8());
                 if (data.getSize() > 0 && plugh->processor != nullptr) {
                     if (auto* sp = dynamic_cast<SonobusAudioProcessor*>(plugh->processor.get()))
-                        sp->setStateInformationWithOptions(data.getData(), (int) data.getSize(), true, true, true);   // Xmlformat=true (was binary parse of XML text)
+                        sp->setStateInformationWithOptions(data.getData(), (int) data.getSize(), true, true, true);   // Xmlformat=true
                     else
                         plugh->processor->setStateInformation(data.getData(), (int) data.getSize());
                 }
@@ -710,6 +710,8 @@ public:
                             DBG("CONNECTING INITIAL");
                             sonoproc->setLaunchConnectRequested(true);   // -c/-g owns the launch; auto-reconnect-to-last stands down
                             sonoeditor->connectWithInfo(cmdlineConnInfo, false, false);
+                            // Again after the call: the connect panel clears the mark for a user request.
+                            if (SonobusAudioProcessor::launchRaceFixOn()) sonoproc->setLaunchConnectRequested(true);
                         } else if (copyInfo) {
                             // only copy info
                             DBG("COPYING INITIAL");

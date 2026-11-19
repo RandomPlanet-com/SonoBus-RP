@@ -158,13 +158,8 @@ bool Thread::createNativeThread (Priority priority)
     const auto started = threadId != nullptr
                       && threadData.started.get_future().get();
 
-    // When tryToUpgradeCurrentThreadToRealtime
-    // fails, the new thread returns BEFORE juce_threadEntryPoint, so
-    // closeThreadHandle() never runs and threadHandle keeps pointing at a
-    // thread that has already exited. Thread::startThread() then sees a
-    // non-null handle and returns false as a silent no-op - i.e. the usual
-    // "startRealtimeThread failed -> startThread(highest)" fallback never
-    // actually started the thread. Clear the stale handle so the retry works.
+    // A failed realtime upgrade exits before juce_threadEntryPoint and leaves a stale
+    // handle; clear it so a startThread() fallback can start the thread.
     if (! started)
         closeThreadHandle();
 

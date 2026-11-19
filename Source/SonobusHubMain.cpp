@@ -2,13 +2,9 @@
 // Copyright (C) 2026 Jason Buecker (Random Planet)
 // SonoBus RP — Hub Server entry point.
 //
-// Default = GUI (juce_add_gui_app).
-// --nogui still calls runHeadless() (pure pre-GUI code path, no JUCE GUI
-// objects ever constructed). This branching plus CoutTee gating lets us
-// bisect dispatch problems.
+// Default = GUI (juce_add_gui_app). --nogui runs runHeadless(), which constructs no JUCE GUI objects.
 //
-// Every hub parameter is now a field of
-// HubLaunchArgs (SonobusHubSettings.h) and persists in
+// Every hub parameter is a field of HubLaunchArgs (SonobusHubSettings.h) and persists in
 // hub_settings.json in hub_settings::dataDir(). Startup precedence:
 //   CLI args > launch env (SB_AOO_* only) > settings file > built-in (ship) defaults
 // resolved HERE, before the server is constructed; the SB_AOO_* keys are then
@@ -16,9 +12,13 @@
 //
 // Usage: see printUsage() (`sonobus-hub --help`).
 
+#include "SonobusHubCompat.h"
 #include "SonobusHubServer.h"
 #if !defined(SONOBUS_HUB_NOGUI)
 #include "SonobusHubMainWindow.h"   // The Linux hub is headless-only (no X11 needed on a server)
+#endif
+#if defined(_WIN32)
+#include <io.h>
 #endif
 #include "SonobusHubSettings.h"
 #include "SonobusHubUpdater.h"
@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -58,12 +59,27 @@ static void signalHandler(int sig) {
     gQuit = true;
 }
 
+#if defined(_WIN32)
+// Closing the console window, logging off or shutting down stops the hub the clean way. Windows ends the
+// process when this handler returns, so it waits for the main loop to finish first.
+static std::atomic<bool> gStopped{false};
+static BOOL WINAPI hubConsoleHandler(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) { gQuit = true; return TRUE; }
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        gQuit = true;
+        for (int i = 0; i < 40 && !gStopped.load(); ++i) Sleep(100);
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
+
 static void printUsage(const char* progname) {
     std::cout << "SonoBus RP Hub: audio relay server for a SonoBus RP group\n\n"
               << "Usage: " << progname << " [options]\n\n"
               << "How it runs:\n"
-              << "  On a Mac the hub opens a window with Status and Settings tabs. Add --nogui to\n"
-              << "  run it without a window, for example as a background service.\n"
+              << "  On a Mac or a Windows PC the hub opens a window with Status and Settings tabs.\n"
+              << "  Add --nogui to run it without a window, for example as a background service.\n"
               << "  On Linux the hub always runs without a window. Run it once with --setup, then\n"
               << "  start it and use the web status page to watch it and to change settings.\n\n"
               << "Commands:\n"
@@ -72,16 +88,19 @@ static void printUsage(const char* progname) {
               << "  --install-update <url> [sha256]\n"
               << "                          Download a hub package, install it over this copy, and exit\n"
               << "  --help                  Show this help\n"
-              << "  --nogui                 Mac: run without a window (Linux never opens one)\n\n"
+              << "  --nogui                 Mac and Windows: run without a window (Linux never opens one)\n\n"
               << "Settings file:\n"
               << "  The options below marked [S] are kept in hub_settings.json:\n"
               << "    Mac:    ~/Library/Application Support/SonoBus RP Hub/hub_settings.json\n"
               << "    Linux:  ~/.config/SonoBus RP Hub/hub_settings.json\n"
-              << "  The file is written by --setup, by the Settings tab of the Mac window and by\n"
+              << "    Windows: %APPDATA%\\SonoBus RP Hub\\hub_settings.json\n"
+              << "  The file is written by --setup, by the Settings tab of the window and by\n"
               << "  the Settings section of the web page. An option given on the command line\n"
               << "  wins over the file for that launch, and the file wins over the defaults\n"
               << "  shown below.\n"
-              << "  --settings-file <path>  Use this file instead of the default location\n"
+              << "  --settings-file <path>  Use this file instead of the default location. Outside the\n"
+              << "                          default folder, its folder also holds this hub's log, taps\n"
+              << "                          and stats, and the hub may run beside another one\n"
               << "  --no-settings           Ignore the settings file (command line and defaults only)\n\n"
               << "Group and network [S]:\n"
               << "  --group <name>          Group name that players join\n"
@@ -115,7 +134,8 @@ static void printUsage(const char* progname) {
               << "Logging [S]:\n"
               << "  --log-file <path>       Write the log to this file. Default:\n"
               << "                          Mac:    ~/Library/Logs/SonoBus RP Hub/hub.log\n"
-              << "                          Linux:  ~/.config/SonoBus RP Hub/hub.log\n\n"
+              << "                          Linux:  ~/.config/SonoBus RP Hub/hub.log\n"
+              << "                          Windows: %APPDATA%\\SonoBus RP Hub\\hub.log\n\n"
               << "Tuning [S] (the defaults suit most hubs):\n"
               << "  --sink-buffer-lan <ms>  Audio the hub holds for each player on the local network\n"
               << "                          (default: 1.33)\n"
@@ -159,10 +179,10 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
         else if (arg == "--sink-buffer-lan" && i + 1 < argc) { a.sinkBufferLanMs = std::atof(argv[++i]); pin("sink_buffer_lan_ms"); }
         else if (arg == "--send-pace") { a.sendPace = true; pin("send_pace"); }      // Paced fan-out
         else if (arg == "--no-send-pace") { a.sendPace = false; pin("send_pace"); }
-        else if (arg == "--no-pace-dither") { a.paceDither = false; pin("pace_dither"); }   // A/B control for phase dither
+        else if (arg == "--no-pace-dither") { a.paceDither = false; pin("pace_dither"); }   // pacer phase dither off
         else if (arg == "--cut-through") { a.cutThrough = true; pin("cut_through"); }        // Listener-thread emission
-        else if (arg == "--inline-listeners") { a.inlineListeners = true; pin("inline_listeners"); }   // (rt-split A)
-        else if (arg == "--no-bundle") { a.bundle = false; pin("bundle"); }             // Hub diet v2
+        else if (arg == "--inline-listeners") { a.inlineListeners = true; pin("inline_listeners"); }   // listener work inline on the audio thread
+        else if (arg == "--no-bundle") { a.bundle = false; pin("bundle"); }             // no bundling of a listener's messages into one send
         else if (arg == "--bundle-mtu" && i + 1 < argc) { a.bundleMtu = std::atoi(argv[++i]); pin("bundle_mtu"); }
         else if (arg == "--redundancy-lan" && i + 1 < argc) { a.redundancyLan = std::atoi(argv[++i]); pin("redundancy_lan"); }   
         else if (arg == "--redundancy-wan" && i + 1 < argc) { a.redundancyWan = std::atoi(argv[++i]); pin("redundancy_wan"); }
@@ -183,7 +203,7 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
         else if (arg == "--stage-country" && i + 1 < argc) { a.stageCountry = argv[++i]; pin("stage_country"); }
         else if (arg == "--stage-names" && i + 1 < argc) { a.stageNames = argv[++i]; pin("stage_names"); }
         else if (arg == "--stage-directory" && i + 1 < argc) { a.stageDirectory = argv[++i]; pin("stage_directory"); }
-        // AOO sink knobs (were launchd env only)
+        // AOO sink knobs
         else if (arg == "--aoo-drain" && i + 1 < argc) { a.aooDrain = std::atoi(argv[++i]); pin("aoo_drain"); }
         else if (arg == "--aoo-arm-blocks" && i + 1 < argc) { a.aooGovArmBlocks = std::atoi(argv[++i]); pin("aoo_gov_arm_blocks"); }
         else if (arg == "--aoo-slack-blocks" && i + 1 < argc) { a.aooSlackBlocks = std::atoi(argv[++i]); pin("aoo_slack_blocks"); }
@@ -222,20 +242,44 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
 static void waitForPidExit(long pid) {
 #ifndef _WIN32
     if (pid <= 0 || pid == (long)getpid()) return;
-    fprintf(stderr, "[HUB] relaunch: waiting for previous instance pid %ld to exit...\n", pid);
+    fprintf(stdout, "[HUB] relaunch: waiting for previous instance pid %ld to exit...\n", pid);
     for (int i = 0; i < 300; ++i) {   // 30 s cap
         if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
-            fprintf(stderr, "[HUB] relaunch: previous instance gone after ~%d ms\n", i * 100);
+            fprintf(stdout, "[HUB] relaunch: previous instance gone after ~%d ms\n", i * 100);
             std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the kernel release the ports
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    fprintf(stderr, "[HUB] relaunch: previous instance pid %ld still alive after 30 s — continuing anyway\n", pid);
+    fprintf(stdout, "[HUB] relaunch: previous instance pid %ld still alive after 30 s — continuing anyway\n", pid);
 #else
-    (void)pid;
+    if (pid <= 0 || pid == (long) GetCurrentProcessId()) return;
+    const HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD) pid);
+    if (!h) return;   // already gone
+    fprintf(stdout, "[HUB] relaunch: waiting for previous instance pid %ld to exit...\n", pid);
+    const DWORD rc = WaitForSingleObject(h, 30000);
+    CloseHandle(h);
+    if (rc == WAIT_OBJECT_0) std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the ports go
+    else fprintf(stdout, "[HUB] relaunch: previous instance pid %ld still alive after 30 s, continuing anyway\n", pid);
 #endif
 }
+
+#if defined(_WIN32) && !defined(SONOBUS_HUB_NOGUI)
+// The program is a windowed one. Without a window (--nogui, --setup, --help, --version) it writes to and reads
+// from the console it was started from; streams that are already redirected stay as they are.
+static void attachParentConsole() {
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    auto unusable = [](FILE* f, DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return _fileno(f) < 0 || h == nullptr || h == INVALID_HANDLE_VALUE;
+    };
+    if (unusable(stdout, STD_OUTPUT_HANDLE)) freopen("CONOUT$", "w", stdout);
+    if (unusable(stderr, STD_ERROR_HANDLE)) freopen("CONOUT$", "w", stderr);
+    if (unusable(stdin, STD_INPUT_HANDLE)) freopen("CONIN$", "r", stdin);
+    std::ios::sync_with_stdio(true);
+    std::cout.clear(); std::cerr.clear(); std::cin.clear();
+}
+#endif
 
 static constexpr int kExitNotSetUp = 78;
 
@@ -252,7 +296,10 @@ static int runSetup(HubLaunchArgs& a, const HubSettingsMeta& meta) {
     if (!gave) a.groupName = askLine("Group name (players use it to join): ");
     if (a.groupName.empty()) { std::cerr << "A group name is required.\n"; return 1; }
     if (meta.cliKeys.count("group_password") == 0 && !gave) a.groupPassword = askLine("Group password (optional): ");
-    if (meta.cliKeys.count("web_password") == 0 && !gave) a.webPassword = askLine("Web page password (needed to change settings from the web page): ");
+    if (meta.cliKeys.count("web_password") == 0 && !gave) {
+        a.webPassword = askLine("Web page password. Protects the hub's web page (players list, settings). Leave empty to turn the web page off: ");
+        if (meta.cliKeys.count("web_port") == 0) a.webPort = a.webPassword.empty() ? 0 : (a.webPort > 0 ? a.webPort : 18080);
+    }
     std::string err;
     if (!hs::save(meta.file, a, err)) { std::cerr << "Could not save settings: " << err << "\n"; return 1; }
     std::cout << "Saved " << meta.file.getFullPathName() << "\n";
@@ -262,6 +309,9 @@ static int runSetup(HubLaunchArgs& a, const HubSettingsMeta& meta) {
 static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // By value — the web Settings page edits it
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+#if defined(_WIN32)
+    SetConsoleCtrlHandler(hubConsoleHandler, TRUE);
+#endif
 
     std::string serverHost;
     int serverPort = 0;
@@ -305,8 +355,16 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     // Only log when the peer count changes.
     int lastPeers = -1;
     int logCheckTicks = 0;
+#if defined(_WIN32)
+    // Clean stop without a console: a file named QUIT in the data folder (looked for once a second, here only).
+    const juce::File quitFile = hs::dataDir().getChildFile("QUIT");
+    quitFile.deleteFile();
+#endif
     while (!gQuit.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+#if defined(_WIN32)
+        if (quitFile.existsAsFile()) { quitFile.deleteFile(); std::cout << "[HUB] QUIT file found, shutting down...\n"; break; }
+#endif
         if (++logCheckTicks >= 600) {
             logCheckTicks = 0;
             if (!a.logFile.empty() && juce::File(juce::String::fromUTF8(a.logFile.c_str())).getSize() >= 50 * 1024 * 1024)
@@ -322,6 +380,10 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     stageDirectory.stopThread(20000);   // removes the listing before the hub goes
     web.stop();
     hub.stop();
+#if defined(_WIN32)
+    std::cout << "[HUB] stopped\n"; std::cout.flush();
+    gStopped = true;
+#endif
     return 0;
 }
 
@@ -329,7 +391,19 @@ int main(int argc, char* argv[]) {
     // Never die of SIGPIPE. On Darwin a UDP send raises it only when the SOCKET itself was killed under us
     // (SOF_DEFUNCT / SS_CANTSENDMORE: an NECP verdict, not a vanished peer; see healEpipeSockets). Complements the
     // SO_NOSIGPIPE settings in the server: a hub launched through LaunchServices otherwise dies silently (signal 13).
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
+    hs::installLineLog();
+#if defined(_WIN32) && !defined(SONOBUS_HUB_NOGUI)
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--nogui" || arg == "--setup" || arg == "--help" || arg == "-h" || arg == "--version" || arg == "--install-update") {
+            attachParentConsole();
+            break;
+        }
+    }
+#endif
     // Pre-pass for the options that must act before anything
     // else — the settings-file location and the relaunch hand-off wait.
     juce::File settingsFile = hs::defaultFile();
@@ -359,16 +433,24 @@ int main(int argc, char* argv[]) {
         }
     waitForPidExit(waitPid);
     hs::migrateOldDataDir();
+    const bool ownDataDir = !noSettings && hs::useSettingsFolderAsDataDir(settingsFile);
 
     // Hub reads ITS OWN taps file, never the client's (both can run on one Mac).
     // Override with SB_TAPS_FILE in the environment.
     if (const char* cur = getenv("SB_TAPS_FILE"); !cur || !cur[0]) {
         std::string hubTaps = hs::dataDir().getChildFile("hub_taps.conf").getFullPathName().toStdString();
         setenv("SB_TAPS_FILE", hubTaps.c_str(), 1);
-        fprintf(stderr, "[HUB] taps file: %s\n", hubTaps.c_str());
+        fprintf(stdout, "[HUB] taps file: %s\n", hubTaps.c_str());
     }
+#if defined(_WIN32)
+    // No line buffering on Windows: a full buffer, written out a few times a second.
+    setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+    hub_start_log_flusher();
+#else
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
+#endif
 #if defined(__APPLE__)
     // NSActivityLatencyCritical | NSActivityUserInitiated for the process lifetime. The hub owns no audio
     // device, so without this macOS App-Naps it the moment its window loses focus: recv thread demoted,
@@ -378,7 +460,7 @@ int main(int argc, char* argv[]) {
     // Hub sink concealment, default ON. A sink refill would otherwise forward a short silence hole to every
     // listener, a click in music. The PCM decoder's bounded PLC (2 ms full quality, fade to silence by 8 ms) fills it,
     // the same conceal the players use at the edge; a long WAN stall still goes quiet after 8 ms, so no spiral.
-    // SB_HUB_PLC=0 (env or the hub taps file) turns it off for A/B. setenv here, in-process before the first
+    // SB_HUB_PLC=0 (env or the hub taps file) turns it off. setenv here, in-process before the first
     // decoder exists, because launcher exports never cross open()/launchd into a GUI app.
     {
         bool plc_on = true;
@@ -407,17 +489,38 @@ int main(int argc, char* argv[]) {
     hs::applyDefaults(a);
 
     if (setup) return runSetup(a, meta);
-#if defined(SONOBUS_HUB_NOGUI)
+#if defined(SONOBUS_HUB_NOGUI) || defined(_WIN32)
     // Same rule as the Mac app: nothing is hosted until the operator has named the group.
-    if (!noSettings && !meta.loadedFromFile && meta.loadError.empty() && meta.cliKeys.count("group") == 0) {
+  #if defined(SONOBUS_HUB_NOGUI)
+    const bool headless = true;
+  #else
+    const bool headless = nogui;   // the window asks for the name itself
+  #endif
+    if (headless && !noSettings && !meta.loadedFromFile && meta.loadError.empty() && meta.cliKeys.count("group") == 0) {
         std::cerr << "This hub has not been set up yet. Run: sonobus-hub --setup\n";
         return kExitNotSetUp;
     }
 #endif
 
+    // An instance with its own folder may run beside the main hub, but only one per folder.
+    static std::unique_ptr<juce::InterProcessLock> instanceLock;
+    if (ownDataDir) {
+        const juce::String dir = hs::dataDir().getFullPathName();
+        instanceLock = std::make_unique<juce::InterProcessLock>("SonoBusRPHub_" + juce::String::toHexString(dir.hashCode64()));
+        if (!instanceLock->enter(0)) {
+            const juce::String line = "[HUB] another hub already runs with the settings folder " + dir + "; this copy quits\n";
+            std::cerr << line;
+            if (!a.logFile.empty()) juce::File(juce::String::fromUTF8(a.logFile.c_str())).appendText(line);
+            return 1;
+        }
+    }
+
     // Redirect logging to a file when asked. Critical for GUI mode: `open`-launched apps have no tty,
     // so [HUB-JIT]/[HUB-ABUF] telemetry would vanish. Line-buffered so tail -f works live.
     if (!a.logFile.empty()) hs::redirectLogFile(a.logFile);
+    std::cout << "[HUB] SonoBus RP Hub " + std::string(SONOBUS_HUB_VERSION) + " build " + hubBuildId() + " on " + hubPlatformString()
+                 + " (" + juce::SystemStats::getCpuModel().trim().toStdString() + ", " + std::to_string(juce::SystemStats::getNumCpus()) + " processors, "
+                 + std::to_string(juce::SystemStats::getMemorySizeInMegabytes()) + " MB)\n";
 
     // This hub's identity at the stage directory: created once, kept in the settings file.
     if (hs::ensureStageIdentity(a) && meta.loadedFromFile) {
@@ -425,6 +528,7 @@ int main(int argc, char* argv[]) {
         if (!hs::save(meta.file, a, err)) std::cerr << "[HUB-SETTINGS] could not save the stage identity: " << err << "\n";
     }
 
+    if (ownDataDir) std::cout << "[HUB-SETTINGS] data folder: " << hs::dataDir().getFullPathName() << " (own instance)\n";
     if (noSettings) {
         std::cout << "[HUB-SETTINGS] settings file disabled (--no-settings)\n";
     } else {

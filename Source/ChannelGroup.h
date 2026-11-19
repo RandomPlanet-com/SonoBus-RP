@@ -11,6 +11,7 @@
 #include "faustLimiter.h"
 
 #include "EffectParams.h"
+#include "FxFade.h"
 
 namespace SonoAudio {
 
@@ -61,7 +62,7 @@ struct ChannelGroupParams
     CompressorParams compressorParams;
 
     // gate/expander
-    CompressorParams expanderParams;
+    CompressorParams expanderParams = gateDefaultParams();
 
     // EQ (stereo only)
     ParametricEqParams eqParams;
@@ -143,13 +144,13 @@ public:
     std::unique_ptr<MapUI> compressorControl;
     float * compressorOutputLevel = nullptr;
     bool compressorParamsChanged = false;
-    bool _lastCompressorEnabled = false;
+    FxFade compressorFade;
 
     // gate/expander
     std::unique_ptr<faustExpander> expander;
     std::unique_ptr<MapUI>  expanderControl;
     bool expanderParamsChanged = false;
-    bool _lastExpanderEnabled = false;
+    FxFade expanderFade;
     float * expanderOutputGain = nullptr;
     // Hard-gate state (audio thread only)
     float gateGain = 1.0f;          // current gain 0..1
@@ -157,20 +158,25 @@ public:
     bool  gateOpen = true;
     std::atomic<int> gateStatePub { -1 };   // -1 = gate off, 0 = closed (digital silence), 1 = open — for the FX panel indicator
     double gateSampleRate = 48000.0;
-    void applyHardGate(float* const* bufs, int nbufs, int numSamples);
+    void applyHardGate(float* const* bufs, int nbufs, int numSamples, bool active);
 
     // EQ (stereo only)
     std::unique_ptr<faustParametricEQ> eq[2];
     std::unique_ptr<MapUI>  eqControl[2];
     bool eqParamsChanged = false;
-    bool _lastEqEnabled = false;
+    FxFade eqFade;
 
     // limiter
     //faustLimiter mInputLimiter;
     std::unique_ptr<faustCompressor> limiter;
     std::unique_ptr<MapUI>  limiterControl;
     bool limiterParamsChanged = false;
-    bool _lastLimiterEnabled = false;
+    FxFade limiterFade;
+
+    // control values of the effects, looked up once (set from the audio thread without a search)
+    struct CompressorZones { float * knee = nullptr, * threshold = nullptr, * ratio = nullptr, * attack = nullptr, * release = nullptr, * makeupGain = nullptr; };
+    CompressorZones compressorZones, expanderZones, limiterZones;
+    float * eqZones[2][10] = {};
 
     // monitoring delay
     std::unique_ptr<juce::dsp::DelayLine<float,juce::dsp::DelayLineInterpolationTypes::None> > monitorDelayLine;
@@ -180,7 +186,8 @@ public:
     std::atomic<bool>  _monitorDelayTimeChanged { false };
     bool  _monitorDelayTimeChanging = false;
     std::atomic<bool>  _monitorDelayActive  { false };
-    bool   _monitorDelayLastActive = false;
+    FxFade monitorDelayFade;       // direct signal <-> delayed signal
+    FxFade monitorDelayTimeFade;   // delayed signal out and back in around a new delay time
     CriticalSection _monitorDelayLock;
 
     AudioBuffer<float> delayWorkBuffer;

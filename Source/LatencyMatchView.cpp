@@ -5,6 +5,7 @@
 
 #include "LatencyMatchView.h"
 #include "GenericItemChooser.h"
+#include "SbTextFit.h"
 
 LatencyMatchView::LatencyMatchView(SonobusAudioProcessor& proc) :  sonoSliderLNF(12), processor(proc)
 {
@@ -82,7 +83,7 @@ LatencyMatchView::LatencyMatchView(SonobusAudioProcessor& proc) :  sonoSliderLNF
     matchButtBox.items.clear();
     matchButtBox.flexDirection = FlexBox::Direction::row;
     matchButtBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(1));
-    matchButtBox.items.add(FlexItem(minButtonWidth, 4, *mRequestMatchButton).withMargin(0).withFlex(1));
+    matchButtBox.items.add(FlexItem(jmax(minButtonWidth, SbTextFit::buttonWidth(*mRequestMatchButton, minitemheight)), 4, *mRequestMatchButton).withMargin(0).withFlex(1));
     matchButtBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(1));
 
     mainSliderBox.items.clear();
@@ -267,6 +268,11 @@ void LatencyMatchView::updatePeerSliders()
             auto * label = mPeerLabels.getUnchecked(i);
             label->setBounds(slider->getBounds().withTrimmedRight(slider->getBounds().getWidth()*0.25));
         }
+    }
+
+    // "source -> destination" in the hover when it ends in "..."
+    for (auto * label : mPeerLabels) {
+        SbTextFit::tooltipIfCut(*label, label->getText(), SbTextFit::labelWidth(*label));
     }
 }
 

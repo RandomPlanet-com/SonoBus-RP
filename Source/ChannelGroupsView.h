@@ -269,7 +269,6 @@ public:
     std::unique_ptr<SonoDrawableButton> destButton;
 
 
-    bool singlePanner = true;
 
     // Player rows: what the pan knob moves
     enum PanMode { PanNone = 0, PanSingle, PanPair, PanBalance };   // PanBalance: the whole mix of a player with several instruments
@@ -314,8 +313,9 @@ public:
     std::unique_ptr<foleys::LevelMeter> premeter2;   // second bar of a stereo pair's single row
     std::unique_ptr<Label> inCaption;    // "IN" / "OUT" over the pre- and post-fader meters of an input row
     std::unique_ptr<Label> outCaption;
+    int meterCaptionHeight() const;      // room a caption needs above its meter (0 without captions)
 
-    
+
     FlexBox mainbox;
     FlexBox maincontentbox;
     FlexBox inbox;
@@ -487,7 +487,9 @@ protected:
 
     int getChanGroupFromIndex(int index);
     juce::Rectangle<int> getBoundsForChanGroup(int chgroup);
-    void setPairPanner(ChannelGroupView * pvf, bool stereoPair);
+    void configMonitorKnob(Slider * slider);
+    // Input Mixer knobs: size, column widths and the row height they need (caption, knob, value)
+    static constexpr int kMixerKnob = 32, kMixerKnobW = 45, kMixerMonW = 48, kMixerKnobH = 54;
     // Player rows: pan and width knobs on top of the per-channel pan positions
     void configKnob(ChannelGroupView * pvf, Slider * slider, bool isWidth);
     void pairPansFromKnobs(ChannelGroupView * pvf, float & left, float & right) const;
@@ -498,6 +500,7 @@ protected:
     void setDestLabel(ChannelGroupView * pvf, const String & text);
     int destWidthFor(ChannelGroupView * pvf, int minWidth) const;
     int destMinWidthFor(ChannelGroupView * pvf, int minWidth) const;   // channel part + "…" only
+    void updateCutTooltips();   // full output route and name in the hover while a row shows them cut
     bool mDestTextChanged = false;
     int getChanGroupForPoint(Point<int> pos, bool inbetween);
 

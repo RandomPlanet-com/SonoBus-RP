@@ -174,7 +174,7 @@ SonoLookAndFeel::SonoLookAndFeel(bool useUniversalFont) : mUseUniversalFont(useU
     setColour (TextButton::buttonColourId, Colour::fromFloatRGBA(0.15, 0.15, 0.15, 0.7)); // old one
     //setColour (TextButton::buttonColourId, Colour::fromFloatRGBA(0.15, 0.15, 0.15, 0.0));
     //setColour (TextButton::buttonOnColourId, Colour (0xff3d70c8));
-    setColour (TextButton::buttonOnColourId, Colour::fromFloatRGBA(0.18, 0.76, 0.70, 0.8));   // Icon teal replaces the purple theme colour
+    setColour (TextButton::buttonOnColourId, Colour::fromFloatRGBA(0.18, 0.76, 0.70, 0.8));   // Icon teal
     setColour (TextButton::textColourOnId, Colour (0xddcccccc));
     setColour (TextButton::textColourOffId, Colour (0xdde9e9e9));
 
@@ -591,9 +591,6 @@ void SonoLookAndFeel::drawTabButton (TabBarButton& button, Graphics& g, bool isM
     if (button.getTabbedButtonBar().isVertical())
         std::swap (length, depth);
     
-    TextLayout textLayout;
-    createTabTextLayout (button, length, depth, col, textLayout);
-    
     AffineTransform t;
     
     switch (o)
@@ -605,9 +602,14 @@ void SonoLookAndFeel::drawTabButton (TabBarButton& button, Graphics& g, bool isM
         default:                            jassertfalse; break;
     }
     
+    // Wraps at spaces where the depth has room for two lines, else ends in an ellipsis
+    Font font = myFont.withHeight (jmin (depth, 32.0f) * 0.5f * fontScale);
+    font.setUnderline (button.hasKeyboardFocus (false));
+    g.setColour (col);
+    g.setFont (font);
     g.addTransform (t);
-    textLayout.draw (g, Rectangle<float> (length, depth));
-
+    drawTextNoSqueeze (g, button.getButtonText().trim(), { 0, 0, (int) length, (int) depth },
+                       Justification::centred, jmax (1, (int) (depth / font.getHeight())));
 }
 
 /*
@@ -1754,9 +1756,12 @@ void SonoPanSliderLookAndFeel::drawRotarySlider (Graphics& g, int x, int y, int 
     };
 
     // Tick ring; the centre tick of a centred knob is longer and brighter
+    // A "brightTick" (a position from 0 to 1) marks a reference value, e.g. 0 dB on a level knob
+    const int brightTick = slider.getProperties().contains ("brightTick")
+                         ? roundToInt ((double) slider.getProperties()["brightTick"] * 10.0) : -1;
     for (int i = 0; i <= 10; ++i) {
         const float a = rotaryStartAngle + (float) i * 0.1f * (rotaryEndAngle - rotaryStartAngle);
-        const bool mid = fromCentre && i == 5;
+        const bool mid = (fromCentre && i == 5) || i == brightTick;
         g.setColour (Colour (mid ? 0xff9a9a9a : 0xff5c5c5c).withMultipliedAlpha (alpha));
         g.drawLine (Line<float> (at ((mid ? 15.6f : 18.2f) * k, a), at (21.2f * k, a)), mid ? 1.4f : 1.1f);
     }

@@ -6,7 +6,7 @@
 #include "StagesView.h"
 #include "SonobusPlusVersion.h"
 
-#include "RandomSentenceGenerator.h"
+#include "SbTextFit.h"
 
 using namespace SonoAudio;
 
@@ -81,9 +81,27 @@ publicGroupsListModel(this)
     mDirectConnectContainer = std::make_unique<Component>();
     mServerConnectContainer = std::make_unique<Component>();
     mPublicServerConnectContainer = std::make_unique<Component>();
-    mServerConnectViewport = std::make_unique<Viewport>();
+    {
+        // The tab bar can change the viewport's size without a resize of this view: the form follows it
+        struct FormViewport : public Viewport {
+            std::function<void()> onResize;
+            void resized() override { Viewport::resized(); if (onResize) onResize(); }
+        };
+        auto vp = std::make_unique<FormViewport>();
+        vp->onResize = [this] { if (mServerConnectContainer) layoutServerForm(); };
+        mServerConnectViewport = std::move(vp);
+    }
     mPublicServerConnectViewport = std::make_unique<Viewport>();
-    mRecentsContainer = std::make_unique<Component>();
+    {
+        // Same for the Recents list: the Clear All button stays inside the tab
+        struct RecentsPanel : public Component {
+            std::function<void()> onResize;
+            void resized() override { if (onResize) onResize(); }
+        };
+        auto rp = std::make_unique<RecentsPanel>();
+        rp->onResize = [this] { layoutRecents(); };
+        mRecentsContainer = std::move(rp);
+    }
 
     mServerConnectViewport->setViewedComponent(mServerConnectContainer.get());
 
@@ -103,6 +121,9 @@ publicGroupsListModel(this)
     mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
     mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
     mStagesView->setWantTestStages(SonobusPlusVersion::get().version.containsIgnoreCase("dev"));
+    mStagesView->savedPassword = [this](const StagesView::JoinRequest& req) { return processor.getSavedStagePassword(req.host, req.port, req.name); };
+    mStagesView->forgetPassword = [this](const StagesView::JoinRequest& req) { processor.setSavedStagePassword(req.host, req.port, req.name, {}); };
+    mStagesView->showMe = [this] { showStagesTab(); };
     mStagesView->onJoin = [this](const StagesView::JoinRequest& req) {
         AooServerConnectionInfo info;
         info.userName = mServerUsernameEditor->getText().trim();
@@ -186,9 +207,10 @@ publicGroupsListModel(this)
     mServerConnectButton->setWantsKeyboardFocus(true);
 
     mServerHostEditor = std::make_unique<TextEditor>("srvaddredit");
-    mServerHostEditor->setTitle(TRANS("Connection Server"));
+    mServerHostEditor->setTitle(TRANS("Hub Server"));
     mServerHostEditor->setFont(Font(14 * SonoLookAndFeel::getFontScale()));
     configEditor(mServerHostEditor.get());
+    mServerHostEditor->setTextToShowWhenEmpty("stage.example.com:12999", Colour(0x44ffffff));
 
     mServerUsernameEditor = std::make_unique<TextEditor>("srvaddredit");
     mServerUsernameEditor->setTitle(TRANS("Your Displayed Name:"));
@@ -205,6 +227,12 @@ publicGroupsListModel(this)
     mServerInstrumentCombo->addItemList(instrumentChoices(), 1);
     mServerInstrumentCombo->setTextWhenNothingSelected(TRANS("choose or type"));
     mServerInstrumentCombo->setTooltip(TRANS("Shown to other players, for example in the stage list"));
+    mServerInstrumentHelpLabel = std::make_unique<Label>("instrumenthelp", TRANS("Pick one from the list, or type your own."));
+    mServerInstrumentHelpLabel->setFont(13);
+    mServerInstrumentHelpLabel->setColour(Label::textColourId, Colour(0x99aaaaaa));
+    mServerInstrumentHelpLabel->setJustificationType(Justification::centredLeft);
+    mServerInstrumentHelpLabel->setBorderSize(BorderSize<int>(0, 2, 0, 2));
+    mServerInstrumentHelpLabel->setMinimumHorizontalScale(1.0f);
     mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
     mServerInstrumentCombo->onChange = [this] {
         processor.setCurrentInstrument(mServerInstrumentCombo->getText());
@@ -232,7 +260,7 @@ publicGroupsListModel(this)
     mServerGroupPassStaticLabel = std::make_unique<Label>("servergrouppassst", TRANS("Password:"));
     configServerLabel(mServerGroupPassStaticLabel.get());
 
-    mServerHostStaticLabel = std::make_unique<Label>("serverhostst", TRANS("Connection Server:"));
+    mServerHostStaticLabel = std::make_unique<Label>("serverhostst", TRANS("Hub Server:"));
     configServerLabel(mServerHostStaticLabel.get());
 
     mNetworkModeStaticLabel = std::make_unique<Label>("netmodest", TRANS("Audio Routing:"));
@@ -240,7 +268,7 @@ publicGroupsListModel(this)
 
     mNetworkModeCombo = std::make_unique<ComboBox>("netmodecombo");
     mNetworkModeCombo->addItem(TRANS("Peer-to-peer (classic SonoBus)"), 1);
-    mNetworkModeCombo->addItem(TRANS("Hosted Mix (SonoBus RP)"), 2);   // No more "Beta"
+    mNetworkModeCombo->addItem(TRANS("Hosted Mix (SonoBus RP)"), 2);
     mNetworkModeCombo->setTooltip(TRANS("Choose networking model. Hosted Mix is beta scaffolding for centralized server mixing."));
     mNetworkModeCombo->setWantsKeyboardFocus(true);
     mNetworkModeCombo->onChange = [this]() {
@@ -273,13 +301,6 @@ publicGroupsListModel(this)
     mServerGroupPasswordShowButton->setTooltip(TRANS("Show password"));
     mServerGroupPasswordShowButton->setColour(SonoDrawableButton::backgroundOnColourId, Colours::transparentBlack);
 
-    
-    mServerGroupRandomButton = std::make_unique<SonoDrawableButton>("randgroup", DrawableButton::ButtonStyle::ImageFitted);
-    std::unique_ptr<Drawable> randimg(Drawable::createFromImageData(BinaryData::dice_icon_128_png, BinaryData::dice_icon_128_pngSize));
-    mServerGroupRandomButton->setTitle(TRANS("Randomize Stage Name"));
-    mServerGroupRandomButton->setImages(randimg.get());
-    mServerGroupRandomButton->addListener(this);
-    mServerGroupRandomButton->setTooltip(TRANS("Generate a random stage name"));
 
     mServerCopyButton = std::make_unique<SonoDrawableButton>("copy", DrawableButton::ButtonStyle::ImageFitted);
     std::unique_ptr<Drawable> copyimg(Drawable::createFromImageData(BinaryData::copy_icon_svg, BinaryData::copy_icon_svgSize));
@@ -312,6 +333,13 @@ publicGroupsListModel(this)
     mServerInfoLabel->setFont(16);
     mServerInfoLabel->setColour(Label::textColourId, Colour(0x99dddddd));
     mServerInfoLabel->setMinimumHorizontalScale(1.0f);
+    mServerInfoLabel->setColour(Label::textColourId, Colour(0xccdddddd));
+
+    mServerInfoSubLabel = std::make_unique<Label>("servinfosub", "");
+    mServerInfoSubLabel->setJustificationType(Justification::centred);
+    mServerInfoSubLabel->setFont(14);
+    mServerInfoSubLabel->setColour(Label::textColourId, Colour(0x99aaaaaa));
+    mServerInfoSubLabel->setMinimumHorizontalScale(1.0f);
 
     String servaudioinfo = TRANS("The connection server is only used to help users find each other, no audio passes through it. All audio is sent directly between users (peer to peer).");
     mServerAudioInfoLabel = std::make_unique<Label>("servaudioinfo", servaudioinfo);
@@ -342,7 +370,7 @@ publicGroupsListModel(this)
 #endif
     mRecentsListBox->getViewport()->setScrollBarsShown(true, false);
     mRecentsListBox->setMultipleSelectionEnabled (false);
-    mRecentsListBox->setRowHeight(40);   // 50 -> 40, more of the 10 recents visible
+    mRecentsListBox->setRowHeight(40);   // more of the 10 recents visible
     mRecentsListBox->setModel (&recentsListModel);
     mRecentsListBox->setRowSelectedOnMouseDown(true);
     mRecentsListBox->setRowClickedOnMouseDown(false);
@@ -430,8 +458,8 @@ publicGroupsListModel(this)
     mServerConnectContainer->addAndMakeVisible(mServerUserStaticLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerInstrumentStaticLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerInstrumentCombo.get());
+    mServerConnectContainer->addAndMakeVisible(mServerInstrumentHelpLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerGroupEditor.get());
-    mServerConnectContainer->addAndMakeVisible(mServerGroupRandomButton.get());
     mServerConnectContainer->addAndMakeVisible(mServerGroupPasswordShowButton.get());
 #if ! (JUCE_IOS || JUCE_ANDROID)
     mServerConnectContainer->addAndMakeVisible(mServerPasteButton.get());
@@ -445,6 +473,7 @@ publicGroupsListModel(this)
     mServerConnectContainer->addAndMakeVisible(mServerGroupPasswordEditor.get());
     mServerConnectContainer->addAndMakeVisible(mServerStatusLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerInfoLabel.get());
+    mServerConnectContainer->addAndMakeVisible(mServerInfoSubLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerAudioInfoLabel.get());
 
     mRecentsContainer->addAndMakeVisible(mRecentsListBox.get());
@@ -468,11 +497,6 @@ publicGroupsListModel(this)
     addAndMakeVisible(mConnectTitle.get());
     addAndMakeVisible(mConnectCloseButton.get());
     addChildComponent(mConnectMenuButton.get());   // Hidden: the menu behind it is hosted-control debug tooling only
-
-
-    std::istringstream gramstream(std::string(BinaryData::wordmaker_g, BinaryData::wordmaker_gSize));
-    mRandomSentence = std::make_unique<RandomSentenceGenerator>(gramstream);
-    mRandomSentence->capEveryWord = true;
 
     setFocusContainerType(FocusContainerType::keyboardFocusContainer);
     mConnectTab->setFocusContainerType(FocusContainerType::none);
@@ -549,6 +573,142 @@ void ConnectView::configServerLabel(Label *label)
     label->setJustificationType(Justification::centredRight);
 }
 
+// The form's field captions share one column, as wide as the widest caption, so every field starts at the same x.
+// In a form too narrow for that the Stage Name field keeps a flexible width and the captions wrap.
+int ConnectView::serverLabelColumnNeed()
+{
+    return jmax(jmax(SbTextFit::labelWidth(*mServerGroupStaticLabel), SbTextFit::labelWidth(*mServerGroupPassStaticLabel)),
+                jmax(SbTextFit::labelWidth(*mServerUserStaticLabel), SbTextFit::labelWidth(*mServerInstrumentStaticLabel)),
+                SbTextFit::labelWidth(*mServerHostStaticLabel));
+}
+
+// Height of a label's text wrapped to <width>
+static int wrappedLabelHeight(Label & l, int width)
+{
+    const Font f = l.getLookAndFeel().getLabelFont(l);
+    const auto border = l.getLookAndFeel().getLabelBorderSize(l);
+    AttributedString as;
+    as.append(l.getText(), f);
+    as.setWordWrap(AttributedString::byWord);
+    TextLayout tl;
+    tl.createLayout(as, (float) jmax(20, width - border.getLeftAndRight()));
+    return (int) std::ceil(f.getHeight() * (float) jmax(1, tl.getNumLines())) + border.getTopAndBottom() + 1;
+}
+
+void ConnectView::sizeServerLabelColumn(int formWidth)
+{
+    const int fieldFloor = 120 + (jmax(0, jmin(400, formWidth) - 258) * 4 + 4) / 5;
+    const int col = jmax(40, jmin(serverLabelColumnNeed(), formWidth - 4 - 2 * 4 - fieldFloor));
+
+    for (auto * row : { &servGroupBox, &servGroupPassBox, &servUserBox, &servInstrumentBox, &servInstrumentHelpBox, &servAddressBox }) {
+        if (row->items.isEmpty()) continue;
+        auto & item = row->items.getReference(0);
+        item.width = (float) col;
+        item.minWidth = (float) col;
+        item.flexGrow = 0.0f;
+        item.flexShrink = 0.0f;
+    }
+}
+
+void ConnectView::layoutServerForm()
+{
+    auto * vp = mServerConnectViewport.get();
+    if (serverBox.items.isEmpty() || vp->getWidth() <= 0) return;
+
+    // Wide enough for the whole caption column and a Stage Name field as wide as the name in it (237 px at least)
+    const int groupNeed = jmax(237, SbTextFit::textWidth(mServerGroupEditor->getFont(), mServerGroupEditor->getText())
+                                    + mServerGroupEditor->getLeftIndent() + 8 + 2);
+    const int formWant = jmax(400, serverLabelColumnNeed() + groupNeed + 2 * 4 + 4);
+
+    // Rows at their least height; the hint under the form gets every line it wraps to
+    auto & info = *mServerAudioInfoLabel;
+    const Font infoFont = info.getLookAndFeel().getLabelFont(info);
+    int formW = 0, need = 0, topW = 0;
+    auto lay = [&](int width) {
+        formW = jmin(formWant, width);
+        sizeServerLabelColumn(formW);
+        // The text at the top may be wider than the form, up to the panel's width
+        topW = jmin(width, jmax(formW, serverTopTextWidth()));
+        const int textW = topW - 4 - 2 * 44 - 4;
+        const int topH = jmax(36, wrappedLabelHeight(*mServerInfoLabel, textW) + wrappedLabelHeight(*mServerInfoSubLabel, textW) + 2);
+        AttributedString as;
+        as.append(info.getText(), infoFont);
+        as.setWordWrap(AttributedString::byWord);
+        TextLayout tl;
+        tl.createLayout(as, (float) jmax(40, formW - 4 - info.getBorderSize().getLeftAndRight()));
+        const int infoH = jmax(30, (int) std::ceil(infoFont.getHeight() * (float) jmax(1, tl.getNumLines()))
+                                   + info.getBorderSize().getTopAndBottom() + 2);
+        need = 0;
+        for (auto & item : serverBox.items) {
+            if (item.maxWidth != (float) FlexItem::notAssigned) item.maxWidth = (float) formW;
+            if (item.associatedComponent == &info) {
+                item.minHeight = item.height = (float) infoH;
+                item.maxHeight = (float) jmax(60, infoH);
+            }
+            if (item.associatedFlexBox == &servStatusBox) {
+                item.minHeight = item.height = (float) topH;
+                item.maxHeight = (float) jmax(60, topH);
+            }
+            if (item.associatedFlexBox == &servInstrumentHelpBox) {   // a narrow form wraps the help line
+                const int helpW = formW - 4 - (int) servInstrumentHelpBox.items.getReference(0).width - 2 * 4;
+                item.minHeight = item.height = item.maxHeight = (float) jmax(16, wrappedLabelHeight(*mServerInstrumentHelpLabel, helpW));
+            }
+            need += (int) std::ceil(item.minHeight + item.margin.top + item.margin.bottom);
+        }
+    };
+
+    int width = vp->getWidth();
+    lay(width);
+    if (vp->getHeight() < need) {   // the vertical scroll bar takes its width
+        width -= vp->getScrollBarThickness();
+        lay(width);
+    }
+    minHeight = need;
+    mServerConnectContainer->setBounds(0, 0, width, jmax(need, vp->getHeight()));
+    serverBox.performLayout(mServerConnectContainer->getLocalBounds().withSizeKeepingCentre(formW, mServerConnectContainer->getHeight()));
+
+    // The top row again at its own width, centred over the form
+    for (auto & item : serverBox.items)
+        if (item.associatedFlexBox == &servStatusBox) {
+            auto r = item.currentBounds;
+            servStatusBox.performLayout(r.withX((float) (mServerConnectContainer->getWidth() - (topW - 4)) * 0.5f).withWidth((float) (topW - 4)));
+        }
+    placeServerInfo();
+}
+
+// Paste and copy buttons beside the top text, the text on its widest line
+int ConnectView::serverTopTextWidth() const
+{
+    return jmax(SbTextFit::labelWidth(*mServerInfoLabel), SbTextFit::labelWidth(*mServerInfoSubLabel)) + 4 + 2 * 44 + 4;
+}
+
+// The top text: a line in the status font, a smaller grey line under it, both centred in the status slot
+void ConnectView::placeServerInfo()
+{
+    const auto r = mServerStatusLabel->getBounds();
+    const int h1 = wrappedLabelHeight(*mServerInfoLabel, r.getWidth());
+    const int h2 = mServerInfoSubLabel->getText().isEmpty() ? 0 : wrappedLabelHeight(*mServerInfoSubLabel, r.getWidth());
+    const int y = r.getY() + jmax(0, (r.getHeight() - h1 - h2) / 2);
+    mServerInfoLabel->setBounds(r.getX(), y, r.getWidth(), jmin(h1, r.getHeight()));
+    mServerInfoSubLabel->setBounds(r.getX(), y + h1, r.getWidth(), jmax(0, jmin(h2, r.getBottom() - y - h1)));
+}
+
+void ConnectView::showServerInfo(bool show)
+{
+    mServerInfoLabel->setVisible(show);
+    mServerInfoSubLabel->setVisible(show);
+}
+
+// Connect to Stage with an empty Hub Server field: no attempt, a message that points at the field
+bool ConnectView::hubServerMissing()
+{
+    if (mServerHostEditor->getText().upToFirstOccurrenceOf(":", false, false).trim().isNotEmpty()) return false;
+    updateServerStatusLabel(TRANS("Type the stage's hub server into the Hub Server field below."), false);
+    mServerHostEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
+    mServerHostEditor->repaint();
+    return true;
+}
+
 void ConnectView::configEditor(TextEditor *editor, bool passwd)
 {
     editor->addListener(this);
@@ -582,7 +742,7 @@ void ConnectView::updateNetworkModeUI()
         const auto transportLabel = hostedControlTransportLabel(processor.getHostedControlTransportMode());
 
         // Plain statement of what the app does.
-        String hostedInfo = TRANS("Hub mode: every player connects to the hub, which relays each player's audio as its own stream (PCM 16-bit).");
+        String hostedInfo = TRANS("The hub server this stage runs on, e.g. stage.example.com:12999 or 203.0.113.10:12999.");
         mServerAudioInfoLabel->setText(hostedInfo, dontSendNotification);
 
         mServerAudioInfoLabel->setTooltip(TRANS("All audio is relayed through the hub as individual per-player streams."));
@@ -599,6 +759,7 @@ void ConnectView::updateNetworkModeUI()
     mPublicServerGroupEditor->setEnabled(false);
     mPublicGroupsListBox->setEnabled(false);
 
+    layoutServerForm();   // the hint under the form may need another line
 }
 
 // Three tabs in every width: STAGES, RECENTS, PRIVATE STAGE. Tabs are found by their content, never by position.
@@ -735,6 +896,11 @@ void ConnectView::updateLayout()
     servInstrumentBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerInstrumentStaticLabel).withMargin(2).withFlex(0.25));
     servInstrumentBox.items.add(FlexItem(120, minitemheight, *mServerInstrumentCombo).withMargin(2).withFlex(1));
 
+    servInstrumentHelpBox.items.clear();
+    servInstrumentHelpBox.flexDirection = FlexBox::Direction::row;
+    servInstrumentHelpBox.items.add(FlexItem(servLabelWidth, 16).withMargin(FlexItem::Margin(0, 2, 0, 2)).withFlex(0.25));
+    servInstrumentHelpBox.items.add(FlexItem(120, 16, *mServerInstrumentHelpLabel).withMargin(FlexItem::Margin(0, 2, 0, 2)).withFlex(1));
+
     servUserPassBox.items.clear();
     servUserPassBox.flexDirection = FlexBox::Direction::row;
     servUserPassBox.items.add(FlexItem(servLabelWidth, minpassheight, *mServerUserPassStaticLabel).withMargin(2).withFlex(1));
@@ -744,7 +910,6 @@ void ConnectView::updateLayout()
     servGroupBox.flexDirection = FlexBox::Direction::row;
     servGroupBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerGroupStaticLabel).withMargin(2).withFlex(0.25));
     servGroupBox.items.add(FlexItem(120, minitemheight, *mServerGroupEditor).withMargin(2).withFlex(1));
-    servGroupBox.items.add(FlexItem(minPannerWidth, minitemheight, *mServerGroupRandomButton).withMargin(2).withFlex(0));
 
     servGroupPassBox.items.clear();
     servGroupPassBox.flexDirection = FlexBox::Direction::row;
@@ -777,13 +942,15 @@ void ConnectView::updateLayout()
     serverBox.items.clear();
     serverBox.flexDirection = FlexBox::Direction::column;
     serverBox.items.add(FlexItem(5, 3).withFlex(0));
-    serverBox.items.add(FlexItem(80, minpassheight, servStatusBox).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
+    // Status line: room for two lines of its text even in a short window
+    serverBox.items.add(FlexItem(80, minitemheight, servStatusBox).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
     serverBox.items.add(FlexItem(5, 4).withFlex(0));
     serverBox.items.add(FlexItem(180, minitemheight, servGroupBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(180, minpassheight, servGroupPassBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 6).withFlex(0));
     serverBox.items.add(FlexItem(180, minitemheight, servUserBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(180, minitemheight, servInstrumentBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
+    serverBox.items.add(FlexItem(180, 16, servInstrumentHelpBox).withMargin(FlexItem::Margin(0, 2, 2, 2)).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 6).withFlex(1).withMaxHeight(14));
     serverBox.items.add(FlexItem(minButtonWidth, minitemheight, servButtonBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
     serverBox.items.add(FlexItem(5, 10).withFlex(1));
@@ -791,7 +958,7 @@ void ConnectView::updateLayout()
     serverBox.items.add(FlexItem(80, minpassheight, *mServerAudioInfoLabel).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
     serverBox.items.add(FlexItem(5, 8).withFlex(0));
 
-    minHeight = 6*minitemheight + 3*minpassheight + 62;
+    minHeight = 7*minitemheight + 2*minpassheight + 62;
 
     // public groups stuff
 
@@ -847,7 +1014,7 @@ void ConnectView::updateLayout()
     connectTitleBox.flexDirection = FlexBox::Direction::row;
     connectTitleBox.items.add(FlexItem(50, minitemheight, *mConnectCloseButton).withMargin(2));
     connectTitleBox.items.add(FlexItem(80, minitemheight, *mConnectTitle).withMargin(2).withFlex(1));
-    connectTitleBox.items.add(FlexItem(50, minitemheight).withMargin(2));   // Spacer where the three-dots button was
+    connectTitleBox.items.add(FlexItem(50, minitemheight).withMargin(2));   // Spacer
 
     connectHorizBox.items.clear();
     connectHorizBox.flexDirection = FlexBox::Direction::row;
@@ -871,12 +1038,7 @@ void ConnectView::resized()  {
 
     mainBox.performLayout(getLocalBounds().reduced(2, 2));
 
-    mServerConnectContainer->setBounds(0,0,
-                                       mServerConnectViewport->getWidth() - (mServerConnectViewport->getHeight() < minHeight ? mServerConnectViewport->getScrollBarThickness() : 0 ),
-                                       jmax(minHeight, mServerConnectViewport->getHeight()));
-
-    //remoteBox.performLayout(mDirectConnectContainer->getLocalBounds().withSizeKeepingCentre(jmin(400, mDirectConnectContainer->getWidth()), mDirectConnectContainer->getHeight()));
-    serverBox.performLayout(mServerConnectContainer->getLocalBounds().withSizeKeepingCentre(jmin(400, mServerConnectContainer->getWidth()), mServerConnectContainer->getHeight()));
+    layoutServerForm();
 
     //mPublicServerConnectContainer->setBounds(0,0,
     //                                   mPublicServerConnectViewport->getWidth() - (mPublicServerConnectViewport->getHeight() < minServerConnectHeight ? mPublicServerConnectViewport->getScrollBarThickness() : 0 ),
@@ -890,14 +1052,19 @@ void ConnectView::resized()  {
     mPublicGroupsListBox->setBounds(mPublicGroupComponent->getLocalBounds().reduced(4).withTrimmedTop(10));
 
 
-    // Recents is a tab in every width; in a wide window the list keeps a readable width.
-    recentsBox.performLayout(mRecentsContainer->getLocalBounds().withSizeKeepingCentre(jmin(820, mRecentsContainer->getWidth()), mRecentsContainer->getHeight()));
+    layoutRecents();
 
-    mServerInfoLabel->setBounds(mServerStatusLabel->getBounds());
 
     if (isVisible()) {
         mRecentsListBox->updateContent();
     }
+}
+
+// Recents is a tab in every width; in a wide window the list keeps a readable width.
+void ConnectView::layoutRecents()
+{
+    if (recentsBox.items.isEmpty() || mRecentsContainer == nullptr) return;
+    recentsBox.performLayout(mRecentsContainer->getLocalBounds().withSizeKeepingCentre(jmin(820, mRecentsContainer->getWidth()), mRecentsContainer->getHeight()));
 }
 
 void ConnectView::groupJoinFailed()
@@ -1029,10 +1196,7 @@ bool ConnectView::copyInfoToClipboard(bool singleURL, String * retmessage)
 {
     String message = TRANS("Share this link with others to connect with SonoBus RP:") + " \n";   
 
-    String hostport = mServerHostEditor->getText();
-    if (hostport.isEmpty()) {
-        hostport = DEFAULT_SERVER_HOST;
-    }
+    String hostport = mServerHostEditor->getText().trim();
 
     // In hub mode the link carries the hub's shareable address (public host + server port, from the hub hello), not
     // the path this machine happened to dial, in the direct sonobus:// form, never the go.sonobus.net redirector.
@@ -1042,6 +1206,7 @@ bool ConnectView::copyInfoToClipboard(bool singleURL, String * retmessage)
         const int lp = processor.getHubLinkPort();
         if (lh.isNotEmpty() && lp > 0) hostport = lh + ":" + String(lp);
     }
+    if (hostport.upToFirstOccurrenceOf(":", false, false).trim().isEmpty()) return false;   // no hub server typed yet
 
     String groupName;
     String groupPassword;
@@ -1057,7 +1222,7 @@ bool ConnectView::copyInfoToClipboard(bool singleURL, String * retmessage)
     }
 
     String urlstr1;
-    urlstr1 << String("sonobusrp://") << hostport << String("/");   // Our own URL scheme — sonobus:// opened the stock app
+    urlstr1 << String("sonobusrp://") << hostport << String("/");   // Our own URL scheme, so a link never opens the stock app
     URL url(urlstr1);
     URL url2("http://go.sonobus.net/sblaunch");
 
@@ -1143,6 +1308,13 @@ void ConnectView::textEditorEscapeKeyPressed (TextEditor& ed)
 
 void ConnectView::textEditorTextChanged (TextEditor& ed)
 {
+    if (&ed == mServerGroupEditor.get()) layoutServerForm();   // a longer stage name widens the form
+    if (&ed == mServerHostEditor.get()) {
+        mServerHostEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
+        mServerHostEditor->repaint();
+        if (mServerStatusLabel->isVisible() && !processor.isConnectedToServer()) resetPrivateGroupLabels();   // the message is answered
+    }
+
     if (&ed == mPublicServerUsernameEditor.get() || &ed == mServerUsernameEditor.get()) {
         // try to set the current username, it will fail if we are connected, no big deal
         processor.setCurrentUsername(ed.getText().trim());
@@ -1193,6 +1365,7 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
 
     }
     else if (buttonThatWasClicked == mServerConnectButton.get()) {
+        if (hubServerMissing()) return;
         bool wasconnected = false;
         if (processor.isConnectedToServer()) {
 
@@ -1277,11 +1450,6 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
         currConnectionInfo.groupPassword = mServerGroupPasswordEditor->getText();
         updateState();
     }
-    else if (buttonThatWasClicked == mServerGroupRandomButton.get()) {
-        // randomize group name
-        String rgroup = mRandomSentence->randomSentence();
-        mServerGroupEditor->setText(rgroup, dontSendNotification);
-    }
     else if (buttonThatWasClicked == mServerPasteButton.get()) {
         if (attemptToPasteConnectionFromClipboard()) {
             updateServerFieldsFromConnectionInfo();
@@ -1291,6 +1459,9 @@ void ConnectView::buttonClicked (Button* buttonThatWasClicked)
     else if (buttonThatWasClicked == mServerCopyButton.get()) {
         if (copyInfoToClipboard()) {
             showPopTip(TRANS("Copied connection info to clipboard for you to share with others"), 3000, mServerCopyButton.get());
+        }
+        else if (mServerHostEditor->getText().trim().isEmpty() && !processor.isConnectedToServer()) {
+            showPopTip(TRANS("Type the stage's hub server first."), 3000, mServerCopyButton.get());
         }
     }
     else if (buttonThatWasClicked == mServerShareButton.get()) {
@@ -2101,7 +2272,7 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
             mServerStatusLabel->setText(TRANS("You need to specify a stage name!"), dontSendNotification);
             mServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
             mServerGroupEditor->repaint();
-            mServerInfoLabel->setVisible(false);
+            showServerInfo(false);
             mServerStatusLabel->setVisible(true);
         }
         return;
@@ -2126,7 +2297,7 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
             mServerUsernameEditor->repaint();
         }
 
-        mServerInfoLabel->setVisible(false);
+        showServerInfo(false);
         mServerStatusLabel->setVisible(true);
         return;
     }
@@ -2171,7 +2342,8 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
         mPublicServerHostEditor->repaint();
     }
     else {
-        String mesg = TRANS("Server address is invalid!");
+        String mesg = info.serverHost.trim().isEmpty() && !info.groupIsPublic
+            ? TRANS("Type the stage's hub server into the Hub Server field below.") : TRANS("Server address is invalid!");
         if (info.groupIsPublic) {
             mPublicServerStatusInfoLabel->setText(mesg, dontSendNotification);
             mPublicServerHostEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
@@ -2182,7 +2354,7 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
             mServerHostEditor->repaint();
         }
 
-        mServerInfoLabel->setVisible(false);
+        showServerInfo(false);
         mServerStatusLabel->setVisible(true);
     }
 }
@@ -2276,9 +2448,11 @@ void ConnectView::resetPrivateGroupLabels()
 {
     if (!mServerInfoLabel) return;
 
-    mServerInfoLabel->setText(TRANS("All who join the same Stage will be able to connect with each other."), dontSendNotification);
-    mServerInfoLabel->setVisible(true);
+    mServerInfoLabel->setText(TRANS("Connect to a private stage that is not in the Stages Directory."), dontSendNotification);
+    mServerInfoSubLabel->setText(TRANS("Ask its host for the stage name, password and hub address."), dontSendNotification);
+    showServerInfo(true);
     mServerStatusLabel->setVisible(false);
+    layoutServerForm();
 }
 
 
@@ -2398,7 +2572,7 @@ void ConnectView::updateServerStatusLabel(const String & mesg, bool mainonly)
     if (!mainonly) {
         mServerStatusLabel->setText(mesg, dontSendNotification);
         mPublicServerStatusInfoLabel->setText(mesg, dontSendNotification);
-        mServerInfoLabel->setVisible(false);
+        showServerInfo(false);
         mServerStatusLabel->setVisible(true);
         mPublicServerStatusInfoLabel->setVisible(true);
     }
@@ -2413,7 +2587,7 @@ void ConnectView::populateFromRecent(const AooServerConnectionInfo & info)
     updateServerFieldsFromConnectionInfo();
     mServerStatusLabel->setText(TRANS("Press Connect to Stage to join"), dontSendNotification);
     mServerStatusLabel->setVisible(true);
-    mServerInfoLabel->setVisible(false);
+    showServerInfo(false);
     mServerGroupPasswordEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupPasswordEditor->repaint(); mServerGroupEditor->repaint();
@@ -2422,7 +2596,11 @@ void ConnectView::populateFromRecent(const AooServerConnectionInfo & info)
 
 void ConnectView::updateServerFieldsFromConnectionInfo()
 {
-    if (currConnectionInfo.serverPort == DEFAULT_SERVER_PORT) {
+    if (currConnectionInfo.serverHost.trim().isEmpty() || currConnectionInfo.serverHost == DEFAULT_SERVER_HOST) {
+        // never typed (or the stock default server): the field stays empty and shows its example
+        mServerHostEditor->setText({}, false);
+        mPublicServerHostEditor->setText({}, false);
+    } else if (currConnectionInfo.serverPort == DEFAULT_SERVER_PORT) {
         mServerHostEditor->setText( currConnectionInfo.serverHost, false);
         mPublicServerHostEditor->setText( currConnectionInfo.serverHost, false);
     } else {
@@ -2437,6 +2615,7 @@ void ConnectView::updateServerFieldsFromConnectionInfo()
         mPublicServerGroupEditor->setText(currConnectionInfo.groupName, false);
     } else if (currConnectionInfo.groupName.isNotEmpty()){
         mServerGroupEditor->setText(currConnectionInfo.groupName, false);
+        layoutServerForm();
     }
 
     mServerGroupPasswordEditor->setPasswordCharacter(mServerGroupPasswordShowButton->getToggleState() ? 0 : 0x2022); // bullet if not showing password
@@ -2524,6 +2703,53 @@ String ConnectView::RecentsListModel::getNameForRow (int rowNumber)
 }
 
 
+// The three texts of a recents row: stage, name used, and the line below them
+static String recentGroupText(const AooServerConnectionInfo & info)
+{
+    String grouptext;
+    grouptext << (info.groupIsPublic ? TRANS("[P] ") : "") << info.groupName;
+    return grouptext;
+}
+
+static String recentInfoText(const AooServerConnectionInfo & info)
+{
+    String infostr;
+
+    if (info.groupIsPublic) {
+        infostr += TRANS("PUBLIC") + " ";
+    }
+
+    if (info.groupPassword.isNotEmpty()) {
+        infostr += TRANS("password protected,") + " ";
+    }
+
+    infostr += TRANS("on") + " " + Time(info.timestamp).toString(true, true, false) + " " ;
+
+    if (info.serverHost != DEFAULT_SERVER_HOST) {
+        infostr += TRANS("to") + " " +  info.serverHost + ":" + String(info.serverPort);   // The port too, so entries that differ only by port can be told apart
+    }
+    return infostr;
+}
+
+// The whole row in the hover when the list is too narrow for one of its texts
+String ConnectView::RecentsListModel::getTooltipForRow (int rowNumber)
+{
+    if (rowNumber < 0 || rowNumber >= recents.size() || cachedWidth <= 0) return {};
+
+    const auto & info = recents.getReference(rowNumber);
+    const int height = parent->mRecentsListBox->getRowHeight();
+    const float xratio = 0.5f, yratio = 0.6f;
+    const float adjwidth = (float) (cachedWidth - jmin(36, height - 6));
+    const float iconsize = height * yratio;
+
+    const String grouptext = recentGroupText(info), infostr = recentInfoText(info);
+    const bool cut = parent->recentsGroupFont.getStringWidthFloat(grouptext) > adjwidth*xratio - 8 - iconsize
+                  || parent->recentsNameFont.getStringWidthFloat(info.userName) > adjwidth*(1.0f - xratio) - 4 - iconsize
+                  || parent->recentsInfoFont.getStringWidthFloat(infostr) > adjwidth - 24;
+    if (! cut) return {};
+    return grouptext + " - " + info.userName + "\n" + infostr.trim();
+}
+
 void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g, int width, int height, bool rowIsSelected)
 {
     if (rowNumber >= recents.size()) return;
@@ -2551,8 +2777,7 @@ void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g
     float iconsize = height*yratio;
     float groupheight = height*yratio;
     g.drawImageWithin(groupImage, 0, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
-    String grouptext;
-    grouptext << (info.groupIsPublic ? TRANS("[P] ") : "") << info.groupName;
+    const String grouptext = recentGroupText(info);
     g.drawFittedText (grouptext, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
     g.setFont (parent->recentsNameFont);
@@ -2560,21 +2785,7 @@ void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g
     g.drawImageWithin(personImage, adjwidth*xratio, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
     g.drawFittedText (info.userName, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
 
-    String infostr;
-
-    if (info.groupIsPublic) {
-        infostr += TRANS("PUBLIC") + " ";
-    }
-
-    if (info.groupPassword.isNotEmpty()) {
-        infostr += TRANS("password protected,") + " ";
-    }
-
-    infostr += TRANS("on") + " " + Time(info.timestamp).toString(true, true, false) + " " ;
-
-    if (info.serverHost != DEFAULT_SERVER_HOST) {
-        infostr += TRANS("to") + " " +  info.serverHost + ":" + String(info.serverPort);   // The port too — stale 10999 entries looked identical
-    }
+    const String infostr = recentInfoText(info);
 
     g.setColour (parent->findColour(nameTextColourId).withAlpha(0.5f));
     g.setFont (parent->recentsInfoFont);

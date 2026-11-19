@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPLv3-or-later WITH Appstore-exception
 // Copyright (C) 2026 Jason Buecker (Random Planet)
-// SonoBus RP — Hub Server (Jamulus-style centralized audio relay)
+// SonoBus RP — Hub Server (centralized audio relay)
 
 #pragma once
 
@@ -42,6 +42,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+#include "SonobusHubCompat.h"
 
 #include <opus/opus.h>
 
@@ -136,7 +137,7 @@ struct HubEndpoint {
     HubEndpoint& operator=(const HubEndpoint&) = delete;
     ~HubEndpoint() {
         HubDest* d = dest.load(std::memory_order_relaxed);
-        if (d->connFd >= 0) ::close(d->connFd);
+        if (d->connFd >= 0) hub_close(d->connFd);
         if (d != &dest0) delete d;   // a rebound destination; retired ones are freed by the drain
     }
 };
@@ -189,7 +190,7 @@ struct HubBundleBuilder {
 struct HubMixOverride {
     bool muted = false;
     float gain = 1.0f;
-    bool soloed = false;  // Phase 5: per-listener solo via /sb/hxsolo
+    bool soloed = false;  // per-listener solo via /sb/hxsolo
 };
 
 // One outbound feed relays ONE sender's audio to ONE listener. The hub allocates an `aoo::isource` per (listener,
@@ -331,10 +332,19 @@ struct HubPeer {
         };
         // `win` must be one of the per-caller windows on this JitterStats (uiWin/statsWin/abufWin) so it shares
         // the same lifetime and `lock` protection as the ring. See RateWindow above.
-        Quantiles compute(RateWindow& win) const {
+        // The ring as it stood, for a caller that needs the arrival order (stats thread, [HUB-HOST]).
+        struct Order {
+            std::vector<float> ring;
+            int pos = 0, count = 0;      // next write position, filled entries (0 = not enough data yet)
+            uint64_t packets = 0;
+            std::chrono::steady_clock::time_point last {};   // the arrival the newest entry ends at
+        };
+        Quantiles compute(RateWindow& win, Order* order = nullptr) const {
             Quantiles q;
             std::array<float, kRing> copy;
             uint64_t pk;
+            int pos = 0;
+            std::chrono::steady_clock::time_point last {};
             double ppsInterval = 0.0; uint64_t ppsPkts = 0;
             {
                 std::lock_guard<std::mutex> g(lock);
@@ -347,9 +357,9 @@ struct HubPeer {
                 win.snapTime = now; win.snapPackets = packets;
                 if (ringCount < 32) { q.samples = ringCount; return q; }
                 copy = deltasMs; q.samples = ringCount;
-                pk = packets;
+                pk = packets; pos = ringPos; last = lastArrival;
             }
-            (void)pk;
+            if (order) { order->ring.assign(copy.begin(), copy.end()); order->pos = pos; order->count = q.samples; order->packets = pk; order->last = last; }
             if (ppsInterval > 0.15) q.pps = (float)(ppsPkts / ppsInterval);
             auto begin = copy.begin(), end = copy.begin() + q.samples;
             auto nth = [&](double p) {
@@ -373,6 +383,9 @@ struct HubPeer {
     // kernel even + user-space paired → it is this thread's wake-up pattern. Printed as [HUB-KJIT].
     JitterStats kstats;
     uint64_t jitBytesSnap = 0;   // Stats thread only — bytesIn at the last [HUB-JIT] print (→ kbps)
+    // Stats thread only: where the arrival ring stood at the last [HUB-JIT] print, so the next one reads exactly the
+    // arrivals in between.
+    int hostPrevPos = -1; uint64_t hostPrevPackets = 0; std::chrono::steady_clock::time_point hostPrevLast {};
     uint64_t jitBytesOutSnap = 0;   // Endpoint sentBytes at the last [HUB-JIT] print (→ down_kbps)
     uint64_t latBytesInSnap = 0; uint32_t latSnapMs = 0; float latUpKbps = -1.0f;   // Per-player uplink rate for the 1-Hz /sb/hxlat line
     std::atomic<bool> capIdleMask{false};   // This player's stream announced AOO_PROTOCOL_FLAG_IDLE_MASK → it can decode masked feeds
@@ -384,6 +397,8 @@ struct HubPeer {
     // isolation are running on the fallback — the address the hub holds
     // for the peer is not the address it sends from.
     std::atomic<uint32_t> fallbackDispatch{0};
+    // Longest wait of a datagram between the stack's receive timestamp and the read, per [HUB-KJIT] window (us).
+    std::atomic<uint32_t> readLagMaxUs{0};
 
     // (adaptive sink buffer state). Written by addPeer +
     // statsWriterThread only; never the audio thread.
@@ -393,7 +408,7 @@ struct HubPeer {
     // 
     int64_t holdMeasureUntilMs = 0;   // commit no earlier than this (join + 15 s)
     int64_t holdLastChangeMs = 0;
-    int     holdLateWindows = 0;      // (unused since the rolling ring below)
+    int     holdLateWindows = 0;      // unused
     uint32_t holdLateRing[12] = {};   // PM: late blocks per 10-s window, last 2 min (bursty links never give 12 consecutive bad windows)
     int      holdLateIdx = 0;
     int     holdFollowWindows = 0;    // consecutive samples with the measured target a block or more above the hold
@@ -475,7 +490,7 @@ struct HubPeer {
     std::atomic<float> clientIfaceMs { -1.0f };   // Player's audio interface latency, input + output (ms, /sb/hxbuf arg 12); -1 = not reported
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
     // Last chirp-onset mach ticks seen in this peer's decoded
-    // audio at the hub (equilibrium hunt; see audio thread detector).
+    // audio at the hub (latency probe; see audio thread detector).
     std::atomic<uint64_t> chirpOnsetTicks { 0 };
     std::atomic<float> resamplerPeakMs { 0.0f };  // Sink resampler backlog peak
     std::atomic<uint32_t> blkReordered { 0 };
@@ -585,7 +600,7 @@ struct HubPeer {
     std::atomic<bool> listenerThreadShouldStop{false};
     std::mutex listenerMutex;
     std::condition_variable listenerCv;
-    uint64_t listenerGoGen = 0;                       // Guarded by listenerMutex; bumped ONLY by the audio thread (F9)
+    uint64_t listenerGoGen = 0;                       // Guarded by listenerMutex; bumped ONLY by the audio thread
     std::atomic<uint64_t> listenerDoneGen{0};          // listener thread → audio thread, diagnostic only; the barrier itself is SonobusHubServer::mBarrierPending
     std::atomic<uint64_t> listenerSourceMaxTicks{0};   // per-block max, drained by audio thread
     // True from addPeer (before the thread is started) until the listener thread clears it UNDER listenerMutex on
@@ -660,6 +675,7 @@ public:
 
     void stop();
     bool isRunning() const { return mRunning.load(); }
+    const std::string& startError() const { return mStartError; }   // after a failed start(): what went wrong
 
     void setOpusEnabled(bool enabled) { mUseOpus = enabled; }
     void setOpusBitrate(int bitrate) { mOpusBitrate = bitrate; }
@@ -726,14 +742,6 @@ public:
     // read at sink setup/re-setup time only — never on the audio thread.
     void setSinkBufferMs(double ms)    { if (ms > 0) mSinkBufferMs = ms; }
     void setSinkBufferLanMs(double ms) { mSinkBufferLanMs = ms; }
-    // --sink-buffer-auto.
-    // Peers join at the starter size (base / LAN value), the stats thread
-    // watches their measured jitter for ~5s, then commits a right-sized
-    // buffer ONCE (AOO set_buffersize = queue reset = one brief blip, so we
-    // never chase continuously). Known players skip even that: their last
-    // committed size is cached by userName and applied at addPeer, before
-    // audio flows. If a committed peer's gap% spikes, we regrow once to the
-    // base size and hold for the session.
     // Hold mode — 0 = Jam (≤2 late blocks/min per player), 1 = Print (0/min). Live.
     void setHoldMode(int m)            { mHoldMode.store(m ? 1 : 0, std::memory_order_relaxed); mHoldResizeAll.store(true, std::memory_order_relaxed); }
     int  getHoldMode() const           { return mHoldMode.load(std::memory_order_relaxed); }
@@ -762,7 +770,11 @@ public:
     // HubDest::connFd). Set before start(); read at start() (SO_REUSEPORT
     // on the shared socket, banner), addPeer (socket creation), the recv
     // thread's poll set and the [HUB-PACE] line.
+#if defined(_WIN32)
+    void setConnectedSockets(bool) { mConnectedSockets = false; }   // Windows does not steer datagrams to a connected socket that shares the port
+#else
     void setConnectedSockets(bool on) { mConnectedSockets = on; }
+#endif
     void setRedundancy(int lan, int wan) { mRedundancyLan = lan < 1 ? 1 : (lan > 4 ? 4 : lan);
                                            mRedundancyWan = wan < 1 ? 1 : (wan > 4 ? 4 : wan); }
     // Dump one peer's decoded audio (ch0/ch1
@@ -858,6 +870,9 @@ public:
         std::string portLocalText;           // Local tier — sockets bound + host firewall inspection
         int64_t portCheckVerifiedAtMs = 0;   // Epoch ms of the last player-verified check (viewer renders local time)
         int portCheckState = 0;              // 0 running/not run, 1 all forwarded, 2 a port failed, 3 skipped
+        bool portCheckBlocked = false;       // the last verdict from outside: a required port is closed
+        bool publicAddressUnknown = false;   // no public address found at start: players outside cannot be given one
+        std::string portCheckFailed;         // which one, e.g. "UDP 12999"
         // Stage limits and the stage directory listing
         int stageMaxPlayers = 0;             // 0 = no limit
         int stageMaxChannels = 0;            // per player; 0 = no limit
@@ -898,6 +913,9 @@ public:
     // Before start(): where permanent removals are kept; loads the file if present. Empty = in memory only.
     void setRemovedPlayersFile(const std::string& path);
     void setStageListingStatus(int state, const std::string& text);   // written by the directory client
+    // Why the stage may not be listed right now: 0 = it may, 1 = first port check not finished, 2 = a required port
+    // is closed from outside, 3 = the hub did not start. 'why' is one line for the operator.
+    int stageListingHold(std::string& why) const;
     // Join check used by the built-in connection server: empty = allow, else the reason shown to the player.
     std::string stageJoinRefusal(const std::string& ip, const std::string& user, int othersInStage);
     int getSampleRate() const { return mSampleRate; }
@@ -928,6 +946,10 @@ private:
     // speaks). The configured checker is asked FIRST; a connected WAN player is the fallback when it cannot be reached.
     std::string mPortLocalText;                       // under mPortCheckMutex
     int64_t mPortCheckVerifiedAtMs = 0;               // under mPortCheckMutex
+    bool mPortCheckDone = false;                      // under mPortCheckMutex: one check has finished
+    bool mPortCheckBlocked = false;                   // under mPortCheckMutex: verdict from outside, required port closed
+    std::string mPortCheckFailed;                     // under mPortCheckMutex
+    std::string mPortFailScratch;                     // port check thread only: closed required ports of the running check
     std::atomic<int64_t> mPortProbeResultToken{0};    // token of the last /sb/fwprobe/result that reached the hub socket
     std::atomic<int> mPortProbeResultTcp{-1};
     std::string localPortCheckText() const;
@@ -1183,11 +1205,12 @@ private:
     // sink re-setup — zero audio-thread involvement.
     double mSinkBufferMs = HUB_SINK_BUFFERTIME_MS;
     double mSinkBufferLanMs = -1.0;
-    // Per-player WAN hold constants + state (profile cache REMOVED).
+    // Per-player WAN hold constants + state.
+    static constexpr double kTickStallLogMs = 5.0;   // a tick stall this long gets its own log line
     static constexpr double kHoldFloorMs = 4.0, kHoldCeilMs = 40.0, kHoldStartMeasureS = 75.0, kHoldJamPerMin = 2.0;   // 15 s of join transient skipped + one FULL 60-s window (a shorter one rounds the allowance to 0 gaps, so one outlier sets the hold)
     // The WAN setting is the START value, not the floor. A measured target below it commits from a full 60-s window;
     // stalls grow the hold after kHoldEmergencyLate new late blocks in one 10-s sample, at most every kHoldEmergencyGapMs.
-    // SB_HUB_HOLD_FLOOR_SETTING=1 in the hub's environment uses the setting as a floor instead (A/B only, run-scoped).
+    // SB_HUB_HOLD_FLOOR_SETTING=1 in the hub's environment uses the setting as a floor instead (test switch, run-scoped).
     static constexpr uint32_t kHoldEmergencyLate = 5;
     static constexpr int64_t  kHoldEmergencyGapMs = 30000;
     // A gap longer than max(2 x hold, hold + kHoldStallExtraMs) is a STALL: concealed, never a reason to grow,
@@ -1420,6 +1443,9 @@ private:
     std::vector<PendingInvite> mPendingInvites;
 
     std::atomic<bool> mRunning{false};
+    std::atomic<bool> mStarted{false};   // start() finished without an error
+    std::atomic<bool> mPublicUnknown{false};   // no public address found at start
+    std::string mStartError;             // why start() failed, one line for the operator; written by start() only
     std::atomic<bool> mConnected{false};
     std::atomic<bool> mGroupJoined{false};
 
@@ -1488,7 +1514,7 @@ private:
     // source->process(+send) ticks for the listener's feeds.
     uint64_t listenerPumpFeeds(HubPeer* self, int selfIdx, bool inlineSend);
     void listenerCutThroughEmit(HubPeer* self);
-    // Evening: dither pacer slot phase (see pacerThread).
+    // Dither the pacer slot phase (see pacerThread).
     std::atomic<bool> mPaceDither{true};
     // Fraction of the block period the pacer spreads listener sends over
     // (percent). With connected sockets a send costs ~7 µs, so a
@@ -1518,7 +1544,7 @@ private:
     // fetch_add per counter; statsWriterThread prints + resets every 10 s).
     std::atomic<bool> mBundleEnabled{true};
     int mBundleMtu = HUB_BUNDLE_MTU_DEFAULT;   // set before start(); read at addPeer
-    bool mDscpEnabled = false;                 // DSCP EF on the UDP socket — DEFAULT OFF (A/B: EF hurt the WAN tail); --dscp enables
+    bool mDscpEnabled = false;                 // DSCP EF on the UDP socket — default off; --dscp enables
     // Per-listener connected send
     // sockets. Plain bool: written before start(),
     // read-only afterwards. Creation lives in openConnectedSendSocket()

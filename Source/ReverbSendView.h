@@ -39,6 +39,7 @@ public:
         sendSlider.setTextBoxIsEditable(true);
         sendSlider.setLookAndFeel(&sonoSliderLNF);
         sendSlider.setTextBoxStyle(Slider::TextBoxAbove, true, 150, 14);
+        sendSlider.updateText();   // the box kept the text it was made with, before the dB format was set
 
         sendLabel.setText(TRANS("Reverb Send"), dontSendNotification);
         configLabel(sendLabel, true);
@@ -132,7 +133,7 @@ public:
         checkBox.items.add(FlexItem(7, 5).withMargin(0).withFlex(0));
 
         if (showDragIcon) {
-            checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(120));
+            checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(jmax(120, SbTextFit::labelWidth(titleLabel))));
             checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
             checkBox.items.add(FlexItem(24, minitemheight, dragButton).withMargin(0).withFlex(0));
         } else {
@@ -237,6 +238,7 @@ public:
         reverbSendLevel = revSendLevel;
 
         sendSlider.setValue(reverbSendLevel, dontSendNotification);
+        sendSlider.updateText();
 
         sendSlider.setSliderSnapsToMousePosition(processor.getSlidersSnapToMousePosition());
 

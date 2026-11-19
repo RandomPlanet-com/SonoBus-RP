@@ -6,6 +6,7 @@
 #include "ChatView.h"
 #include "GenericItemChooser.h"
 #include "SonoLookAndFeel.h"
+#include "SbTextFit.h"
 
 void FocusTextEditor::focusGained (FocusChangeType gtype)
 {
@@ -14,6 +15,27 @@ void FocusTextEditor::focusGained (FocusChangeType gtype)
     if (onFocusGained != nullptr) {
         onFocusGained(gtype);
     }
+}
+
+void FocusTextEditor::paintOverChildren (Graphics& g)
+{
+    const String hint = getTextToShowWhenEmpty();
+    if (hint.isEmpty() || hasKeyboardFocus(false) || getTotalNumChars() > 0) {
+        TextEditor::paintOverChildren(g);
+        return;
+    }
+
+    // Same place and colour as the stock hint, wrapped to the lines the editor has room for
+    const auto font = getFont();
+    const Rectangle<int> area (getLeftIndent(), getTopIndent(),
+                               getWidth() - 2 * getLeftIndent() - hintRightInset, getHeight() - getTopIndent());
+    if (! area.isEmpty()) {
+        g.setColour(hintColour);
+        g.setFont(font);
+        SonoLookAndFeel::drawTextNoSqueeze(g, hint, area, Justification::topLeft,
+                                           isMultiLine() ? jmax(1, (int) ((float) area.getHeight() / font.getHeight())) : 1);
+    }
+    getLookAndFeel().drawTextEditorOutline(g, getWidth(), getHeight(), *this);
 }
 
 class SonobusChatTabbedButtonBar : public TabbedButtonBar
@@ -80,7 +102,8 @@ ChatView::ChatView(SonobusAudioProcessor& proc, AooServerConnectionInfo & connec
     mChatSendTextEditor = std::make_unique<FocusTextEditor>();
     mChatSendTextEditor->setMultiLine(true);
     mChatSendTextEditor->setScrollbarsShown(true);
-    mChatSendTextEditor->setTextToShowWhenEmpty(TRANS("Enter message here..."), Colour(0x88bbbbbb));
+    mChatSendTextEditor->setHint(TRANS("Enter message here..."), Colour(0x88bbbbbb));
+    mChatSendTextEditor->hintRightInset = 26;   // the send button sits in the bottom right corner
     mChatSendTextEditor->setTitle(TRANS("Message Text"));
     mChatSendTextEditor->onReturnKey = [this]() {
         commitChatMessage();
@@ -253,6 +276,9 @@ void ChatView::resized()
     int bw = 24;
     auto edbounds = mChatSendTextEditor->getBounds();
     mSendButton->setBounds(edbounds.getRight() - bw - 2, edbounds.getBottom() - bh - 2, bw, bh);
+
+    fitTitle();
+    updateTabTips();
     
 }
 
@@ -319,10 +345,37 @@ void ChatView::updateTitles()
         mesg = name + TRANS(" is not connected");
         mChatSendTextEditor->clear();
     }
-    mChatSendTextEditor->setTextToShowWhenEmpty(mesg, Colour(0x88bbbbbb));
+    mChatSendTextEditor->setHint(mesg, Colour(0x88bbbbbb));
     mChatSendTextEditor->repaint();
-    auto titletext = TRANS("Chat") + String(" : ") + name;
-    mTitleLabel->setText(titletext, dontSendNotification);
+    mTitleName = name;
+    mFullTitle = TRANS("Chat") + String(" : ") + name;
+    fitTitle();
+}
+
+// The title is one line. When "Chat : <name>" does not fit, the name alone shows and the full title is in the hover.
+void ChatView::fitTitle()
+{
+    if (mTitleLabel == nullptr) return;
+    String shown = mFullTitle;
+    if (mTitleLabel->getWidth() > 0 && SbTextFit::labelWidth(*mTitleLabel, mFullTitle) > mTitleLabel->getWidth()
+        && mTitleName.isNotEmpty())
+        shown = mTitleName;
+    mTitleLabel->setText(shown, dontSendNotification);
+    SbTextFit::tooltipIfCut(*mTitleLabel, mFullTitle, SbTextFit::labelWidth(*mTitleLabel, mFullTitle));
+}
+
+void ChatView::updateTabTips()
+{
+    if (mChatTabs == nullptr) return;
+    // Tab captions draw at half the depth of their text area
+    const Font tabFont (jmin((float) mChatTabs->getHeight() - 2.0f, 32.0f) * 0.5f * SonoLookAndFeel::getFontScale());
+    for (int i = 0; i < mChatTabs->getNumTabs(); ++i) {
+        if (auto * tb = mChatTabs->getTabButton(i)) {
+            const String name = tb->getButtonText().trim();
+            const int room = tb->getTextArea().getWidth() - 2;
+            tb->setTooltip(SbTextFit::textWidth(tabFont, name) > room ? name : String());
+        }
+    }
 }
 
 
@@ -792,6 +845,7 @@ void ChatView::appendPrivateChatTab(const String & name, bool setcurrent)
     if (setcurrent) {
         mChatTabs->setCurrentTabIndex(mChatTabs->getNumTabs()-1);
     }
+    updateTabTips();
 }
 
 void ChatView::deletePrivateChatTab(int index)
@@ -831,7 +885,7 @@ void ChatView::processNewChatMessages(int index, int count)
 
     // for now just add their text to the big texteditor showing all chats
     const Colour selfNameColour(0xaaeeeeff);
-    const Colour selfBgColour(0x88203a38);   // Teal-tinted (was indigo)
+    const Colour selfBgColour(0x88203a38);   // Teal-tinted
     const Colour otherNameColour(0xaaffffaa);
     const Colour selfTextColour(0xffeeeeee);
     const Colour otherTextColour(0xffffffaa);

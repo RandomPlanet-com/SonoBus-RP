@@ -19,7 +19,7 @@ public:
 
 private:
     bool post(const std::string& path, const std::string& json, int& status, std::string& reply);
-    void leave();
+    void leave(bool force = false);
     std::string checkinJson();
 
     SonobusHubServer& mHub;

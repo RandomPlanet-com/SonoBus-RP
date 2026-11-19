@@ -277,7 +277,8 @@ public:
     
     void setupLayout()
     {
-        int minKnobWidth = 54;
+        int minKnobWidth = knobColumnWidth (54, { &para1FreqLabel, &para1GainLabel, &para1QLabel, &para2FreqLabel, &para2GainLabel, &para2QLabel });
+        const int shelfWidth = knobColumnWidth (54, { &lowShelfFreqLabel, &lowShelfGainLabel, &highShelfFreqLabel, &highShelfGainLabel });
         int minitemheight = 32;
         int knoblabelheight = 18;
         int knobitemheight = 62;
@@ -386,7 +387,7 @@ public:
         //checkBox.items.add(FlexItem(5, 5).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(enablewidth, minitemheight, enableButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0));
-        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(120));
+        checkBox.items.add(FlexItem(100, minitemheight, titleLabel).withMargin(0).withFlex(1).withMaxWidth(jmax(120, SbTextFit::labelWidth(titleLabel))));
         //checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
         checkBox.items.add(FlexItem(24, minitemheight, dragButton).withMargin(0).withFlex(0));
         checkBox.items.add(FlexItem(2, 5).withMargin(0).withFlex(0.1));
@@ -399,18 +400,18 @@ public:
         knobBox.items.clear();
         knobBox.flexDirection = FlexBox::Direction::row;
         knobBox.items.add(FlexItem(3, 5).withMargin(0).withFlex(0));
-        knobBox.items.add(FlexItem(minKnobWidth, 2*(knobitemheight + knoblabelheight) + 14, lowShelfBox).withMargin(0).withFlex(1));
+        knobBox.items.add(FlexItem(shelfWidth, 2*(knobitemheight + knoblabelheight) + 14, lowShelfBox).withMargin(0).withFlex(1));
         knobBox.items.add(FlexItem(6, 5).withMargin(0).withFlex(0));
         knobBox.items.add(FlexItem(3*minKnobWidth, 2 * (knobitemheight + knoblabelheight) + 14, paraBox).withMargin(0).withFlex(1));
         knobBox.items.add(FlexItem(6, 5).withMargin(0).withFlex(0));
-        knobBox.items.add(FlexItem(minKnobWidth, 2*(knobitemheight + knoblabelheight) + 14, highShelfBox).withMargin(0).withFlex(1));
+        knobBox.items.add(FlexItem(shelfWidth, 2*(knobitemheight + knoblabelheight) + 14, highShelfBox).withMargin(0).withFlex(1));
         knobBox.items.add(FlexItem(3, 5).withMargin(0).withFlex(0));
         
         mainBox.items.clear();
         mainBox.flexDirection = FlexBox::Direction::column;
         //mainBox.items.add(FlexItem(150, minitemheight, checkBox).withMargin(0).withFlex(0));
         //mainBox.items.add(FlexItem(6, 2).withMargin(0).withFlex(0));
-        mainBox.items.add(FlexItem(5*minKnobWidth+18, 2 * (knoblabelheight + knobitemheight) + 14, knobBox).withMargin(0).withFlex(1));
+        mainBox.items.add(FlexItem(3*minKnobWidth+2*shelfWidth+18, 2 * (knoblabelheight + knobitemheight) + 14, knobBox).withMargin(0).withFlex(1));
         resetRowBox.items.clear();
         resetRowBox.flexDirection = FlexBox::Direction::row;
         resetRowBox.items.add(FlexItem(6, 2).withFlex(1));
@@ -418,7 +419,7 @@ public:
         resetRowBox.items.add(FlexItem(6, 2));
         mainBox.items.add(FlexItem(100, minitemheight, resetRowBox).withMargin(0).withFlex(0));   
         
-        minBounds.setSize(jmax(180, 5*minKnobWidth + 18), 2 * (knobitemheight + knoblabelheight) + 14 + minitemheight);
+        minBounds.setSize(jmax(180, 3*minKnobWidth + 2*shelfWidth + 18), 2 * (knobitemheight + knoblabelheight) + 14 + minitemheight);
         minHeaderBounds.setSize(jmax(180, 5*minKnobWidth * 5 + 18),  minitemheight + 8);
 
         

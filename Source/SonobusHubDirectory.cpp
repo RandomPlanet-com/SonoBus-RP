@@ -21,7 +21,7 @@ bool acceptableForward(const juce::String& u) {
     return host == "randomplanet.com" || host.endsWith(".randomplanet.com");
 }
 
-#if JUCE_LINUX || JUCE_MAC
+#if JUCE_LINUX || JUCE_MAC || JUCE_WINDOWS
 juce::String runCurl(const juce::StringArray& cmd, int& exitCode) {
     juce::ChildProcess cp;
     if (!cp.start(cmd, juce::ChildProcess::wantStdOut)) { exitCode = -1; return {}; }
@@ -48,12 +48,14 @@ HubStageDirectory::~HubStageDirectory() {
 bool HubStageDirectory::post(const std::string& path, const std::string& json, int& status, std::string& reply) {
     status = 0; reply.clear();
     const juce::String url = juce::String(mBase) + path;
-#if JUCE_LINUX || JUCE_MAC
+#if JUCE_LINUX || JUCE_MAC || JUCE_WINDOWS
     // curl over IPv4, with the body in a private file so the key is not on a command line. IPv4 on purpose: the
     // directory tests the address the check-in comes from, and a hub's forwarded ports are IPv4.
     const juce::File body = mDataDir.getChildFile(".stage-post.json");
     body.replaceWithText(juce::String::fromUTF8(json.c_str()));
+  #if !JUCE_WINDOWS
     ::chmod(body.getFullPathName().toRawUTF8(), 0600);
+  #endif
     int rc = 0;
     const juce::String out = runCurl({ "curl", "-4", "-sS", "--connect-timeout", "8", "--max-time", "15", "-H", "Content-Type: application/json",
                                        "--data-binary", "@" + body.getFullPathName(), "-w", "\n%{http_code}", url }, rc);
@@ -119,8 +121,9 @@ std::string HubStageDirectory::checkinJson() {
     return j;
 }
 
-void HubStageDirectory::leave() {
-    if (!mListed) return;
+// force: also when this run never listed the stage (a listing kept across a restart).
+void HubStageDirectory::leave(bool force) {
+    if (!mListed && !force) return;
     int status = 0; std::string reply;
     post("hub/leave", "{\"hub_id\":" + jsonText(mHubId) + ",\"hub_key\":" + jsonText(mHubKey) + "}", status, reply);
     mListed = false;
@@ -132,6 +135,7 @@ void HubStageDirectory::run() {
     uint64_t seenMembers = mHub.stageMembersGeneration();
     int intervalS = 60;
     int64_t nextAt = 0;
+    std::string heldWhy;   // the hold last acted on
     while (!threadShouldExit()) {
         const auto st = mHub.stageSettings();
         const uint64_t gen = mHub.stageSettingsGeneration();
@@ -142,6 +146,23 @@ void HubStageDirectory::run() {
             wait(1000);
             continue;
         }
+        // Never listed while the hub did not start or a required port is closed from outside.
+        if (std::string why; const int hold = mHub.stageListingHold(why)) {
+            if (why != heldWhy) {
+                heldWhy = why;
+                if (hold == 1) mHub.setStageListingStatus(4, "Waiting for the port check");
+                else {
+                    leave(true);
+                    mHub.setStageListingStatus(2, "Not listed: " + why);
+                    std::cout << "[HUB-STAGES] not listed: " + why + "\n";
+                }
+            }
+            seenGen = gen;
+            nextAt = 0;   // check in at once when the hold ends
+            wait(1000);
+            continue;
+        }
+        heldWhy.clear();
         // A join or leave shows in the directory within a few seconds; a burst of them is one check-in.
         if (const uint64_t members = mHub.stageMembersGeneration(); members != seenMembers) {
             seenMembers = members;

@@ -10,7 +10,7 @@
 class VersionInfo
 {
 public:
-    struct Asset   // Members no longer const (the updater picks/assigns assets)
+    struct Asset   // Members not const: the updater picks and assigns assets
     {
         String name;
         String url;

@@ -12,7 +12,6 @@
 #include "SonoDrawableButton.h"
 #include "GenericItemChooser.h"
 
-class RandomSentenceGenerator;
 class StagesView;
 
 
@@ -103,6 +102,14 @@ protected:
 
     void configEditor(TextEditor *editor, bool passwd = false);
     void configServerLabel(Label *label);
+    int serverLabelColumnNeed();
+    void sizeServerLabelColumn(int formWidth);
+    void layoutServerForm();   // the Private Stage form in its viewport, as wide and tall as its fields need
+    int serverTopTextWidth() const;   // the two-line text at the top of the form with its buttons
+    void placeServerInfo();
+    void layoutRecents();
+    void showServerInfo(bool show);
+    bool hubServerMissing();   // shows the message and marks the field when the Hub Server field is empty
 
     void publicGroupLogin();
     void showAdvancedMenu();
@@ -118,8 +125,6 @@ protected:
     String mHostedDiagnosticsStatusChip { "Self-check: n/a" };
 
     bool firstTimeConnectShow = true;
-
-    std::unique_ptr<RandomSentenceGenerator> mRandomSentence;
 
 
     std::unique_ptr<Label> mLocalAddressStaticLabel;
@@ -151,6 +156,7 @@ protected:
     std::unique_ptr<TextEditor> mServerUsernameEditor;
     std::unique_ptr<Label> mServerInstrumentStaticLabel;
     std::unique_ptr<ComboBox> mServerInstrumentCombo;
+    std::unique_ptr<Label> mServerInstrumentHelpLabel;
     std::unique_ptr<Label> mServerUserPassStaticLabel;
     std::unique_ptr<TextEditor> mServerUserPasswordEditor;
 
@@ -160,7 +166,6 @@ protected:
     std::unique_ptr<TextEditor> mServerGroupPasswordEditor;
     std::unique_ptr<SonoDrawableButton> mServerGroupPasswordShowButton;
 
-    std::unique_ptr<SonoDrawableButton> mServerGroupRandomButton;
     std::unique_ptr<SonoDrawableButton> mServerPasteButton;
     std::unique_ptr<SonoDrawableButton> mServerCopyButton;
     std::unique_ptr<SonoDrawableButton> mServerShareButton;
@@ -169,6 +174,7 @@ protected:
 
     std::unique_ptr<Label> mServerStatusLabel;
     std::unique_ptr<Label> mServerInfoLabel;
+    std::unique_ptr<Label> mServerInfoSubLabel;
     std::unique_ptr<Label> mMainStatusLabel;
 
     bool recentsIsTab() const;
@@ -210,6 +216,7 @@ protected:
         void listBoxItemClicked (int rowNumber, const MouseEvent& e) override;
         void listBoxItemDoubleClicked (int rowNumber, const MouseEvent& e) override;
         void selectedRowsChanged(int lastRowSelected) override;
+        String getTooltipForRow (int rowNumber) override;
 
         void updateState();
 
@@ -273,6 +280,7 @@ protected:
     FlexBox servGroupPassBox;
     FlexBox servUserBox;
     FlexBox servInstrumentBox;
+    FlexBox servInstrumentHelpBox;
     FlexBox servUserPassBox;
     //FlexBox inputBox;
     FlexBox servAddressBox;

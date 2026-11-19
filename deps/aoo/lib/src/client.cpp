@@ -416,20 +416,8 @@ int32_t aoo::net::client::handle_message(const char *data, int32_t n, void *addr
                     token = msg.ArgumentsBegin()->AsInt64();
                 }
 
-                // CLIENT-UDP debug log, disabled: fires per inbound UDP message and per peer-match attempt.
-                // std::cerr << "[CLIENT-UDP] inbound from " << address.name() << ":" << address.port()
-                //           << " pattern=" << pattern
-                //           << " token=" << token
-                //           << " peers_count=" << peers_.size() << "\n";
-
                 for (auto& p : peers_){
                     bool addr_match = p->match(address);
-                    // peer-match debug log, disabled (see above)
-                    // std::cerr << "[CLIENT-UDP]   peer=" << *p
-                    //           << " addr_match=" << (addr_match ? "Y" : "N")
-                    //           << " has_real=" << (p->has_real_address() ? "Y" : "N")
-                    //           << " token_match=" << (p->match_token(token) ? "Y" : "N")
-                    //           << "\n";
                     if (addr_match){
                         p->handle_message(msg, onset, address);
                         success = true;
@@ -1244,10 +1232,8 @@ void client::handle_peer_add(const osc::ReceivedMessage& msg){
 
     unique_lock lock(peerlock_); // writer lock!
 
-    // Remove any existing peer with same group+user before re-adding.
-    // This handles reconnect: server sent PEER_REMOVE then PEER_ADD, but if the
-    // LEAVE event is delayed or a timed-out peer lingers, the old object would
-    // block the new add and the reconnecting peer could never handshake again.
+    // Remove any existing peer with same group+user before re-adding: a lingering old object (delayed
+    // LEAVE, timed-out peer) would block the reconnecting peer's handshake.
     for (auto it = peers_.begin(); it != peers_.end(); ) {
         if ((*it)->match(group, user)) {
             LOG_VERBOSE("aoo_client: replacing stale peer " << **it);

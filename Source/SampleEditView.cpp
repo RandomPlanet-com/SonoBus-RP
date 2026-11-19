@@ -4,6 +4,7 @@
 
 
 #include "SampleEditView.h"
+#include "SbTextFit.h"
 
 #include <utility>
 #include <iostream>
@@ -239,6 +240,7 @@ void SampleEditView::createLoopButton()
     loopImages.push_back(std::move(loopImg));
     loopImages.push_back(std::move(nextImg));
     auto labels = std::vector<String>{TRANS("Stop at End"), TRANS("Loop at End"), TRANS("Play Next")};
+    for (const auto& l : labels) playbackCaptions.add(l);
 
     mLoopButton = std::make_unique<SonoMultiStateDrawableButton>("loop", std::move(loopImages), std::move(labels));
     mLoopButton->setColour(DrawableButton::backgroundColourId, Colour::fromFloatRGBA(0.5, 0.5, 0.5, 0.3));
@@ -259,6 +261,7 @@ void SampleEditView::createReplayBehaviourButton()
     buttonImages.push_back(std::move(replayImage));
     buttonImages.push_back(std::move(continueImage));
     auto labels = std::vector<String>{TRANS("Replay"), TRANS("Continue")};
+    for (const auto& l : labels) playbackCaptions.add(l);
     mReplayBehaviourButton = std::make_unique<SonoMultiStateDrawableButton>("replayBehaviour", std::move(buttonImages), std::move(labels));
     mReplayBehaviourButton->setColour(DrawableButton::backgroundColourId, Colour::fromFloatRGBA(0.5, 0.5, 0.5, 0.3));
     mReplayBehaviourButton->setState(initialReplayBehaviour);
@@ -279,6 +282,7 @@ void SampleEditView::createPlaybackBehaviourButton()
     imgs.push_back(std::move(b2bImg));
     imgs.push_back(std::move(bgImg));
     auto labels = std::vector<String>{TRANS("Simultaneous"), TRANS("Back to Back"), TRANS("Background")};
+    for (const auto& l : labels) playbackCaptions.add(l);
     mPlaybackBehaviourButton = std::make_unique<SonoMultiStateDrawableButton>("playbackBehaviour", std::move(imgs), std::move(labels));
     mPlaybackBehaviourButton->setColour(DrawableButton::backgroundColourId, Colour::fromFloatRGBA(0.5, 0.5, 0.5, 0.3));
     mPlaybackBehaviourButton->setState(initialPlaybackBehaviour);
@@ -299,6 +303,7 @@ void SampleEditView::createButtonBehaviourButton()
     imgs.push_back(std::move(holdImg));
     imgs.push_back(std::move(oneshotImg));
     auto labels = std::vector<String>{TRANS("Toggle"), TRANS("Hold"), TRANS("1-shot")};
+    for (const auto& l : labels) playbackCaptions.add(l);
     mButtonBehaviourButton = std::make_unique<SonoMultiStateDrawableButton>("buttonBehaviour", std::move(imgs), std::move(labels));
     mButtonBehaviourButton->setColour(DrawableButton::backgroundColourId, Colour::fromFloatRGBA(0.5, 0.5, 0.5, 0.3));
     mButtonBehaviourButton->setState(initialButtonBehaviour);
@@ -543,6 +548,16 @@ bool SampleEditView::keyPressed(const KeyPress& keyPress)
     return true;
 }
 
+// Width a text button needs to show its caption whole on two lines (best split at a space)
+static int twoLineButtonWidth (TextButton& b, int height)
+{
+    const auto text = b.getButtonText().trim();
+    int best = SbTextFit::buttonWidth(b, height, text);
+    for (int i = text.indexOfChar(' '); i > 0; i = text.indexOfChar(i + 1, ' '))
+        best = jmin(best, jmax(SbTextFit::buttonWidth(b, height, text.substring(0, i)), SbTextFit::buttonWidth(b, height, text.substring(i + 1))));
+    return best;
+}
+
 void SampleEditView::paint(Graphics& g)
 {
     g.fillAll(Colour::fromFloatRGBA(0.1, 0.1, 0.1, 1.0));
@@ -556,8 +571,12 @@ void SampleEditView::resized()
     int rowheight = 32;
     int labrowheight = 24;
     const int volheight = 38;
-    const int playbackboxw = 50;
     const int playbackboxh = 50;
+    // Option buttons wide enough for their captions on one line (caption font as the look and feel draws it)
+    int captionWidth = 0;
+    for (const auto& c : playbackCaptions)
+        captionWidth = jmax(captionWidth, SbTextFit::textWidth(Font(jmin(14.0f, playbackboxh * 0.2f)), c));
+    const int playbackboxw = jmax(50, captionWidth + 6);
 
 #if JUCE_IOS || JUCE_ANDROID
     rowheight = 36;
@@ -610,7 +629,9 @@ void SampleEditView::resized()
     playbackOptionsRowBox.items.add(FlexItem(ELEMENT_MARGIN, ELEMENT_MARGIN).withMargin(0));
     playbackOptionsRowBox.items.add(FlexItem(playbackboxw, playbackboxh, *mReplayBehaviourButton).withMargin(0).withFlex(0, 0));
     playbackOptionsRowBox.items.add(FlexItem(ELEMENT_MARGIN, ELEMENT_MARGIN).withMargin(0).withFlex(1));
-    playbackOptionsRowBox.items.add(FlexItem(mintextbuttwidth, rowheight, *mApplyPlaybackOptionsToOthersButton).withMargin(0).withFlex(0, 0));
+    // As tall as the option buttons, so its caption has two lines
+    const int applyWidth = jmax(mintextbuttwidth, twoLineButtonWidth(*mApplyPlaybackOptionsToOthersButton, playbackboxh));
+    playbackOptionsRowBox.items.add(FlexItem(applyWidth, playbackboxh, *mApplyPlaybackOptionsToOthersButton).withMargin(0).withFlex(0, 0));
     playbackOptionsRowBox.items.add(FlexItem(ELEMENT_MARGIN, ELEMENT_MARGIN).withMargin(0));
 
     contentBox.items.add(FlexItem(ELEMENT_MARGIN, ELEMENT_MARGIN).withMargin(0));
@@ -646,7 +667,11 @@ void SampleEditView::resized()
         minh += item.minHeight + item.margin.top + item.margin.bottom;
     }
     minContentHeight = minh + 4;
-    minContentWidth = jmax(32*6, playbackboxw*4) + 10;
+    int rowWidth = 0;
+    for (auto & item : playbackOptionsRowBox.items) {
+        rowWidth += item.minWidth + item.margin.left + item.margin.right;
+    }
+    minContentWidth = jmax(32*6 + 10, rowWidth + 4);
 
     contentBox.performLayout(getLocalBounds().reduced(2));
 

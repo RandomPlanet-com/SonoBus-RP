@@ -156,9 +156,9 @@ public:
     UpdateDialog (const String& newVersion, const String& releaseNotes, bool canInstallInPlace = false)
     {
        #if SONOBUSPLUS_BUILD
-        {   // "SonoBus RP 1.2.8 (build ...)": the notes start with the product name and version
-            const String first = releaseNotes.upToFirstOccurrenceOf ("\n", false, false).trim();
-            titleLabel.setText (first.startsWith ("SonoBus RP ") ? first + "  (build " + newVersion + ")" : "SonoBus RP build " + newVersion, dontSendNotification);
+        {   // A short heading; the notes show once, in the box below
+            const String name = versionNameFromNotes (releaseNotes);
+            titleLabel.setText (name.isNotEmpty() ? "SonoBus RP " + name + " is available" : "A new SonoBus RP is available", dontSendNotification);
         }
        #else
         titleLabel.setText ("SonoBus version " + newVersion, dontSendNotification);
@@ -170,12 +170,12 @@ public:
        #if SONOBUSPLUS_BUILD
         // "Install and relaunch" replaces this app in place (notarized zip, verified) and restarts it.
         if (canInstallInPlace) {
-            contentLabel.setText ("A new version of SonoBus RP is available. Install and relaunch replaces this app in place "
+            contentLabel.setText ("Install and relaunch replaces this app in place "
                                   "(you will be disconnected for a few seconds).", dontSendNotification);
             addAndMakeVisible (installButton);
             installButton.onClick = [this] { exitModalStateWithResult (2); };
         } else
-        contentLabel.setText ("A new version of SonoBus RP is available - would you like to download it?", dontSendNotification);
+        contentLabel.setText ("Would you like to download it?", dontSendNotification);
        #else
         contentLabel.setText ("A new version of SonoBus is available - would you like to download it?", dontSendNotification);
        #endif
@@ -262,7 +262,11 @@ public:
         DialogWindow::LaunchOptions options;
 
        #if SONOBUSPLUS_BUILD
-        options.dialogTitle = "Download SonoBus RP " + newVersionString + "?";
+        {
+            const String name = versionNameFromNotes (releaseNotes);
+            options.dialogTitle = name.isNotEmpty() ? "Update to SonoBus RP " + name + " (build " + newVersionString + ")?"
+                                                    : "Update to SonoBus RP build " + newVersionString + "?";
+        }
        #else
         options.dialogTitle = "Download SonoBus version " + newVersionString + "?";
        #endif
@@ -280,6 +284,15 @@ public:
     }
 
 private:
+    // "SonoBus RP 1.3.4: ..." -> "1.3.4"; empty when the notes do not start that way
+    static String versionNameFromNotes (const String& notes)
+    {
+        const String first = notes.upToFirstOccurrenceOf ("\n", false, false).trim();
+        if (! first.startsWith ("SonoBus RP ")) return {};
+        const String v = first.substring (11).upToFirstOccurrenceOf (":", false, false).upToFirstOccurrenceOf (" ", false, false).trim();
+        return (v.length() <= 12 && v.containsOnly ("0123456789.") && v.containsChar ('.')) ? v : String();
+    }
+
     void lookAndFeelChanged() override
     {
         //cancelButton.setColour (TextButton::buttonColourId, findColour (secondaryButtonBackgroundColourId));

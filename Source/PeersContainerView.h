@@ -166,6 +166,7 @@ public:
     FlexBox dropslabbox;
 
     int64_t lastBytesRecv = 0;
+    int64_t lastPayloadRecv = 0;   // audio payload only, to tell a stream that is mostly headers
     int64_t lastBytesSent = 0;
 
     int64_t lastDropped = 0;
@@ -424,7 +425,7 @@ protected:
     // Hub line Mb/s (this player's whole link to the hub)
     int64_t mHubLastBytesSent = 0, mHubLastBytesRecv = 0;
     float mHubRateSent = -1.0f, mHubRateRecv = -1.0f;
-    int64_t mHubBytesSentLast = -1, mHubBytesRecvLast = -1; uint32 mHubRateStampMs = 0;   // Our own link's rates were never computed
+    int64_t mHubBytesSentLast = -1, mHubBytesRecvLast = -1; uint32 mHubRateStampMs = 0;
     uint32 mHubDropsT[12] = {}; int64_t mHubDropsC[12] = {}; int mHubDropsN = 0;   // Drops-from-hub last-minute window
     uint32 mLinkJoinMs = 0; int64_t mLinkBase = -1;   // Link light: join time, and the drop count when its first 10 s ended
     bool ownInterfaceMs(float & inMs, float & outMs) const;   // Our audio interface, input and output with their buffers (ms)
@@ -432,6 +433,7 @@ protected:
     struct HubHeaderParts {
         bool valid = false;
         String addr, disc, ping, lat, rec, recShort;
+        String tip;   // the hover's figures; fitHubHeader adds what the line leaves out
         Colour reg, pingCol, latCol, linkCol;
     } mHubHdr;
     void fitHubHeader();   // Shortens the header line in steps until it fits its label

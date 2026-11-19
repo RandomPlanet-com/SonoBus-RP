@@ -43,6 +43,7 @@ public:
     // This is overloaded from TableListBoxModel, and must return the total number of rows in our table
     int getNumRows() override;
     String getNameForRow (int rowNumber) override;
+    String getTooltipForRow (int rowNumber) override;
     void deleteKeyPressed (int) override;
     void returnKeyPressed (int) override;
 
@@ -90,6 +91,7 @@ public:
 private:
     
     int  getAutoWidth();
+    void fitWithin (const Component * area);   // never wider than the window it pops up in
     
     ListenerList<Listener> listeners;
 

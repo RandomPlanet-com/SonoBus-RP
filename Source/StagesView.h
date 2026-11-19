@@ -31,6 +31,9 @@ public:
     ~StagesView() override;
 
     std::function<void(const JoinRequest&)> onJoin;
+    std::function<juce::String(const JoinRequest&)> savedPassword;   // the password this stage accepted before, empty if none
+    std::function<void(const JoinRequest&)> forgetPassword;
+    std::function<void()> showMe;                                    // brings the Stages tab to the front
     std::function<juce::String()> currentStage;   // the stage this player is in, empty when in none
     std::function<int()> currentPort;             // the connection port of that stage, 0 when unknown
     std::function<juce::String()> userName;
@@ -44,6 +47,7 @@ public:
     bool joinByName(const juce::String& name);         // the same as Connect on that row
     juce::String counters() const;                     // list requests and pings sent so far
     void touched();                                    // someone is using the list: full refresh rate
+    void joinRefused(const juce::String& stage, const juce::String& why);   // asks again when a saved password was rejected
     void showNotice(const juce::String& text);         // why a join was refused, kept in view for a while; empty clears it
 
     void mouseMove(const juce::MouseEvent&) override { touched(); }
@@ -71,9 +75,12 @@ private:
     void updateStatus();
     void flash(const juce::String& note);
     void fillChoice(juce::ComboBox& box, const juce::String& allText, const juce::StringArray& items);
+    void updateChoiceTips();   // full choice in the hover when its box is too narrow
     juce::Rectangle<int> columnRect(int columnId) const;
     void requestJoin(const Stage& s);
-    void askPassword(const JoinRequest& req);
+    void askPassword(const JoinRequest& req, const juce::String& note = {});
+    JoinRequest mSavedTry;            // the last join made with a saved password
+    bool mSavedTryActive = false;
     struct PlayerColumns { int name = 0, nameW = 0, inst = 0, instW = 0, since = 0, ping = 0, send = 0, numW = 0, right = 0; };
     PlayerColumns playerColumns(int fullWidth) const;
     void layoutConnectRow();
@@ -100,6 +107,8 @@ private:
     juce::uint32 mNoteUntil = 0;
     juce::int64 mFetchedAt = 0;
     juce::uint32 mTouchedAt = 0;
+    int mNumNeed = 0, mInstMin = 0;     // player table: number column and instrument caption widths, measured
+    int mNameNeed = 0, mInstNeed = 0;   // widest player name and instrument in the list
     bool mIdle = false;
     int mShown = 0, mShownPlayers = 0, mAttempts = 0;
     bool mReached = false, mEverReached = false, mTestData = false, mRebuilding = false;

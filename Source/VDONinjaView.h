@@ -13,6 +13,7 @@
 #include "SonoChoiceButton.h"
 
 #include "SonobusPluginProcessor.h"
+#include "SbTextFit.h"
 
 //==============================================================================
 /*
@@ -220,6 +221,17 @@ public:
 
         const auto & state = processor.getVideoLinkInfo();
 
+        // Captions take their measured width. The row captions share one column so the controls start at the same x.
+        labwidth = jmax(SbTextFit::labelWidth(modeInfoLabel), SbTextFit::labelWidth(camscreenInfoLabel), SbTextFit::labelWidth(customInfoLabel));
+        const int directorwidth = SbTextFit::toggleWidth(directorButton, minitemheight);
+        const int showNamesWidth = SbTextFit::toggleWidth(showNamesButton, minitemheight);
+        const int openwidth = SbTextFit::buttonWidth(openLinkButton, minitemheight);
+        const int copywidth = SbTextFit::buttonWidth(copyLinkButton, minitemheight);
+        const int moreinfowidth = SbTextFit::buttonWidth(moreInfoButton, minitemheight - 2);
+        // choice button: its label sits at x 4 and leaves 22 for the arrow, inside the label border
+        const int choicewidth = SbTextFit::widestText(Font(15.0f * SonoLookAndFeel::getFontScale()),
+                                                      { TRANS("Push and View"), TRANS("Push Only"), TRANS("View Only") }) + 22 + 10 + 2;
+
         FlexBox modeBox;
         modeBox.flexDirection = FlexBox::Direction::row;
         modeBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0));
@@ -228,7 +240,7 @@ public:
         modeBox.items.add(FlexItem(smallbuttwidth, minitemheight, roomModeButton).withMargin(0).withFlex(1).withMaxWidth(130));
         modeBox.items.add(FlexItem(smallbuttwidth, minitemheight, pushViewButton).withMargin(0).withFlex(1).withMaxWidth(130));
         modeBox.items.add(FlexItem(6, 4).withMargin(0).withFlex(0));
-        modeBox.items.add(FlexItem(buttwidth, minitemheight, directorButton).withMargin(0).withFlex(0));
+        modeBox.items.add(FlexItem(directorwidth, minitemheight, directorButton).withMargin(0).withFlex(0));
 
         FlexBox camBox;
         camBox.flexDirection = FlexBox::Direction::row;
@@ -238,7 +250,7 @@ public:
         camBox.items.add(FlexItem(smallbuttwidth, minitemheight, webcamButton).withMargin(0).withFlex(1).withMaxWidth(130));
         camBox.items.add(FlexItem(smallbuttwidth, minitemheight, screenshareButton).withMargin(0).withFlex(1).withMaxWidth(130));
         camBox.items.add(FlexItem(6, 4).withMargin(0).withFlex(0));
-        camBox.items.add(FlexItem(buttwidth, minitemheight, pushViewModeButton).withMargin(0).withFlex(0.2).withMaxWidth(140));
+        camBox.items.add(FlexItem(choicewidth, minitemheight, pushViewModeButton).withMargin(0).withFlex(0.2).withMaxWidth(jmax(140, choicewidth)));
         //if (state.screenShareMode) {
         //    camBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0));
         //    camBox.items.add(FlexItem(smalltoggwidth, minitemheight, largescreenButton).withMargin(0).withFlex(0.2));
@@ -246,12 +258,12 @@ public:
 
         FlexBox customBox;
         customBox.flexDirection = FlexBox::Direction::row;
-        customBox.items.add(FlexItem(2, 4).withMargin(0));
-        customBox.items.add(FlexItem(100, minitemheight, customInfoLabel).withMargin(0).withFlex(0));
-        customBox.items.add(FlexItem(2, 4).withMargin(0));
+        customBox.items.add(FlexItem(4, 4).withMargin(0));
+        customBox.items.add(FlexItem(labwidth, minitemheight, customInfoLabel).withMargin(0).withFlex(0));
+        customBox.items.add(FlexItem(5, 4).withMargin(0));
         customBox.items.add(FlexItem(minKnobWidth, minitemheight, customFieldEditor).withMargin(0).withFlex(1));
-        customBox.items.add(FlexItem(3, 4).withMargin(0));
-        customBox.items.add(FlexItem(buttwidth, minitemheight, showNamesButton).withMargin(0).withFlex(0));
+        customBox.items.add(FlexItem(6, 4).withMargin(0));
+        customBox.items.add(FlexItem(showNamesWidth, minitemheight, showNamesButton).withMargin(0).withFlex(0));
 
         
         FlexBox editorBox;
@@ -264,9 +276,9 @@ public:
         FlexBox buttonBox;
         buttonBox.flexDirection = FlexBox::Direction::row;
         buttonBox.items.add(FlexItem(3, 4).withMargin(1).withFlex(1));
-        buttonBox.items.add(FlexItem(buttwidth, minitemheight, openLinkButton).withMargin(0).withFlex(2).withMaxWidth(200));
+        buttonBox.items.add(FlexItem(openwidth, minitemheight, openLinkButton).withMargin(0).withFlex(2).withMaxWidth(jmax(200, openwidth)));
         buttonBox.items.add(FlexItem(12, 4).withMargin(0));
-        buttonBox.items.add(FlexItem(buttwidth, minitemheight, copyLinkButton).withMargin(0).withFlex(1).withMaxWidth(120));
+        buttonBox.items.add(FlexItem(copywidth, minitemheight, copyLinkButton).withMargin(0).withFlex(1).withMaxWidth(jmax(120, copywidth)));
         buttonBox.items.add(FlexItem(3, 4).withMargin(1).withFlex(1));
 
         FlexBox infoBox;
@@ -274,7 +286,7 @@ public:
         infoBox.items.add(FlexItem(6, 4).withMargin(1));
         infoBox.items.add(FlexItem(buttwidth, minitemheight, infoLabel).withMargin(0).withFlex(1));
         infoBox.items.add(FlexItem(8, 4).withMargin(0));
-        infoBox.items.add(FlexItem(smallbuttwidth, minitemheight, moreInfoButton).withMargin(1).withFlex(0));
+        infoBox.items.add(FlexItem(moreinfowidth, minitemheight, moreInfoButton).withMargin(1).withFlex(0));
 
         
         FlexBox mainBox;
