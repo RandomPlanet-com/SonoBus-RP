@@ -126,6 +126,7 @@ static void printUsage(const char* progname) {
               << "  --location <text>       The stage's city, shown on the web page and in the stage directory\n"
               << "  --max-players <n>       Most players on this stage (0 = no limit, default 20)\n"
               << "  --max-channels <n>      Most channels one player may send (0 = no limit, default 12)\n"
+              << "  --forget-players-days <n>  Forget previous players not seen for n days (0 = never, default)\n"
               << "  --list-stage            List this stage at stages.randomplanet.com (needs --location)\n"
               << "  --stage-genre <text>    Genre for the listing, for example \"Jazz/Blues\"\n"
               << "  --stage-description <text>  One line for the listing\n"
@@ -196,6 +197,7 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
         else if (arg == "--location" && i + 1 < argc) { a.location = argv[++i]; pin("location"); }   
         else if (arg == "--max-players" && i + 1 < argc) { a.maxPlayers = std::atoi(argv[++i]); pin("max_players"); }
         else if (arg == "--max-channels" && i + 1 < argc) { a.maxChannels = std::atoi(argv[++i]); pin("max_channels"); }
+        else if (arg == "--forget-players-days" && i + 1 < argc) { a.forgetPlayersDays = std::atoi(argv[++i]); pin("forget_players_days"); }
         else if (arg == "--list-stage") { a.listStage = true; pin("list_stage"); }
         else if (arg == "--no-list-stage") { a.listStage = false; pin("list_stage"); }
         else if (arg == "--stage-genre" && i + 1 < argc) { a.stageGenre = argv[++i]; pin("stage_genre"); }
@@ -306,7 +308,9 @@ static int runSetup(HubLaunchArgs& a, const HubSettingsMeta& meta) {
     return 0;
 }
 
-static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // By value — the web Settings page edits it
+static std::atomic<bool> gRelaunchSelf{false};   // a stage restarts itself: nothing else would start it again
+
+static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile, const std::vector<std::string>& argvIn) {   // By value — the web Settings page edits it
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 #if defined(_WIN32)
@@ -321,6 +325,7 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     hs::applyToHub(hub, a);   // Shared with the GUI paths
     if (settingsFile != juce::File()) hub.setSessionsFile(settingsFile.getSiblingFile("hub_sessions.json").getFullPathName().toStdString());   // Recent sessions (+ their players) persist next to hub_settings.json
     if (settingsFile != juce::File()) hub.setRemovedPlayersFile(settingsFile.getSiblingFile("hub_removed_players.json").getFullPathName().toStdString());   // permanent removals, next to the settings
+    if (settingsFile != juce::File()) hub.setPlayerHistoryFile(settingsFile.getSiblingFile("hub_players.json").getFullPathName().toStdString());   // previous players (last 1000)
 
     std::cout << "=== SonoBus RP Hub Server (headless) ===\n"
               << "Server: " << serverHost << ":" << serverPort << "\n"
@@ -341,9 +346,14 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
 
     SonobusHubWeb web(hub, a.webPort, a.webPassword);   // Web status page
     web.setLocation(a.location);
-    // Settings section. "Save & Restart" ends this process cleanly; the systemd unit
-    // (Restart=always) or the launcher brings it back with the saved file.
-    web.setSettings(&a, settingsFile, [] { std::cout << "[HUB-WEB] Save & Restart — quitting for the supervisor to relaunch\n"; gQuit = true; });
+    // Settings section. "Save & Restart" (and an installed update) ends this process cleanly. A main hub is brought
+    // back by its service or launcher with the saved file. A stage has no such supervisor (its main hub starts it
+    // only at its own start), so it starts its own replacement, which waits for this process to be gone.
+    web.setSettings(&a, settingsFile, [] {
+        if (hs::isStage()) { std::cout << "[HUB-WEB] Save & Restart: this stage starts itself again\n"; gRelaunchSelf = true; }
+        else std::cout << "[HUB-WEB] Save & Restart — quitting for the supervisor to relaunch\n";
+        gQuit = true;
+    });
     sb_hub_gui::HubUpdateCheck updateCheck;
     web.setUpdateCheck(&updateCheck);
     updateCheck.startThread();
@@ -355,16 +365,12 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     // Only log when the peer count changes.
     int lastPeers = -1;
     int logCheckTicks = 0;
-#if defined(_WIN32)
-    // Clean stop without a console: a file named QUIT in the data folder (looked for once a second, here only).
+    // Clean stop without a console or a signal: a file named QUIT in the data folder (looked for once a second, here only).
     const juce::File quitFile = hs::dataDir().getChildFile("QUIT");
     quitFile.deleteFile();
-#endif
     while (!gQuit.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-#if defined(_WIN32)
         if (quitFile.existsAsFile()) { quitFile.deleteFile(); std::cout << "[HUB] QUIT file found, shutting down...\n"; break; }
-#endif
         if (++logCheckTicks >= 600) {
             logCheckTicks = 0;
             if (!a.logFile.empty() && juce::File(juce::String::fromUTF8(a.logFile.c_str())).getSize() >= 50 * 1024 * 1024)
@@ -380,6 +386,17 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile) {   // B
     stageDirectory.stopThread(20000);   // removes the listing before the hub goes
     web.stop();
     hub.stop();
+    hs::stopChildStages();   // Linux main hub: its stages stop with it
+    if (gRelaunchSelf.load()) {
+        hs::clearSinkEnv();   // the replacement reads its sink settings from the file again
+#if defined(_WIN32)
+        const long pid = (long) GetCurrentProcessId();
+#else
+        const long pid = (long) getpid();
+#endif
+        std::string err;
+        if (!hs::relaunchProcess(hs::relaunchArgv(argvIn, pid), err)) std::cerr << "[HUB] this stage could not start itself again: " << err << " (Start it from the main hub's Other stages list)\n";
+    }
 #if defined(_WIN32)
     std::cout << "[HUB] stopped\n"; std::cout.flush();
     gStopped = true;
@@ -513,6 +530,7 @@ int main(int argc, char* argv[]) {
             if (!a.logFile.empty()) juce::File(juce::String::fromUTF8(a.logFile.c_str())).appendText(line);
             return 1;
         }
+        hs::writeInstancePid();   // lets the main hub show this stage as running
     }
 
     // Redirect logging to a file when asked. Critical for GUI mode: `open`-launched apps have no tty,
@@ -521,6 +539,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[HUB] SonoBus RP Hub " + std::string(SONOBUS_HUB_VERSION) + " build " + hubBuildId() + " on " + hubPlatformString()
                  + " (" + juce::SystemStats::getCpuModel().trim().toStdString() + ", " + std::to_string(juce::SystemStats::getNumCpus()) + " processors, "
                  + std::to_string(juce::SystemStats::getMemorySizeInMegabytes()) + " MB)\n";
+    if (ownDataDir) hs::registerWithMainHub();   // after the log is redirected: its line lands in this stage's log
 
     // This hub's identity at the stage directory: created once, kept in the settings file.
     if (hs::ensureStageIdentity(a) && meta.loadedFromFile) {
@@ -528,7 +547,8 @@ int main(int argc, char* argv[]) {
         if (!hs::save(meta.file, a, err)) std::cerr << "[HUB-SETTINGS] could not save the stage identity: " << err << "\n";
     }
 
-    if (ownDataDir) std::cout << "[HUB-SETTINGS] data folder: " << hs::dataDir().getFullPathName() << " (own instance)\n";
+    if (ownDataDir) std::cout << "[HUB-SETTINGS] data folder: " << hs::dataDir().getFullPathName()
+                              << (hs::isStage() ? " (own instance, a stage of the hub in " + hs::stageMainFolder().getFullPathName() + ")" : juce::String(" (own instance, a main hub)")) << "\n";
     if (noSettings) {
         std::cout << "[HUB-SETTINGS] settings file disabled (--no-settings)\n";
     } else {
@@ -551,12 +571,14 @@ int main(int argc, char* argv[]) {
 
     aoo_initialize();
 
+    if (!noSettings) hs::restartStartedStages();   // main hub: the stages that were started run again
+
 #if defined(SONOBUS_HUB_NOGUI)
-    (void) meta; (void) argc; (void) argv;
+    (void) meta;
     if (!nogui) std::cout << "[HUB] headless build: running without a GUI (--nogui implied)\n";
-    return runHeadless(a, meta.file);
+    return runHeadless(a, meta.file, std::vector<std::string>(argv, argv + argc));
 #else
-    if (nogui) return runHeadless(a, meta.file);
+    if (nogui) return runHeadless(a, meta.file, std::vector<std::string>(argv, argv + argc));
     return sb_hub_gui::runGui(a, meta, argc, argv);
 #endif
 }

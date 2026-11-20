@@ -377,6 +377,7 @@ public:
     int    getServerPortAsTyped() const;   // The signaling port the player connected to (what a friend must type), not the AOO audio port
     void sbSendRecStateToHub();            // Tell the hub we started/stopped recording (it tells everyone)
     void sbSendMuteStateToHub();           // Tell the hub we muted/unmuted our send (it tells everyone)
+    static bool sbTapOn(const char* key);   // a run-scoped switch (taps file or environment) set to 1
     void sbSendVersionToHub();             // Version, system and instrument (/sb/hxver) now, not only with the 10-s report
     void sbServePortProbe(const String& hubIp, int64 token, int udpPort, int serverPort);   // Probe our hub's ports from outside on its request
     int    getHubLinkPort() const { const ScopedLock sl(mHubLinkLock); return mHubLinkPort; }
@@ -1130,6 +1131,7 @@ private:
         int   sendFormat = 4;
 
         float mainGain = 1.0f;
+        bool  mainGainSet = false;   // set by the listener; otherwise a hub row starts at the Default User Level
         float mainBalance = 0.0f;
         SonoAudio::ChannelGroupParams channelGroupParams[MAX_CHANGROUPS];
         int numChanGroups = 1;
@@ -1267,6 +1269,7 @@ private:
 
     void commitCacheForPeer(RemotePeer * peer);
     bool findAndLoadCacheForPeer(RemotePeer * peer);
+    void sbApplyHubStartLevel(RemotePeer * peer);               // Hub mode starting level of a new row
     void sbFillHubMixCache(PeerStateCache & cache) const;      // Copy this name's hub-mix mute/solo into its cache entry
     void sbPersistHubMixOverride(const String & senderUserName); // Cache the row MUTE/SOLO the moment it changes
 
@@ -1290,6 +1293,7 @@ private:
 
     void loadGlobalState();
     bool storeGlobalState();
+    void sbLoadInstallId(bool isplugin);   // the anonymous install id (made once, kept in GlobalState.xml)
 
     void handleLatInfo(const juce::var & obj);
     juce::var getAllLatInfo();
@@ -1715,6 +1719,7 @@ private:
     void refreshHostInterfaceMs();
     mutable String mPluginHostText; mutable bool mPluginHostTextDone = false;
     mutable String mPluginOsText;   // "Mac AU": the /sb/hxver system field in a plugin (platform + format)
+    String mInstallId;              // random anonymous id of this install (32 hex), sent to a hub with /sb/hxver
     int getHostCallbackBlock() const;   // The host's real callback size: stable (30 equal callbacks), else the last one
     std::atomic<int> mSbStableBlock{0}, mSbLastBlock{0};   // Written on the audio thread, relaxed
     float mHostIfaceInMs = -1.0f, mHostIfaceOutMs = -1.0f;

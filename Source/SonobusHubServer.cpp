@@ -12,6 +12,7 @@
 #include "oscpack/osc/OscReceivedElements.h"
 #include "oscpack/osc/OscOutboundPacketStream.h"
 
+#include <cstdint>
 #include <algorithm>
 #include <chrono>
 #include <deque>   // Connection-log ring
@@ -1244,6 +1245,10 @@ bool SonobusHubServer::portCheckOnce(std::string& text, int& state) {
 }
 
 void SonobusHubServer::portCheckThreadMain() {
+    const auto startedAt = std::chrono::steady_clock::now();
+    // A file named CHECK in the data folder asks for a check now (the main hub's Check ports on a stage).
+    const juce::File checkFile = sb_hub_gui::hub_settings::dataDir().getChildFile("CHECK");
+    checkFile.deleteFile();
     for (int i = 0; i < 30 && mRunning.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));   // let the sockets settle
     while (mRunning.load()) {
         { std::lock_guard<std::mutex> lk(mPortCheckMutex); mPortCheckText = "Port check: running..."; mPortCheckState = 0; mPortCheckVerifiedAtMs = 0; }
@@ -1255,14 +1260,27 @@ void SonobusHubServer::portCheckThreadMain() {
         const std::string failed = state == 2 ? mPortFailScratch : std::string();
         { std::lock_guard<std::mutex> lk(mPortCheckMutex); mPortCheckText = text; mPortCheckState = state;
           mPortCheckDone = true; mPortCheckBlocked = !failed.empty(); mPortCheckFailed = failed; }
+        mPortCheckRuns.fetch_add(1, std::memory_order_relaxed);
         std::cout << "[HUB-PORTCHECK] " + text + "\n";
+        // While the ports fail: again at about 30 s and 90 s after the start (a new stage is checked before its
+        // ports are opened), then every 5 minutes.
+        const int age = (int) std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - startedAt).count();
+        const int waitS = age < 30 ? 30 - age : age < 90 ? 90 - age : 300;
         if (!failed.empty())
             std::cout << "[HUB-PORTCHECK] FAILED: " + failed + " is closed. Players outside this network cannot join, and a listed stage is "
-                         "taken off the stage directory until the check passes. Checked again every 5 minutes.\n";
-        // Stay alive — once the required ports pass we only re-run on request (web page button /
-        // GUI); while they fail, every 5 min or on request.
-        for (int i = 0; mRunning.load() && !mPortCheckRequested.exchange(false, std::memory_order_relaxed) && (done || i < 300); ++i)
+                         "taken off the stage directory until the check passes. Checked again in " + std::to_string(waitS) + " s"
+                         + (waitS < 300 ? " (at 30 s and 90 s after the start, then every 5 minutes).\n" : " (every 5 minutes).\n");
+        // No answer from the checker is no verdict either way: the same schedule, so a hub that started while the
+        // checker could not be reached is checked again soon.
+        else if (!done)
+            std::cout << "[HUB-PORTCHECK] no verdict yet. Checked again in " + std::to_string(waitS) + " s"
+                         + (waitS < 300 ? " (at 30 s and 90 s after the start, then every 5 minutes).\n" : " (every 5 minutes).\n");
+        // Stay alive: once the required ports pass we only re-run on request (web page button, window, CHECK
+        // file); while they fail, after the wait above or on request.
+        for (int i = 0; mRunning.load() && !mPortCheckRequested.exchange(false, std::memory_order_relaxed) && (done || i < waitS); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (checkFile.existsAsFile()) { checkFile.deleteFile(); std::cout << "[HUB-PORTCHECK] CHECK file found, checking now\n"; break; }
+        }
     }
 }
 
@@ -1334,6 +1352,7 @@ static int hub_join_gate(const char* ip, const char* user, int others, char* why
     std::snprintf(why, (size_t)whylen, "%s", r.c_str());
     return 0;
 }
+static std::string hub_default_gateway();
 static std::string hub_plain_ip(std::string ip) {   // "::ffff:1.2.3.4" and "1.2.3.4" are the same player
     if (ip.rfind("::ffff:", 0) == 0) ip = ip.substr(7);
     return ip;
@@ -1481,7 +1500,15 @@ static int64_t hub_now_ms() {
 }
 static void hub_player_to_json(std::ostream& o, const SonobusHubServer::RecentPlayer& r) {
     o << "{\"user\":\"" << hub_json_esc(r.user) << "\",\"ip\":\"" << hub_json_esc(r.ip) << "\",\"lan\":" << (r.lan ? "true" : "false")
-      << ",\"first\":" << r.firstSeenMs << ",\"join\":" << r.lastJoinMs << ",\"left\":" << r.lastLeftMs << ",\"joins\":" << r.joins << "}";
+      << ",\"first\":" << r.firstSeenMs << ",\"join\":" << r.lastJoinMs << ",\"left\":" << r.lastLeftMs << ",\"joins\":" << r.joins;
+    if (!r.id.empty()) o << ",\"id\":\"" << hub_json_esc(r.id) << "\"";
+    o << "}";
+}
+// An install id is up to 32 lowercase hex digits; anything else in it is dropped.
+static std::string hub_clean_id(const std::string& raw) {
+    std::string id;
+    for (const char c : raw) { if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) id.push_back(c); if (id.size() >= 32) break; }
+    return id;
 }
 static SonobusHubServer::RecentPlayer hub_player_from_json(const std::string& obj) {
     const auto m = hub_json_members(obj);
@@ -1489,6 +1516,7 @@ static SonobusHubServer::RecentPlayer hub_player_from_json(const std::string& ob
     r.user = hub_json_member(m, "user"); r.ip = hub_json_member(m, "ip"); r.lan = hub_json_member(m, "lan") == "true";
     r.firstSeenMs = atoll(hub_json_member(m, "first").c_str()); r.lastJoinMs = atoll(hub_json_member(m, "join").c_str());
     r.lastLeftMs = atoll(hub_json_member(m, "left").c_str()); r.joins = atoi(hub_json_member(m, "joins").c_str());
+    r.id = hub_clean_id(hub_json_member(m, "id"));
     return r;
 }
 static constexpr size_t kHubMaxSessions = 50;
@@ -1587,6 +1615,15 @@ void SonobusHubServer::recentNoteJoin(const std::string& user, const std::string
     const int64_t now = hub_now_ms();
     std::lock_guard<std::mutex> g(mRecentMutex);
     mPlayersSinceStart.insert(user);
+    {   // previous players (all stages); written by the client thread
+        RecentPlayer h;
+        for (auto it = mHistory.begin(); it != mHistory.end(); ++it) if (it->user == user) { h = *it; mHistory.erase(it); break; }
+        if (h.firstSeenMs == 0) h.firstSeenMs = now;
+        h.user = user; h.ip = ip; h.lan = lan; h.lastJoinMs = now; ++h.joins;
+        h.id.clear();   // this join's player reports its own
+        mHistory.push_back(std::move(h));
+        mHistoryDirty.store(true, std::memory_order_relaxed);
+    }
     SessionRecord* cur = currentSessionLocked();
     if (!cur) return;
     RecentPlayer e;
@@ -1600,6 +1637,7 @@ void SonobusHubServer::recentNoteJoin(const std::string& user, const std::string
 void SonobusHubServer::recentNoteLeave(const std::string& user) {
     const int64_t now = hub_now_ms();
     std::lock_guard<std::mutex> g(mRecentMutex);
+    for (auto& h : mHistory) if (h.user == user) { h.lastLeftMs = now; mHistoryDirty.store(true, std::memory_order_relaxed); break; }
     SessionRecord* cur = currentSessionLocked();
     if (!cur) return;
     for (auto& r : cur->players) if (r.user == user) { r.lastLeftMs = now; sessionsSaveLocked(); return; }
@@ -1617,6 +1655,180 @@ std::vector<SonobusHubServer::RecentPlayer> SonobusHubServer::recentPlayers(int 
 int SonobusHubServer::playersSinceStart() const {
     std::lock_guard<std::mutex> g(mRecentMutex);
     return (int) mPlayersSinceStart.size();
+}
+
+// hub_players.json: {"_schema":1,"seeded":true,"players":[{"user","ip","lan","first","join","left","joins","id"},...]}, least recently
+// joined first. At most 1000 names (the least recently seen go first) and, when set, only the last N days.
+static constexpr size_t kHubMaxHistory = 1000;
+static int64_t hub_last_seen(const SonobusHubServer::RecentPlayer& r) { return std::max(r.lastJoinMs, r.lastLeftMs); }
+static void hub_history_prune(std::vector<SonobusHubServer::RecentPlayer>& h, int64_t now, int forgetDays) {
+    const int64_t cut = forgetDays > 0 ? now - (int64_t) forgetDays * 24 * 3600 * 1000 : INT64_MIN;
+    h.erase(std::remove_if(h.begin(), h.end(), [cut](const SonobusHubServer::RecentPlayer& r) {
+        const bool connected = r.lastLeftMs < r.lastJoinMs;
+        return r.user.empty() || (!connected && hub_last_seen(r) < cut); }), h.end());
+    if (h.size() > kHubMaxHistory) {   // the least recently seen go first
+        std::stable_sort(h.begin(), h.end(), [](const SonobusHubServer::RecentPlayer& a, const SonobusHubServer::RecentPlayer& b) { return hub_last_seen(a) < hub_last_seen(b); });
+        h.erase(h.begin(), h.begin() + (std::ptrdiff_t) (h.size() - kHubMaxHistory));
+    }
+}
+void SonobusHubServer::historySaveLocked() {
+    hub_history_prune(mHistory, hub_now_ms(), mHistoryForgetDays.load(std::memory_order_relaxed));
+    if (mHistoryFile.empty()) return;
+    std::ostringstream o; o << "{\"_schema\":1," << (mHistorySeeded ? "\"seeded\":true," : "") << "\"players\":[\n";
+    bool first = true;
+    for (const auto& r : mHistory) { o << (first ? " " : ",\n "); hub_player_to_json(o, r); first = false; }
+    o << "\n]}\n";
+    const std::string tmp = mHistoryFile + ".tmp";
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) return;   // no data folder yet: in memory until the settings are saved once
+    f << o.str(); f.close();
+    if (!f) { ::remove(tmp.c_str()); return; }
+#if defined(_WIN32)
+    if (!MoveFileExA(tmp.c_str(), mHistoryFile.c_str(), MOVEFILE_REPLACE_EXISTING)) ::remove(tmp.c_str());
+#else
+    ::rename(tmp.c_str(), mHistoryFile.c_str());
+#endif
+}
+void SonobusHubServer::setPlayerHistoryFile(const std::string& path) {
+    std::lock_guard<std::mutex> g(mRecentMutex);
+    mHistoryFile = path;
+    mHistory.clear();
+    if (path.empty()) return;
+    std::ifstream f(path, std::ios::binary);
+    bool seeded = false;
+    if (f) {
+        std::stringstream ss; ss << f.rdbuf();
+        std::string arr;
+        for (const auto& kv : hub_json_members(ss.str())) {
+            if (kv.first == "players") arr = kv.second;
+            else if (kv.first == "seeded") seeded = kv.second == "true";
+        }
+        for (const auto& item : hub_json_items(arr)) {
+            auto r = hub_player_from_json(item);
+            if (r.user.empty()) continue;
+            if (r.lastLeftMs < r.lastJoinMs) r.lastLeftMs = r.lastJoinMs;   // nobody is connected before the hub starts
+            bool dup = false;
+            for (auto& e : mHistory) if (e.user == r.user) { e = r; dup = true; break; }
+            if (!dup) mHistory.push_back(std::move(r));
+        }
+    }
+    mHistorySeeded = seeded;   // the mark stays in the file at the next save
+    if (!seeded) {
+        // Once per data folder: names from the recent sessions join the list (that file is only read). One entry per
+        // name: the most recent one, with the earliest first join and the joins added up; names already listed stay.
+        std::vector<RecentPlayer> fromSessions;
+        for (const auto& sdesc : mSessions) {
+            for (const auto& r : sdesc.players) {
+                if (r.user.empty() || r.user == mHubUserName) continue;
+                bool dup = false;
+                for (auto& e : fromSessions) {
+                    if (e.user != r.user) continue;
+                    dup = true;
+                    const int64_t firstMs = (e.firstSeenMs > 0 && r.firstSeenMs > 0) ? std::min(e.firstSeenMs, r.firstSeenMs) : std::max(e.firstSeenMs, r.firstSeenMs);
+                    const int joins = e.joins + r.joins;
+                    if (hub_last_seen(r) > hub_last_seen(e)) e = r;
+                    e.firstSeenMs = firstMs; e.joins = joins;
+                    break;
+                }
+                if (!dup) fromSessions.push_back(r);
+            }
+        }
+        int added = 0;
+        for (auto& r : fromSessions) {
+            bool listed = false;
+            for (const auto& e : mHistory) if (e.user == r.user) { listed = true; break; }
+            if (listed) continue;
+            if (r.lastLeftMs < r.lastJoinMs) r.lastLeftMs = r.lastJoinMs;
+            mHistory.push_back(std::move(r)); ++added;
+        }
+        std::stable_sort(mHistory.begin(), mHistory.end(), [](const RecentPlayer& a, const RecentPlayer& b) { return hub_last_seen(a) < hub_last_seen(b); });
+        mHistorySeeded = true;
+        mHistoryDirty.store(true, std::memory_order_relaxed);   // written with the mark at the next save
+        std::cout << "[HUB-SESSION] " << added << " previous player(s) taken from the recent sessions\n";
+    }
+    hub_history_prune(mHistory, hub_now_ms(), mHistoryForgetDays.load(std::memory_order_relaxed));
+    std::cout << "[HUB-SESSION] " << mHistory.size() << " previous player(s) loaded from " << path << "\n";
+}
+std::vector<SonobusHubServer::RecentPlayer> SonobusHubServer::previousPlayers(int max) const {
+    std::vector<RecentPlayer> out;
+    {
+        std::lock_guard<std::mutex> g(mRecentMutex);
+        out = mHistory;
+    }
+    hub_history_prune(out, hub_now_ms(), mHistoryForgetDays.load(std::memory_order_relaxed));
+    // connected first (most recent join first), then by when they left
+    auto key = [](const RecentPlayer& r) { return r.lastLeftMs < r.lastJoinMs ? INT64_MAX / 2 + r.lastJoinMs : r.lastLeftMs; };
+    std::stable_sort(out.begin(), out.end(), [&key](const RecentPlayer& a, const RecentPlayer& b) { return key(a) > key(b); });
+    if (max > 0 && (int) out.size() > max) out.resize((size_t) max);
+    return out;
+}
+void SonobusHubServer::setPreviousPlayersForgetDays(int days) {
+    days = std::max(0, std::min(days, 36500));
+    if (mHistoryForgetDays.exchange(days, std::memory_order_relaxed) != days) mHistoryDirty.store(true, std::memory_order_relaxed);
+}
+// The names and install ids that removals in force keep out.
+static bool hub_removal_holds(const SonobusHubServer::RemovedPlayer& b, const std::string& user, const std::string& id) {
+    if (!b.user.empty() && b.user == user) return true;
+    if (!b.id.empty() && b.id == id) return true;
+    return std::find(b.aka.begin(), b.aka.end(), user) != b.aka.end();
+}
+std::vector<SonobusHubServer::PreviousRow> SonobusHubServer::previousRows() const {
+    const auto removed = removedPlayers();   // newest first
+    const auto list = previousPlayers(0);
+    std::vector<PreviousRow> out;
+    out.reserve(list.size() + removed.size());
+    std::vector<bool> used(list.size(), false);
+    for (const auto& b : removed) {
+        PreviousRow own; own.removed = true; own.removal = b;   // the removed name itself; shown even when it has left the list
+        own.player.user = b.user; own.player.ip = b.ip; own.player.id = b.id;
+        std::vector<PreviousRow> others;   // the same install under other names
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (used[i] || !hub_removal_holds(b, list[i].user, list[i].id)) continue;
+            used[i] = true;
+            if (list[i].user == b.user) { own.player = list[i]; continue; }
+            PreviousRow row; row.player = list[i]; row.removed = true; row.removal = b;
+            others.push_back(std::move(row));
+        }
+        out.push_back(std::move(own));
+        for (auto& r : others) out.push_back(std::move(r));
+    }
+    for (size_t i = 0; i < list.size(); ++i) if (!used[i]) { PreviousRow row; row.player = list[i]; out.push_back(std::move(row)); }
+    std::map<std::string, std::vector<const std::string*>> namesOf;   // other names of the same install
+    for (const auto& o : list) if (!o.id.empty()) namesOf[o.id].push_back(&o.user);
+    for (auto& row : out) {
+        if (row.player.id.empty()) continue;
+        const auto it = namesOf.find(row.player.id);
+        if (it == namesOf.end() || it->second.size() < 2) continue;
+        for (const std::string* n : it->second) if (*n != row.player.user) row.alsoSeenAs += (row.alsoSeenAs.empty() ? "" : ", ") + *n;
+    }
+    return out;
+}
+bool SonobusHubServer::forgetPreviousPlayer(const std::string& user, std::string& err) {
+    const auto removed = removedPlayers();
+    std::lock_guard<std::mutex> g(mRecentMutex);
+    for (auto it = mHistory.begin(); it != mHistory.end(); ++it) {
+        if (it->user != user) continue;
+        if (it->lastLeftMs < it->lastJoinMs) { err = "that player is connected now"; return false; }
+        for (const auto& b : removed) if (hub_removal_holds(b, it->user, it->id)) { err = "that player is removed: allow back first"; return false; }
+        mHistory.erase(it);
+        std::cout << "[HUB-SESSION] forgot previous player '" << user << "'\n";
+        historySaveLocked();
+        return true;
+    }
+    err = "no such player"; return false;
+}
+int SonobusHubServer::clearPreviousPlayers() {
+    const auto removed = removedPlayers();
+    std::lock_guard<std::mutex> g(mRecentMutex);
+    const size_t before = mHistory.size();
+    mHistory.erase(std::remove_if(mHistory.begin(), mHistory.end(), [&removed](const RecentPlayer& r) {
+        if (r.lastLeftMs < r.lastJoinMs) return false;
+        for (const auto& b : removed) if (hub_removal_holds(b, r.user, r.id)) return false;   // removed players stay listed
+        return true; }), mHistory.end());
+    const int gone = (int) (before - mHistory.size());
+    std::cout << "[HUB-SESSION] previous players cleared (" << gone << " forgotten, " << mHistory.size() << " connected or removed kept)\n";
+    historySaveLocked();
+    return gone;
 }
 std::vector<SonobusHubServer::SessionRecord> SonobusHubServer::sessions() const {
     std::lock_guard<std::mutex> g(mRecentMutex);
@@ -1919,6 +2131,11 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
                 std::cerr << "[HUB] WARNING: failed to apply LAN subnet " << mLanSubnetCidr << " — continuing without classification.\n";
             }
         }
+        // The join check is in place before the first join: players who reconnect at once after a restart
+        // must meet the removals and the stage limit too
+        g_hubForJoinGate.store(this, std::memory_order_release);
+        aoo_sb_set_join_gate(&hub_join_gate);
+        aoo_sb_set_stage_max_players(stageSettings().maxPlayers);
         mServerThread = std::make_unique<std::thread>([this]() {
             std::cout << "[HUB] Local AOO signaling server running on port " << mLocalServerPort << "\n";
             mAooServer->run();
@@ -2140,6 +2357,13 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
     mStatsThread = std::make_unique<std::thread>([this]() { statsWriterThread(); });
     mPortCheckThread = std::make_unique<std::thread>([this]() { portCheckThreadMain(); });   
     if (mRunLocalServer) aoo_sb_set_fwprobe_req_handler(&hub_fwprobe_req_from_server);   // answer other hubs' port checks on server_port
+    {   // the shared-address rule of the join check (SB_HUB_TEST_GATEWAY: test aid, run-scoped)
+        const std::string testGw = hub_tap_str("SB_HUB_TEST_GATEWAY", "");
+        const std::string gw = testGw.empty() ? hub_default_gateway() : testGw;
+        { std::lock_guard<std::mutex> l(mStageMutex); mGatewayIp = gw; }
+        std::cout << "[HUB-REMOVED] default gateway " << (gw.empty() ? std::string("not found") : gw) << (testGw.empty() ? "" : " (SB_HUB_TEST_GATEWAY)")
+                  << ": a removal's address is not used for players who arrive from it\n";
+    }
     g_hubForJoinGate.store(this, std::memory_order_release);
     aoo_sb_set_join_gate(&hub_join_gate);
     aoo_sb_set_stage_max_players(stageSettings().maxPlayers);
@@ -2211,11 +2435,18 @@ void SonobusHubServer::stop() {
     // Force-drain here, on this control thread, so the removed peers'
     // ~HubPeer run now rather than at hub destruction.
     drainRetiredSnapshots(true);
+    {   // previous players: whoever was still here left now
+        const int64_t now = hub_now_ms();
+        std::lock_guard<std::mutex> g(mRecentMutex);
+        for (auto& h : mHistory) if (h.lastLeftMs < h.lastJoinMs) h.lastLeftMs = now;
+        historySaveLocked();
+    }
     }   // wasRunning
 
     // From here down runs for a never-started server too.
     // Nothing below the `mRunning = true` line of start() exists in that
     // case (no reader threads, no peers), so this is plain resource release.
+    { SonobusHubServer* self = this; if (g_hubForJoinGate.compare_exchange_strong(self, nullptr)) aoo_sb_set_join_gate(nullptr); }   // a failed start set it
     mClient.reset();   // no run thread ever started for it if !wasRunning
 
     if (mAooServer) mAooServer->quit();   // unblocks mAooServer->run() in mServerThread
@@ -3674,8 +3905,8 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
         } catch (const osc::Exception&) {}
         return;
     }
-    // A player reports its version, system and instrument (/sb/hxver s:version s:os [s:instrument], re-sent with its
-    // 10-s report). Control path only.
+    // A player reports its version, system and instrument (/sb/hxver s:version s:os [s:instrument] [s:plugin]
+    // [s:install id], re-sent with its 10-s report). Control path only.
     if (n >= SB_HXMSG_DOMAIN_LEN + 6 && std::memcmp(tail, "/hxver", 6) == 0) {
         if (srcAddr->ss_family != AF_INET) return;
         const auto* sa_in = (const struct sockaddr_in*)srcAddr;
@@ -3696,16 +3927,24 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             std::string ver = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
             std::string os  = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
             std::string inst = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string((it++)->AsString()) : std::string();
-            std::string plug = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string(it->AsString()) : std::string();
+            std::string plug = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string((it++)->AsString()) : std::string();
+            const std::string pid = (it != rm.ArgumentsEnd() && it->IsString()) ? hub_clean_id(it->AsString()) : std::string();
             if (ver.size() > 60) ver.resize(60);
             if (os.size() > 16) os.resize(16);
             if (inst.size() > 24) inst.resize(24);
             if (plug.size() > 40) plug.resize(40);
             auto clean = [](std::string& t){ for (auto& c : t) if ((unsigned char) c < 32 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&') c = ' '; };
             clean(ver); clean(os); clean(inst); clean(plug);
-            bool changed = false, instChanged = false;
+            bool changed = false, instChanged = false, idChanged = false;
             { std::lock_guard<std::mutex> vl(who->verLock); changed = (who->clientVersion != ver || who->clientOs != os); who->clientVersion = ver; who->clientOs = os;
-              instChanged = who->clientInstrument != inst; who->clientInstrument = inst; who->clientPlugin = plug; }
+              instChanged = who->clientInstrument != inst; who->clientInstrument = inst; who->clientPlugin = plug;
+              idChanged = !pid.empty() && who->clientId != pid; if (idChanged) who->clientId = pid; }
+            if (idChanged) {   // once per join: the client thread checks it against the removals
+                PlayerIdNote note {}; note.user = who->userName; note.id = pid;
+                std::memcpy(&note.addr, srcAddr, sizeof(struct sockaddr_in)); note.addrlen = (socklen_t) sizeof(struct sockaddr_in);
+                { std::lock_guard<std::mutex> il(mIdNoteMutex); mIdNotes.push_back(std::move(note)); }
+                mIdNotesPending.store(true, std::memory_order_release);
+            }
             if (instChanged) mStageGen.fetch_add(1, std::memory_order_relaxed);   // the listing shows it: check in again
             if (changed) std::cout << "[HUB-VER] '" << who->userName << "' runs " << ver << " on " << os << "\n";
         } catch (const osc::Exception&) {}
@@ -5887,6 +6126,9 @@ void SonobusHubServer::statsWriterThread() {
     // Connected-socket EPIPE self-heal
     // scan, once a second (a dead socket = a deaf listener until healed).
     auto nextHealScan = clock::now() + std::chrono::seconds(1);
+    uint64_t stageStatusIn = 0, stageStatusOut = 0;   // totals at the last status file
+    auto stageStatusAt = clock::now();
+    bool stageStatusHave = false;
 
     // Tick stalls: this thread reads the tick's worst block-to-block gap of the window every 200 ms and logs a
     // rise past the limit once, with the time it was seen.
@@ -6179,6 +6421,19 @@ void SonobusHubServer::statsWriterThread() {
         }
         if (!mRunning.load()) break;
         nextTick += std::chrono::seconds(5);
+        if (sb_hub_gui::hub_settings::isStage()) {   // a small status file for the main hub's Other stages list
+            const UiSnapshot us = snapshotForUI();
+            bool portsBlocked = false;
+            { std::lock_guard<std::mutex> lk(mPortCheckMutex); portsBlocked = mPortCheckBlocked; }
+            const auto at = clock::now();
+            const double secs = std::chrono::duration<double>(at - stageStatusAt).count();
+            if (stageStatusHave && secs > 0.5)
+                sb_hub_gui::hub_settings::writeStageStatus((int) us.peers.size(), us.bytesInTotal >= stageStatusIn ? (double) (us.bytesInTotal - stageStatusIn) / secs : 0.0,
+                                                           us.bytesOutTotal >= stageStatusOut ? (double) (us.bytesOutTotal - stageStatusOut) / secs : 0.0,   // the out total falls when a player leaves
+                                                           us.portCheckState == 2 && !portsBlocked ? 0 : us.portCheckState,   // "closed" only on a verdict from outside
+                                                           mPortCheckRuns.load(std::memory_order_relaxed), us.portCheckText);
+            stageStatusIn = us.bytesInTotal; stageStatusOut = us.bytesOutTotal; stageStatusAt = at; stageStatusHave = true;
+        }
 
         // Drain the window: exchange-to-zero on counters + maxes, copy+clear
         // the histogram bucket-by-bucket. Audio thread keeps writing into the
@@ -7117,8 +7372,12 @@ void SonobusHubServer::clientRunThread() {
             }
         }
 
+        if (mIdNotesPending.exchange(false, std::memory_order_acquire)) handlePlayerIdNotes();
+        // Previous players file: written here, never on the receive path
+        if (mHistoryDirty.exchange(false, std::memory_order_relaxed)) { std::lock_guard<std::mutex> g(mRecentMutex); historySaveLocked(); }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+    if (mHistoryDirty.exchange(false, std::memory_order_relaxed)) { std::lock_guard<std::mutex> g(mRecentMutex); historySaveLocked(); }
 
     std::cout << "[HUB] Client run thread stopped.\n";
 }
@@ -7443,9 +7702,95 @@ static bool hub_removal_over(const SonobusHubServer::RemovedPlayer& b, int64_t n
     return b.kind == SonobusHubServer::RemovalKind::Timed && b.untilMs <= now;
 }
 
+static std::string hub_removal_reason(const SonobusHubServer::RemovedPlayer& b, int64_t now) {
+    if (b.kind != SonobusHubServer::RemovalKind::Timed) return "The host removed you from this stage.";
+    const int64_t mins = std::max<int64_t>(1, (b.untilMs - now + 59999) / 60000);
+    return "The host removed you from this stage. You can rejoin in " + std::to_string(mins) + (mins == 1 ? " minute." : " minutes.");
+}
+
+// A player's install id arrives after its join. One that a removal in force holds is the removed player under
+// another name: it is told why and dropped, and the new name joins the removal so the next join is refused at once.
+void SonobusHubServer::handlePlayerIdNotes() {
+    std::vector<PlayerIdNote> notes;
+    { std::lock_guard<std::mutex> il(mIdNoteMutex); notes.swap(mIdNotes); }
+    for (const auto& n : notes) {
+        {
+            std::lock_guard<std::mutex> g(mRecentMutex);
+            for (auto& h : mHistory) if (h.user == n.user) { if (h.id != n.id) { h.id = n.id; mHistoryDirty.store(true, std::memory_order_relaxed); } break; }
+        }
+        const int64_t now = hub_now_ms();
+        std::string why, oldName, ip;
+        bool savePermanent = false;
+        {
+            std::lock_guard<std::mutex> l(mStageMutex);
+            for (auto& b : mStageBlocks) {
+                if (hub_removal_over(b, now) || b.id.empty() || b.id != n.id) continue;
+                why = hub_removal_reason(b, now); oldName = b.user;
+                if (b.user != n.user && std::find(b.aka.begin(), b.aka.end(), n.user) == b.aka.end() && b.aka.size() < 50) {
+                    b.aka.push_back(n.user);
+                    savePermanent = b.kind == RemovalKind::Permanent;
+                }
+                break;
+            }
+        }
+        if (why.empty()) continue;
+        if (savePermanent) removedPlayersSave();
+        char ipBuf[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &((const struct sockaddr_in*)&n.addr)->sin_addr, ipBuf, sizeof(ipBuf));
+        connLog("join-refused", ipBuf, n.user, mGroupName, "removed by the host (same player as removed '" + oldName + "')");
+        if (mSocket >= 0) {
+            char rbuf[384];
+            try {
+                osc::OutboundPacketStream m(rbuf, sizeof(rbuf));
+                m << osc::BeginMessage(SB_HXMSG_DOMAIN "/hxremoved") << why.c_str() << osc::EndMessage;
+                for (int k = 0; k < 2; ++k) ::sendto(mSocket, m.Data(), m.Size(), 0, (const struct sockaddr*)&n.addr, n.addrlen);
+            } catch (const osc::Exception&) {}
+        }
+        aoo_sb_kick_user(n.user.c_str());
+    }
+}
+
+// This computer's default gateway (IPv4 text), empty when not found. Asked once at start.
+static std::string hub_default_gateway() {
+    std::string gw;
+#if defined(_WIN32)
+    MIB_IPFORWARDROW row {};
+    if (GetBestRoute(htonl(0x08080808u), 0, &row) == NO_ERROR && row.dwForwardNextHop != 0) {
+        struct in_addr a {}; a.s_addr = row.dwForwardNextHop;
+        char buf[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &a, buf, sizeof(buf))) gw = buf;
+    }
+#elif defined(__APPLE__)
+    if (FILE* p = popen("/sbin/route -n get default 2>/dev/null", "r")) {
+        char line[256];
+        while (fgets(line, sizeof(line), p)) {
+            const char* g = std::strstr(line, "gateway:");
+            if (!g) continue;
+            g += 8; while (*g == ' ' || *g == '\t') ++g;
+            gw.assign(g); while (!gw.empty() && (gw.back() == '\n' || gw.back() == '\r' || gw.back() == ' ')) gw.pop_back();
+        }
+        pclose(p);
+    }
+#else
+    std::ifstream f("/proc/net/route");
+    std::string line;
+    while (std::getline(f, line)) {
+        char ifn[64]; unsigned long dest = 1, gate = 0; unsigned flags = 0;
+        if (std::sscanf(line.c_str(), "%63s %lx %lx %x", ifn, &dest, &gate, &flags) != 4 || dest != 0 || !(flags & 0x2) || gate == 0) continue;
+        struct in_addr a {}; a.s_addr = (in_addr_t) gate;   // the file holds it in network byte order
+        char buf[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &a, buf, sizeof(buf))) gw = buf;
+        break;
+    }
+#endif
+    struct in_addr chk {};
+    if (inet_pton(AF_INET, gw.c_str(), &chk) != 1) gw.clear();
+    return gw;
+}
+
 bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes, RemovalKind kind) {
     if (userName.empty()) return false;
-    std::string ip;
+    std::string ip, id;
     bool found = false;
     struct sockaddr_storage toAddr {};
     socklen_t toLen = 0;
@@ -7454,6 +7799,7 @@ bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes,
         for (auto& p : mPeers) {
             if (!p || p->userName != userName) continue;
             found = true;
+            { std::lock_guard<std::mutex> vl(p->verLock); id = p->clientId; }
             if (p->active && p->addrlen > 0) { std::memcpy(&toAddr, &p->addr, sizeof(toAddr)); toLen = (socklen_t) p->addrlen; }
             char ipBuf[INET6_ADDRSTRLEN] = {0};
             if (p->addr.ss_family == AF_INET) inet_ntop(AF_INET, &((const struct sockaddr_in*)&p->addr)->sin_addr, ipBuf, sizeof(ipBuf));
@@ -7462,6 +7808,10 @@ bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes,
             break;
         }
     }
+    if (ip.empty() || id.empty()) {   // gone: the address and the install id from the previous players list
+        std::lock_guard<std::mutex> g(mRecentMutex);
+        for (const auto& h : mHistory) if (h.user == userName) { if (ip.empty()) ip = hub_plain_ip(h.ip); if (id.empty()) id = h.id; break; }
+    }
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     bool savePermanent = kind == RemovalKind::Permanent;
     {
@@ -7469,12 +7819,14 @@ bool SonobusHubServer::kickPlayer(const std::string& userName, int blockMinutes,
         mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const RemovedPlayer& b) { return hub_removal_over(b, now); }), mStageBlocks.end());
         if (kind != RemovalKind::Timed || blockMinutes > 0) {
             RemovedPlayer e;
-            e.user = userName; e.ip = ip; e.removedAtMs = now; e.kind = kind;
+            e.user = userName; e.ip = ip; e.id = id; e.removedAtMs = now; e.kind = kind;
             e.untilMs = kind == RemovalKind::Timed ? now + (int64_t) blockMinutes * 60000 : 0;
-            // One entry per name: a new removal replaces the old one and keeps its address when the player is gone.
+            // One entry per name: a new removal replaces the old one and keeps what it knew when the player is gone.
             for (auto it = mStageBlocks.begin(); it != mStageBlocks.end();) {
                 if (it->user != userName) { ++it; continue; }
                 if (e.ip.empty()) e.ip = it->ip;
+                if (e.id.empty()) e.id = it->id;
+                if (e.id == it->id) e.aka = it->aka;
                 if (it->kind == RemovalKind::Permanent) savePermanent = true;
                 it = mStageBlocks.erase(it);
             }
@@ -7533,7 +7885,7 @@ bool SonobusHubServer::allowBack(const std::string& userName, const std::string&
     return true;
 }
 
-// hub_removed_players.json: {"_schema":1,"removed":[{"user":"name","ip":"1.2.3.4","at":ms}, ...]}
+// hub_removed_players.json: {"_schema":1,"removed":[{"user":"name","ip":"1.2.3.4","at":ms,"id":"hex","aka":["name"]}, ...]}
 // Permanent removals only, oldest first. Written whole on every change (a rare event).
 void SonobusHubServer::removedPlayersSave() {
     std::lock_guard<std::mutex> fl(mRemovedFileMutex);
@@ -7544,7 +7896,14 @@ void SonobusHubServer::removedPlayersSave() {
         bool first = true;
         for (const auto& b : mStageBlocks) {
             if (b.kind != RemovalKind::Permanent) continue;
-            o << (first ? "" : ",\n") << " {\"user\":\"" << hub_json_esc(b.user) << "\",\"ip\":\"" << hub_json_esc(b.ip) << "\",\"at\":" << b.removedAtMs << "}";
+            o << (first ? "" : ",\n") << " {\"user\":\"" << hub_json_esc(b.user) << "\",\"ip\":\"" << hub_json_esc(b.ip) << "\",\"at\":" << b.removedAtMs;
+            if (!b.id.empty()) o << ",\"id\":\"" << hub_json_esc(b.id) << "\"";
+            if (!b.aka.empty()) {
+                o << ",\"aka\":[";
+                for (size_t i = 0; i < b.aka.size(); ++i) o << (i ? "," : "") << "\"" << hub_json_esc(b.aka[i]) << "\"";
+                o << "]";
+            }
+            o << "}";
             first = false;
         }
     }
@@ -7587,6 +7946,8 @@ void SonobusHubServer::setRemovedPlayersFile(const std::string& path) {
                 RemovedPlayer e;
                 e.user = hub_json_member(m, "user"); e.ip = hub_json_member(m, "ip");
                 e.removedAtMs = atoll(hub_json_member(m, "at").c_str());
+                e.id = hub_clean_id(hub_json_member(m, "id"));
+                for (const auto& kv : m) if (kv.first == "aka") for (const auto& a : hub_json_items(kv.second)) { const std::string n = hub_json_unquote(a); if (!n.empty()) e.aka.push_back(n); }
                 e.kind = RemovalKind::Permanent;
                 if (!e.user.empty() || !e.ip.empty()) loaded.push_back(std::move(e));
             }
@@ -7618,12 +7979,11 @@ std::string SonobusHubServer::stageJoinRefusal(const std::string& ipRaw, const s
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> l(mStageMutex);
     mStageBlocks.erase(std::remove_if(mStageBlocks.begin(), mStageBlocks.end(), [now](const RemovedPlayer& b) { return hub_removal_over(b, now); }), mStageBlocks.end());
+    // Players who come in through the router's own address (the public name used from inside the network) all show
+    // the gateway's address, so that address alone keeps nobody out: there the name and the install id decide.
+    const bool sharedAddr = !mGatewayIp.empty() && ip == mGatewayIp;
     for (const auto& b : mStageBlocks) {
-        if ((!b.user.empty() && b.user == user) || (!b.ip.empty() && b.ip == ip)) {
-            if (b.kind != RemovalKind::Timed) return "The host removed you from this stage.";
-            const int64_t mins = std::max<int64_t>(1, (b.untilMs - now + 59999) / 60000);
-            return "The host removed you from this stage. You can rejoin in " + std::to_string(mins) + (mins == 1 ? " minute." : " minutes.");
-        }
+        if (hub_removal_holds(b, user, std::string()) || (!sharedAddr && !b.ip.empty() && b.ip == ip)) return hub_removal_reason(b, now);
     }
     if (mStage.maxPlayers > 0 && othersInStage >= mStage.maxPlayers)
         return "This stage is full (" + std::to_string(othersInStage) + " of " + std::to_string(mStage.maxPlayers) + " players).";

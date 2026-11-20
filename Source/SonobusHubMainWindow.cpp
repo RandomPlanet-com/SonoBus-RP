@@ -95,6 +95,22 @@ static juce::String hubDurText(int64_t secs) {
     if (h > 0) return juce::String(h) + "h " + juce::String(m).paddedLeft('0', 2) + "m";
     return juce::String(m) + "m " + juce::String(sec).paddedLeft('0', 2) + "s";
 }
+// The removal question shared by Kick (live table) and Remove (previous players): how long.
+static void hubAskRemoval(juce::Component* parent, const juce::String& title, const juce::String& text,
+                          std::function<void(SonobusHubServer::RemovalKind keep)> done) {
+    auto* w = new juce::AlertWindow(title, text + "\n\nYou can allow them back at any time in the Previous players list.",
+                                    juce::MessageBoxIconType::QuestionIcon, parent);
+    w->addComboBox("keep", { "1 hour", "Until the hub restarts", "Permanently" }, "Keep them out:");
+    w->addButton("Remove", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    w->enterModalState(true, juce::ModalCallbackFunction::create([w, done](int r) {
+        if (r != 1 || !done) return;
+        const auto* box = w->getComboBoxComponent("keep");
+        const int pick = box ? box->getSelectedItemIndex() : 0;
+        done(pick == 2 ? SonobusHubServer::RemovalKind::Permanent : pick == 1 ? SonobusHubServer::RemovalKind::UntilRestart
+                                                                           : SonobusHubServer::RemovalKind::Timed);
+    }), true);
+}
 // "1:43 pm" local time from epoch ms.
 static juce::String hubClockShort(int64_t epochMs) {
     juce::Time t(epochMs);
@@ -205,8 +221,7 @@ void StatusHeader::paint(juce::Graphics& g) {
 }
 
 juce::String StatusHeader::getTooltip() {
-    const auto base = juce::SettableTooltipClient::getTooltip();
-    return mCutLines.isEmpty() ? base : mCutLines.joinIntoString("\n") + "\n\n" + base;
+    return mCutLines.joinIntoString("\n");   // only the lines drawn shortened: no hover text over the whole block
 }
 
 // ─── UpdateBanner ─────────────────────────────────────────────────────────────
@@ -360,20 +375,8 @@ void PeerTable::mouseDown(const juce::MouseEvent& e) {
         menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition(),
             [sp = juce::Component::SafePointer<PeerTable>(this), user](int result) {
                 if (result != 1 || !sp) return;
-                auto* w = new juce::AlertWindow("Remove player",
-                    "Remove " + juce::String::fromUTF8(user.c_str()) + " from the stage?\n\nYou can allow them back at any time under Removed players.",
-                    juce::MessageBoxIconType::QuestionIcon, sp.getComponent());
-                w->addComboBox("keep", { "1 hour", "Until the hub restarts", "Permanently" }, "Keep them out:");
-                w->addButton("Remove", 1, juce::KeyPress(juce::KeyPress::returnKey));
-                w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-                w->enterModalState(true, juce::ModalCallbackFunction::create([w, sp, user](int r) {
-                    if (r != 1 || !sp || !sp->onKick) return;
-                    const auto* box = w->getComboBoxComponent("keep");
-                    const int pick = box ? box->getSelectedItemIndex() : 0;
-                    sp->onKick(user, pick == 2 ? SonobusHubServer::RemovalKind::Permanent
-                                   : pick == 1 ? SonobusHubServer::RemovalKind::UntilRestart
-                                               : SonobusHubServer::RemovalKind::Timed);
-                }), true);
+                hubAskRemoval(sp.getComponent(), "Remove player", "Remove " + juce::String::fromUTF8(user.c_str()) + " from the stage?",
+                    [sp, user](SonobusHubServer::RemovalKind keep) { if (sp && sp->onKick) sp->onKick(user, keep); });
             });
         return;
     }
@@ -617,6 +620,12 @@ juce::String PeerTable::getTooltip() {
     }
     if (mHoverCol == 7)   // To / From hub: the player's audio interface, as it reports it
         return p.clientIfaceMs >= 0.0f ? "Audio interface " + juce::String(p.clientIfaceMs, 1) + " ms" : juce::String("Audio interface: not known");
+    if (mHoverCol == 15 && ! p.clientVersion.empty()) {   // Version: the build, and a plugin's format and host
+        juce::String t = juce::String::fromUTF8(p.clientVersion.c_str());
+        const juce::String plug = juce::String::fromUTF8(p.clientPlugin.c_str());
+        if (plug.isNotEmpty() && ! t.contains(plug)) t << "\n" << plug;
+        return t;
+    }
     return {};
 }
 
@@ -755,13 +764,15 @@ juce::String RecentTable::getTooltip() {
     return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
 }
 
-// ─── RemovedTable ───────────────────────────────────────
-static juce::String hubRemovalLeftText(const SonobusHubServer::RemovedPlayer& r, int64_t nowMs) {
-    if (r.kind == SonobusHubServer::RemovalKind::Permanent) return "permanent";
-    if (r.kind == SonobusHubServer::RemovalKind::UntilRestart) return "until restart";
-    return juce::String((int) std::max<int64_t>(1, (r.untilMs - nowMs + 59999) / 60000)) + " min";
+// How long a removal lasts, as the previous players list words it
+static juce::String hubRemovalText(const SonobusHubServer::RemovedPlayer& r, int64_t nowMs) {
+    if (r.kind == SonobusHubServer::RemovalKind::Permanent) return "Removed for good";
+    if (r.kind == SonobusHubServer::RemovalKind::UntilRestart) return "Removed until the hub restarts";
+    return juce::String::fromUTF8("Removed \xc2\xb7 ") + juce::String((int) std::max<int64_t>(1, (r.untilMs - nowMs + 59999) / 60000)) + " min left";
 }
-RemovedTable::RemovedTable() {
+
+// ─── PreviousTable ──────────────────────────────────────
+PreviousTable::PreviousTable() {
     addChildComponent(mScroll);
     mScroll.setAutoHide(false);
     mScroll.setSingleStepSize(1.0);
@@ -769,12 +780,12 @@ RemovedTable::RemovedTable() {
     mScroll.setColour(juce::ScrollBar::trackColourId, pal::panelLight.brighter(0.25f));
     mScroll.addListener(this);
 }
-void RemovedTable::setRows(std::vector<SonobusHubServer::RemovedPlayer> rows) {
+void PreviousTable::setRows(std::vector<SonobusHubServer::PreviousRow> rows) {
     mRows = std::move(rows);
     layoutScroll();
     repaint();
 }
-void RemovedTable::layoutScroll() {
+void PreviousTable::layoutScroll() {
     const int rows = (int) mRows.size();
     const int visible = std::max(1, (getHeight() - kHeaderH) / kRowH);
     mFirstRow = std::max(0, std::min(mFirstRow, rows - visible));
@@ -783,66 +794,117 @@ void RemovedTable::layoutScroll() {
     mScroll.setCurrentRange((double) mFirstRow, (double) visible, juce::dontSendNotification);
     mScroll.setVisible(rows > visible);
 }
-void RemovedTable::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) {
+void PreviousTable::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) {
     const int visible = std::max(1, (getHeight() - kHeaderH) / kRowH);
     const int maxFirst = std::max(0, (int) mRows.size() - visible);
     const int step = wheel.deltaY > 0 ? -1 : wheel.deltaY < 0 ? 1 : 0;
     const int nf = std::max(0, std::min(maxFirst, mFirstRow + step));
     if (nf != mFirstRow) { mFirstRow = nf; mScroll.setCurrentRangeStart((double) nf, juce::dontSendNotification); repaint(); }
 }
-void RemovedTable::mouseDown(const juce::MouseEvent& e) {
-    if (e.mods.isPopupMenu() || e.y < kHeaderH || !onAllowBack) return;
-    const int row = mFirstRow + (e.y - kHeaderH) / kRowH;
-    if (row < 0 || row >= (int) mRows.size() || e.x < mButtonX || e.x >= mButtonX + 92) return;
-    const std::string user = mRows[(size_t) row].user, ip = mRows[(size_t) row].ip;   // copies: the callback replaces the rows
-    onAllowBack(user, ip);
+bool PreviousTable::anyGone() const {
+    for (const auto& r : mRows) if (!r.removed && r.player.lastLeftMs >= r.player.lastJoinMs) return true;
+    return false;
 }
-void RemovedTable::paint(juce::Graphics& g) {
-    constexpr int kNumCols = 5;
-    int colW[kNumCols] = { 220, 200, 170, 120, 110 };   // the Player column takes what is left
-    static const char* colName[kNumCols] = { "Player", "Address", "Removed", "Time left", "" };
+void PreviousTable::mouseDown(const juce::MouseEvent& e) {
+    if (e.mods.isPopupMenu() || e.y < kHeaderH) return;
+    const int row = mFirstRow + (e.y - kHeaderH) / kRowH;
+    if (row < 0 || row >= (int) mRows.size()) return;
+    const auto& r = mRows[(size_t) row];
+    const auto& p = r.player;
+    if (e.x >= mForgetX && e.x < mForgetX + 28) {   // the X: off the list (not for a connected or a removed player)
+        if (r.removed || p.lastLeftMs < p.lastJoinMs || !onForget) return;
+        const std::string user = p.user;
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Previous players",
+            "Take \"" + juce::String::fromUTF8(user.c_str()) + "\" off the previous players list?", "Take off", "Cancel", this,
+            juce::ModalCallbackFunction::create([sp = juce::Component::SafePointer<PreviousTable>(this), user](int ok) { if (ok == 1 && sp && sp->onForget) sp->onForget(user); }));
+        return;
+    }
+    if (e.x < mButtonX || e.x >= mButtonX + kButtonW) return;
+    if (r.removed) {
+        const std::string user = r.removal.user, ip = r.removal.ip;   // copies: the callback replaces the rows
+        if (onAllowBack) onAllowBack(user, ip);
+        return;
+    }
+    if (onRemove) { const std::string user = p.user; onRemove(user); }   // the rows refresh under the dialog
+}
+void PreviousTable::paint(juce::Graphics& g) {
+    constexpr int kNumCols = 8;
+    int colW[kNumCols] = { 220, 150, 170, 60, 50, 0, kButtonW + 10, 30 };   // the Player column takes what is left
+    static const char* colName[kNumCols] = { "Player", "Location", "Last seen", "Joins", "Net", "Status", "", "" };
     const int paddingX = 10;
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
-    {   // Address grows to the longest address (IPv6), the Player column takes the rest
+    const int64_t nowMs = juce::Time::currentTimeMillis();
+    {   // Status is as wide as the longest removal text shown (no column while nobody is removed); Location grows to
+        // the longest place (the Player column keeps at least 160), Player takes the rest
         const juce::Font cf(14.0f);
-        for (const auto& p : mRows) colW[1] = std::max(colW[1], SbTextFit::textWidth(cf, juce::String::fromUTF8(p.ip.c_str())) + 6 + 12);
-        int fixed = 0; for (int i = 1; i < kNumCols; ++i) fixed += colW[i];
-        colW[0] = std::max(110, std::min(420, area.getWidth() - 2 * paddingX - fixed));
+        int locNeed = 0;
+        for (const auto& r : mRows) {
+            locNeed = std::max(locNeed, SbTextFit::textWidth(cf, juce::String::fromUTF8(r.player.location.c_str())) + 6 + 12);
+            if (r.removed) colW[5] = std::max(colW[5], SbTextFit::textWidth(cf, hubRemovalText(r.removal, nowMs)) + 6 + 14);
+        }
+        const int avail = area.getWidth() - 2 * paddingX;
+        int others = 0; for (int i = 2; i < kNumCols; ++i) others += colW[i];
+        colW[1] = std::max(colW[1], std::min(locNeed, avail - others - 160));
+        colW[0] = std::max(110, avail - others - colW[1]);
     }
     mCut.clear();
-    mButtonX = paddingX + colW[0] + colW[1] + colW[2] + colW[3];
+    mButtonX = paddingX + colW[0] + colW[1] + colW[2] + colW[3] + colW[4] + colW[5];
+    mForgetX = mButtonX + colW[6];
     auto header = area.removeFromTop(kHeaderH);
     g.setColour(pal::panelLight); g.fillRect(header);
     g.setColour(pal::textDim); g.setFont(juce::Font(13.0f, juce::Font::bold));
-    { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { g.drawText(colName[i], x, header.getY(), colW[i], header.getHeight(), juce::Justification::centredLeft); x += colW[i]; } }
+    { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { if (colW[i] > 0) g.drawText(colName[i], x, header.getY(), colW[i], header.getHeight(), juce::Justification::centredLeft); x += colW[i]; } }
     g.setFont(juce::Font(14.0f));
-    const int64_t nowMs = juce::Time::currentTimeMillis();
     int y = area.getY();
     for (size_t r = (size_t) std::max(0, mFirstRow); r < mRows.size(); ++r) {
-        const auto& p = mRows[r];
+        if (y + kRowH > area.getBottom()) break;   // whole rows only; the scroll bar shows the rest
+        const auto& row = mRows[r];
+        const auto& p = row.player;
         g.setColour((r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int x = paddingX, c = 0;
         auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
-        cell(juce::String::fromUTF8(p.user.c_str()), pal::text);
-        cell(p.ip.empty() ? juce::String("-") : juce::String::fromUTF8(p.ip.c_str()), p.ip.empty() ? pal::textDim : pal::text);
-        cell(p.removedAtMs > 0 ? juce::Time(p.removedAtMs).toString(true, true, false, false) : juce::String("-"), pal::text);
-        cell(hubRemovalLeftText(p, nowMs), p.kind == SonobusHubServer::RemovalKind::Timed ? pal::text : pal::yellow);
-        {   // "Allow back" button-ish cell; a click lifts the removal
-            juce::Rectangle<int> btn(x, y + 2, 92, kRowH - 4);
-            g.setColour(pal::accentSoft.brighter(0.2f)); g.fillRoundedRectangle(btn.toFloat(), 4.0f);
-            g.setColour(pal::text); g.setFont(juce::Font(12.0f, juce::Font::bold));
-            g.drawText("Allow back", btn, juce::Justification::centred);
-            g.setFont(juce::Font(14.0f));
+        const bool connected = p.lastLeftMs < p.lastJoinMs;
+        const bool seen = p.joins > 0;   // false: a removed player whose name has left the list
+        juce::String name = p.user.empty() ? juce::String("-") : juce::String::fromUTF8(p.user.c_str());
+        if (!row.alsoSeenAs.empty()) name << "   (also seen as " << juce::String::fromUTF8(row.alsoSeenAs.c_str()) << ")";
+        cell(name, pal::text);
+        cell(p.location.empty() ? juce::String("-") : juce::String::fromUTF8(p.location.c_str()), p.location.empty() ? pal::textDim : pal::text);
+        cell(connected ? juce::String("connected") : (p.lastLeftMs > 0 ? juce::Time(p.lastLeftMs).toString(true, true, false, false) : juce::String("-")), connected ? pal::green : (p.lastLeftMs > 0 ? pal::text : pal::textDim));
+        cell(seen ? juce::String(p.joins) : juce::String("-"), seen ? pal::text : pal::textDim);
+        cell(seen ? (p.lan ? "LAN" : "WAN") : "-", pal::textDim);
+        if (row.removed) {   // how long; the hover adds the address
+            const juce::String t = hubRemovalText(row.removal, nowMs);
+            g.setColour(pal::yellow); g.drawText(t, x, y, colW[c] - 6, kRowH, juce::Justification::centredLeft);
+            mCut.push_back({ { x, y, colW[c] - 6, kRowH }, row.removal.ip.empty() ? t : t + juce::String::fromUTF8(" \xc2\xb7 address ") + juce::String::fromUTF8(row.removal.ip.c_str()) });
         }
+        x += colW[c]; ++c;
+        {   // "Allow back" lifts the removal; "Remove" asks how long
+            juce::Rectangle<int> btn(x, y + 2, kButtonW, kRowH - 4);
+            g.setColour(row.removed ? pal::accentSoft.brighter(0.2f) : juce::Colour(0xff5a2a2a)); g.fillRoundedRectangle(btn.toFloat(), 4.0f);
+            g.setColour(pal::text); g.setFont(juce::Font(12.0f, juce::Font::bold));
+            g.drawText(row.removed ? "Allow back" : "Remove", btn, juce::Justification::centred);
+            g.setFont(juce::Font(14.0f));
+            x += colW[c]; ++c;
+        }
+        // the X is dim on a removed player's row (allow back first) and absent on a connected one
+        cell(connected ? juce::String() : juce::String(juce::CharPointer_UTF8("\xc3\x97")), row.removed ? pal::textDim.withAlpha(0.45f) : pal::red);
         y += kRowH;
         if (y > area.getBottom()) break;
     }
+    if (mRows.empty()) {
+        g.setColour(pal::textDim); g.setFont(juce::Font(14.0f, juce::Font::italic));
+        g.drawText("(nobody has joined yet)", area, juce::Justification::centred);
+    }
 }
-
-juce::String RemovedTable::getTooltip() {
-    const auto t = hubCutTextAt(mCut, getMouseXYRelative());
+juce::String PreviousTable::getTooltip() {
+    const auto pos = getMouseXYRelative();
+    if (pos.y >= kHeaderH && pos.x >= mForgetX && pos.x < mForgetX + 28) {
+        const int row = mFirstRow + (pos.y - kHeaderH) / kRowH;
+        if (row >= 0 && row < (int) mRows.size() && mRows[(size_t) row].removed) return "Allow back first";
+    }
+    const auto t = hubCutTextAt(mCut, pos);
     return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
 }
 
@@ -1041,15 +1103,6 @@ StatusPage::StatusPage() {
     peerLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     peerLabel.setColour(juce::Label::textColourId, pal::accent);
     peerLabel.setColour(juce::Label::backgroundColourId, pal::bg);
-    // Removed players, under the live table; hidden while nobody is removed
-    addChildComponent(removedLabel);
-    addChildComponent(removedTable);
-    removedLabel.setText("  Removed players", juce::dontSendNotification);
-    removedLabel.setFont(juce::Font(16.0f, juce::Font::bold));
-    removedLabel.setColour(juce::Label::textColourId, pal::accent);
-    removedLabel.setColour(juce::Label::backgroundColourId, pal::bg);
-    removedLabel.setTooltip("Players the host removed from this stage. Allow back lets a player join again at once.");
-    removedTable.setTooltip("The name and the address are both kept out. Click Allow back to let the player join again now.");
     // Bottom strip — recent sessions (left) | selected session's personnel + password + Apply (right)
     addAndMakeVisible(sessionsLabel);
     addAndMakeVisible(sessionTable);
@@ -1060,11 +1113,16 @@ StatusPage::StatusPage() {
     sessionsLabel.setTooltip("Stages this hub has served, newest first. Click one to see who was on it; Apply & Restart switches the hub back to that stage with the settings it ran with.");
     addAndMakeVisible(recentLabel);
     addAndMakeVisible(recentTable);
+    addChildComponent(previousTable);
+    addChildComponent(clearPrevious);
+    clearPrevious.setTooltip("Take everyone who is not connected off the previous players list. Removed players stay removed.");
     recentLabel.setText("  Players seen on this stage", juce::dontSendNotification);
     recentLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     recentLabel.setColour(juce::Label::textColourId, pal::accent);
     recentLabel.setColour(juce::Label::backgroundColourId, pal::bg);
     recentLabel.setTooltip("The distinct players seen on the selected stage (from the hub's own join/leave events), newest first");
+    // A label that cannot be edited takes no mouse events, so it would never show its hover text: the section headings do.
+    for (auto* l : { &peerLabel, &sessionsLabel, &recentLabel }) l->setInterceptsMouseClicks(true, false);
     addAndMakeVisible(sessionPwLabel);
     addAndMakeVisible(sessionPwEditor);
     addAndMakeVisible(sessionApply);
@@ -1121,11 +1179,8 @@ StatusPage::StatusPage() {
     groupLabel.setTooltip("The stage this hub is hosting. Players join by this name.");
     groupEditor.setTooltip("Type a new stage name, then click Apply.");
     groupApply.setTooltip("Switch the hub to this stage. The hub restarts and players must rejoin.");
-    header.setTooltip("This hub's version, addresses, ports and current load.");
     peerLabel.setTooltip("Everyone connected to this hub right now. The heading counts the players connected now and the different players who have joined since the hub started. Hover a column for details.");
     sessionPwLabel.setTooltip("The password for the selected stage.");
-    sessionTable.setTooltip("Stages this hub has hosted. Click a row to select it, or click a column heading to sort.");
-    recentTable.setTooltip("Players seen on the selected stage. Click a column heading to sort.");
     // Copy Stage Link + link text + Re-run port check, like the web page header.
     addAndMakeVisible(copyLinkButton);
     addAndMakeVisible(linkLabel);
@@ -1170,25 +1225,30 @@ void StatusPage::resized() {
     // the selected session's players UNDER it, the password + Apply & Restart row at the very bottom.
     const int sessionsH = 28 + SessionTable::kHeaderH + std::max(3, std::min(6, sessionTable.numRows())) * SessionTable::kRowH + 6;
     const int playersMinH = 28 + 24 + 3 * 22 + 6;
-    const int minStrip = sessionsH + playersMinH + 38;
-    const int removedRows = removedTable.numRows();
-    const int removedH = removedRows > 0 ? 28 + RemovedTable::kHeaderH + std::min((int) RemovedTable::kMaxVisibleRows, removedRows) * RemovedTable::kRowH + 6 : 0;
-    auto strip = bounds.removeFromBottom(std::max(minStrip, bounds.getHeight() - tableH - removedH));
+    const bool stageRow = !previousTable.isVisible();   // the password row belongs to a selected stage
+    const int minStrip = sessionsH + playersMinH + (stageRow ? 38 : 0);
+    auto strip = bounds.removeFromBottom(std::max(minStrip, bounds.getHeight() - tableH));
     auto srow = strip.removeFromTop(sessionsH);
     sessionsLabel.setBounds(srow.removeFromTop(28));
     sessionTable.setBounds(srow.withTrimmedBottom(6));
-    auto arow = strip.removeFromBottom(38).reduced(0, 4);
-    sessionApply.setBounds(arow.removeFromRight(std::max(170, hubButtonWidth(sessionApply, arow.getHeight()))));
-    arow.removeFromRight(10);
-    sessionPwLabel.setBounds(arow.removeFromLeft(std::max(78, SbTextFit::labelWidth(sessionPwLabel))));
-    sessionPwEditor.setBounds(arow.removeFromLeft(std::min(260, arow.getWidth())));
-    recentLabel.setBounds(strip.removeFromTop(28));
-    recentTable.setBounds(strip);
-    if (removedH > 0) {   // between the live table and the strip
-        auto rrow = bounds.removeFromBottom(std::min(removedH, std::max(0, bounds.getHeight() - 28 - PeerTable::kHeaderH)));
-        removedLabel.setBounds(rrow.removeFromTop(28));
-        removedTable.setBounds(rrow.withTrimmedBottom(6));
+    sessionApply.setVisible(stageRow);
+    sessionPwLabel.setVisible(stageRow);
+    sessionPwEditor.setVisible(stageRow);
+    if (stageRow) {
+        auto arow = strip.removeFromBottom(38).reduced(0, 4);
+        sessionApply.setBounds(arow.removeFromRight(std::max(170, hubButtonWidth(sessionApply, arow.getHeight()))));
+        arow.removeFromRight(10);
+        sessionPwLabel.setBounds(arow.removeFromLeft(std::max(78, SbTextFit::labelWidth(sessionPwLabel))));
+        sessionPwEditor.setBounds(arow.removeFromLeft(std::min(260, arow.getWidth())));
     }
+    {
+        auto lrow = strip.removeFromTop(28);
+        recentLabel.setBounds(lrow);
+        lrow.removeFromRight(14);
+        clearPrevious.setBounds(lrow.removeFromRight(std::max(110, hubButtonWidth(clearPrevious, 22))).reduced(0, 3));
+    }
+    recentTable.setBounds(strip);
+    previousTable.setBounds(strip);
     peerLabel.setBounds(bounds.removeFromTop(28));
     // The table keeps every column whole; a window narrower than the table scrolls it sideways
     peerView.setBounds(bounds);
@@ -1196,6 +1256,327 @@ void StatusPage::resized() {
     peerTable.setBounds(0, 0, std::max(bounds.getWidth(), peerTable.requiredWidth()),
                         std::max(0, bounds.getHeight() - (sideways ? peerView.getScrollBarThickness() : 0)));
 }
+
+// ─── OtherStagesPage ──────────────────────────────────
+namespace { void styleButton(juce::TextButton& b, juce::Colour bg, juce::Colour fg); }
+struct OtherStagesPage::Row : public juce::Component {
+    juce::Label name, file, ports, traffic, state;
+    juce::TextButton startStop, forget{"Forget"}, open{"Settings"}, move{"Move ports"}, check{"Check ports"};
+    Row() {
+        addChildComponent(move);
+        addChildComponent(check);
+        check.setTooltip("Test now whether players outside this network can reach this stage.");
+        for (auto* l : { &name, &file, &ports, &traffic, &state }) { addAndMakeVisible(*l); l->setFont(juce::Font(15.0f)); l->setColour(juce::Label::textColourId, pal::text); l->setMinimumHorizontalScale(1.0f); }
+        file.setFont(juce::Font(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+        file.setColour(juce::Label::textColourId, pal::textDim);
+        traffic.setColour(juce::Label::textColourId, pal::textDim);
+        addAndMakeVisible(startStop);
+        addChildComponent(forget);
+        styleButton(forget, pal::panelLight, pal::textDim);
+        addChildComponent(open);
+        styleButton(open, pal::panelLight, pal::text);
+        styleButton(move, pal::panelLight, pal::text);
+        styleButton(check, pal::panelLight, pal::text);
+        open.setTooltip("Open this stage's own window at its settings (name, password, listing, limits). Close it again and the stage keeps running in the background.");
+        traffic.setTooltip("Players on that stage, and what it receives and sends now.");
+        for (auto* l : { &name, &file, &ports, &traffic }) l->setInterceptsMouseClicks(true, false);   // labels show a hover text only when they take the mouse
+    }
+    void paint(juce::Graphics& g) override { g.setColour(pal::panelLight.withAlpha(0.6f)); g.fillRect(0, getHeight() - 1, getWidth(), 1); }
+    void resized() override {
+        auto b = getLocalBounds().reduced(4, 6);
+        forget.setBounds(b.removeFromRight(std::max(90, hubButtonWidth(forget, b.getHeight(), { "Forget", "Delete" }))));
+        b.removeFromRight(8);
+        if (open.isVisible()) { open.setBounds(b.removeFromRight(std::max(96, hubButtonWidth(open, b.getHeight())))); b.removeFromRight(8); }
+        if (check.isVisible()) { check.setBounds(b.removeFromRight(std::max(110, hubButtonWidth(check, b.getHeight())))); b.removeFromRight(8); }
+        if (move.isVisible()) { move.setBounds(b.removeFromRight(std::max(110, hubButtonWidth(move, b.getHeight())))); b.removeFromRight(8); }
+        startStop.setBounds(b.removeFromRight(std::max(90, hubButtonWidth(startStop, b.getHeight(), { "Start", "Stop" }))));
+        b.removeFromRight(12);
+        state.setBounds(b.removeFromRight(std::max(100, SbTextFit::labelWidth(state) + 8)));
+        traffic.setBounds(b.removeFromRight(std::max(250, SbTextFit::labelWidth(traffic) + 8)));
+        ports.setBounds(b.removeFromRight(std::max(250, SbTextFit::labelWidth(ports) + 8)));
+        name.setBounds(b.removeFromLeft(std::min(240, b.getWidth() / 3)));
+        file.setBounds(b);
+        SbTextFit::tooltipIfCut(file, file.getText(), SbTextFit::labelWidth(file));
+        SbTextFit::tooltipIfCut(name, name.getText(), SbTextFit::labelWidth(name));
+    }
+};
+
+OtherStagesPage::OtherStagesPage() {
+    mTitle.setText("Other stages on this computer", juce::dontSendNotification);
+    mTitle.setFont(juce::Font(16.0f, juce::Font::bold));
+    mTitle.setColour(juce::Label::textColourId, pal::accent);
+    mHint.setText("Each stage runs as its own instance on this hub server, with its own settings folder, ports, log and web page. Players join each stage by its own link.", juce::dontSendNotification);
+    mHint.setFont(juce::Font(14.0f));
+    mHint.setColour(juce::Label::textColourId, pal::textDim);
+    mHint.setJustificationType(juce::Justification::topLeft);
+    mEmpty.setText("No other stages yet. New stage... makes one with this hub's audio settings and its own ports.", juce::dontSendNotification);
+    mEmpty.setFont(juce::Font(14.0f, juce::Font::italic));
+    mEmpty.setColour(juce::Label::textColourId, pal::textDim);
+    mMsg.setFont(juce::Font(14.0f));
+    mMsg.setColour(juce::Label::textColourId, pal::textDim);
+    mMsg.setMinimumHorizontalScale(1.0f);
+    mTitle.setTooltip("Other stages this computer hosts. New stage makes one with this hub's audio settings and the next ports; Delete moves its folder to stages-deleted; a stage added by its path can only be taken off the list.");
+    mForward.setFont(juce::Font(15.0f, juce::Font::bold));
+    mForward.setColour(juce::Label::textColourId, pal::text);
+    mForward.setJustificationType(juce::Justification::topLeft);
+    mForward.setTooltip("Open these ports for players outside this network: the main stage and every stage in this list.");
+    addAndMakeVisible(mForward);
+    for (auto* l : { &mTitle, &mForward }) l->setInterceptsMouseClicks(true, false);   // labels show a hover text only when they take the mouse
+    mWarn.setFont(juce::Font(14.0f));
+    mWarn.setColour(juce::Label::textColourId, pal::yellow);
+    mWarn.setJustificationType(juce::Justification::topLeft);
+    for (auto* c : { (juce::Component*) &mTitle, (juce::Component*) &mHint, (juce::Component*) &mMsg, (juce::Component*) &mNew }) addAndMakeVisible(*c);
+    addChildComponent(mEmpty);
+    addChildComponent(mWarn);
+    styleButton(mNew, pal::accentSoft, pal::text);
+    mNew.setTooltip("Make a new stage with this hub's audio settings, its own name, password and the next free ports, and start it.");
+    mNew.setVisible(hub_settings::canStartOtherStages());
+    mNew.onClick = [this]() { askNewStage(); };
+    startTimer(1000);
+}
+OtherStagesPage::~OtherStagesPage() { stopTimer(); }
+void OtherStagesPage::paint(juce::Graphics& g) { g.fillAll(pal::panel); }
+
+void OtherStagesPage::askNewStage() {
+    auto* w = new juce::AlertWindow("New stage", "The new stage gets this hub's audio settings, the next free ports and its own folder, and starts in the background.",
+                                    juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor("name", "", "Stage name");
+    w->addTextEditor("password", "", "Stage password for players (optional)");
+    w->addComboBox("listed", { "Not listed", "Listed, once its ports are open to players" }, "Stages Directory");
+    std::string city0, region0;   // this hub's own place to start from
+    {
+        HubLaunchArgs mine; std::string ignored;
+        hub_settings::load(hub_settings::defaultFile(), mine, ignored);
+        hub_settings::splitLocation(mine.location, city0, region0);
+    }
+    w->addTextEditor("city", juce::String::fromUTF8(city0.c_str()), "City");
+    w->addTextEditor("region", juce::String::fromUTF8(region0.c_str()), "State / Province / Region (US and Canada: two letters)");
+    w->addTextEditor("webpw", "", "Web page password (empty = same as this hub)");
+    w->addButton("Create stage", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<OtherStagesPage> sp(this);   // outside the inner lambdas (MSVC)
+    w->enterModalState(true, juce::ModalCallbackFunction::create([w, sp](int r) {
+        if (r != 1 || !sp) return;
+        hub_settings::NewStage in;
+        in.name = w->getTextEditorContents("name").trim().toStdString();
+        in.password = w->getTextEditorContents("password").trim().toStdString();
+        in.city = w->getTextEditorContents("city").trim().toStdString();
+        in.region = w->getTextEditorContents("region").trim().toStdString();
+        in.webPassword = w->getTextEditorContents("webpw").toStdString();
+        const auto* box = w->getComboBoxComponent("listed");
+        in.listed = box && box->getSelectedItemIndex() == 1;
+        auto make = [sp, in]() {
+            if (!sp) return;
+            hub_settings::OtherStage made;
+            std::string err;
+            if (!hub_settings::createStage(in, made, err)) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "New stage", juce::String::fromUTF8(err.c_str()), "OK", sp.getComponent());
+                return;
+            }
+            const juce::String name = juce::String::fromUTF8(made.group.c_str());
+            juce::String text = "\"" + name + "\" is made" + (made.problem.empty() ? juce::String(" and starting") : " (" + juce::String::fromUTF8(made.problem.c_str()) + ")") + ".\n\n"
+                              + juce::String::fromUTF8(hub_settings::stagesForwardHelp().c_str()) + "\n\n"
+                              + (made.webPort > 0 ? "Its web page is on port " + juce::String(made.webPort) + ". Web page password: " + (in.webPassword.empty() ? "same as this hub's." : "the one you typed.")
+                                                  : juce::String("It has no web page (this hub has no web page password)."));
+            if (in.listed) text << "\nIt shows in the Stages Directory once its port check passes.";
+            sp->say("\"" + name + "\" made: ports " + juce::String(made.serverPort) + " / " + juce::String(made.udpPort), 1);
+            sp->mLast.clear();
+            sp->refresh();
+            juce::Timer::callAfterDelay(2500, [sp]() { if (sp) sp->refresh(); });
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "New stage", text, "OK", sp.getComponent());
+        };
+        const std::string warn = hub_settings::stageLoadWarning(1);
+        if (warn.empty()) { juce::MessageManager::callAsync(make); return; }
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "New stage", juce::String::fromUTF8(warn.c_str()) + "\n\nCreate and start it anyway?", "Create stage", "Cancel", sp.getComponent(),
+            juce::ModalCallbackFunction::create([make](int ok) { if (ok == 1) make(); }));
+    }), true);
+}
+
+void OtherStagesPage::say(const juce::String& text, int kind) {
+    mMsg.setColour(juce::Label::textColourId, kind == 2 ? pal::yellow : kind == 1 ? pal::text : pal::textDim);
+    if (mMsg.getText() != text) { mMsg.setText(text, juce::dontSendNotification); if (onMessage) onMessage(text); }
+    mMsgClearAt = kind == 1 ? juce::Time::currentTimeMillis() + 5000 : 0;
+}
+
+void OtherStagesPage::timerCallback() {
+    if (mMsgClearAt != 0 && juce::Time::currentTimeMillis() >= mMsgClearAt) { mMsgClearAt = 0; mMsg.setText({}, juce::dontSendNotification); if (onMessage) onMessage({}); }
+    ++mTicks;
+    if (isShowing() && (mPending.action.isNotEmpty() || (mTicks % 2) == 0)) refresh();
+    else if (mPending.action.isNotEmpty()) checkPending(hub_settings::otherStages());   // the answer is not lost on another tab
+}
+
+void OtherStagesPage::act(juce::File file, juce::String action) {
+    juce::String name = file.getParentDirectory().getFileName();
+    int target = 0;
+    for (const auto& st : hub_settings::otherStages())
+        if (st.file == file) { if (!st.group.empty()) name = juce::String::fromUTF8(st.group.c_str()); target = action == "checkports" ? st.portRuns : st.moveServerPort; }
+    std::string err;
+    const bool ok = action == "start" ? hub_settings::startOtherStage(file, err)
+                  : action == "stop" ? hub_settings::stopOtherStage(file, err)
+                  : action == "show" ? hub_settings::showOtherStage(file, err, true)
+                  : action == "delete" ? hub_settings::deleteStage(file, err)
+                  : action == "moveports" ? hub_settings::moveStagePorts(file, err)
+                  : action == "checkports" ? hub_settings::checkStagePorts(file, err)
+                  : hub_settings::forgetOtherStage(file, err);
+    mPending = {};
+    if (!ok) {
+        const juce::String what = action == "start" ? "Could not start " : action == "stop" ? "Could not stop " : action == "show" ? "Could not open the settings of "
+                                : action == "delete" ? "Could not delete " : action == "moveports" ? "Could not move the ports of " : action == "checkports" ? "Could not check the ports of " : "Could not take off the list: ";
+        say(what + name + ": " + juce::String::fromUTF8(err.c_str()), 2);
+    } else if (action == "forget") {
+        say(name + " taken off the list", 1);
+    } else {
+        mPending.file = file; mPending.action = action; mPending.name = name; mPending.at = juce::Time::currentTimeMillis(); mPending.target = target;
+        say(action == "start" ? "Starting " + name + "..." : action == "stop" ? "Stopping " + name + "..." : action == "show" ? "Opening the settings of " + name + "..."
+            : action == "delete" ? "Deleting " + name + "..." : action == "checkports" ? "Checking the ports of " + name + "..." : "Moving the ports of " + name + "...", 0);
+    }
+    mLast.clear();
+    refresh();
+}
+
+// The pending action against what the list shows now: its result, or "No answer" after 15 s.
+void OtherStagesPage::checkPending(const std::vector<hub_settings::OtherStage>& list) {
+    if (mPending.action.isEmpty()) return;
+    const hub_settings::OtherStage* st = nullptr;
+    for (const auto& x : list) if (x.file == mPending.file) st = &x;
+    const juce::String& a = mPending.action;
+    const juce::String& n = mPending.name;
+    juce::String done;
+    if (a == "start" && st != nullptr && st->running && !st->stopping) done = n + " started";
+    else if (a == "stop" && st != nullptr && !st->running) done = n + " stopped";
+    else if (a == "show" && !mPending.file.getSiblingFile("SHOW").existsAsFile()) done = n + ": its window is open at Settings";
+    else if (a == "delete" && st == nullptr) done = n + " deleted: its folder is kept in stages-deleted";
+    else if (a == "moveports" && st != nullptr && st->serverPort == mPending.target && (st->running || juce::Time::currentTimeMillis() - mPending.at > 1500) && !st->stopping)
+        done = n + " moved to ports " + juce::String(st->serverPort) + " / " + juce::String(st->udpPort);
+    if (a == "checkports" && st != nullptr && st->portRuns != mPending.target) {   // that stage finished a check since the click
+        const int state = st->portState;
+        const juce::String text = state == 1 ? n + ": ports open" : n + ": " + (st->portText.empty() ? juce::String("ports closed") : juce::String::fromUTF8(st->portText.c_str()));
+        mPending = {};
+        say(text, state == 2 ? 2 : 1);
+        return;
+    }
+    if (done.isNotEmpty()) { mPending = {}; say(done, 1); return; }
+    if (juce::Time::currentTimeMillis() - mPending.at > (a == "checkports" ? 30000 : 15000)) { mPending = {}; say("No answer from " + n, 2); }
+}
+
+void OtherStagesPage::testAct(const juce::String& action) {
+    for (const auto& st : hub_settings::otherStages()) {
+        const bool fits = action == "start" ? !st.running : action == "moveports" ? st.moveServerPort > 0 : st.running;
+        if (fits) { act(st.file, action); return; }
+    }
+    say("test aid: no stage for " + action, 2);
+}
+
+void OtherStagesPage::refresh() {
+    const auto list = hub_settings::otherStages();
+    checkPending(list);
+    const bool control = hub_settings::canStartOtherStages();
+    const juce::String warn = juce::String::fromUTF8(hub_settings::stageLoadWarning(0).c_str());
+    const juce::String forward = juce::String::fromUTF8(hub_settings::stagesForwardHelp().c_str());
+    juce::String key = warn + "\n" + forward + "\n";
+    for (const auto& st : list) key << st.file.getFullPathName() << "|" << juce::String::fromUTF8(st.group.c_str()) << "|" << st.serverPort << "|" << st.udpPort << "|" << st.webPort
+                                    << "|" << (int) st.running << (int) st.stopping << (int) st.managed << "|" << st.moveServerPort << "|" << st.portState << "|" << juce::String::fromUTF8(st.portText.c_str()) << "|" << st.players << "|" << (juce::int64) st.inBytesPerSec << "|" << (juce::int64) st.outBytesPerSec
+                                    << "|" << juce::String::fromUTF8(st.problem.c_str()) << "\n";
+    if (key == mLast && mRows.size() == list.size()) return;
+    mLast = key;
+    mForward.setText(forward, juce::dontSendNotification);
+    mWarn.setText(warn, juce::dontSendNotification);
+    mWarn.setVisible(warn.isNotEmpty());
+    mRows.clear();
+    for (const auto& st : list) {
+        auto r = std::make_unique<Row>();
+        r->name.setText(st.group.empty() ? juce::String("-") : juce::String::fromUTF8(st.group.c_str()), juce::dontSendNotification);
+        r->file.setText(st.file.getParentDirectory().getFullPathName() + (st.managed ? juce::String() : juce::String("  (added by path)"))
+                        + (st.problem.empty() ? juce::String() : "  (" + juce::String::fromUTF8(st.problem.c_str()) + ")"), juce::dontSendNotification);
+        r->ports.setText("server " + juce::String(st.serverPort) + juce::String::fromUTF8("  \xc2\xb7  audio ") + juce::String(st.udpPort)
+                         + juce::String::fromUTF8("  \xc2\xb7  web ") + (st.webPort > 0 ? juce::String(st.webPort) : juce::String("off")), juce::dontSendNotification);
+        r->ports.setTooltip("Connection port (TCP and UDP), audio port (UDP) and web page port of this stage.");
+        r->move.setVisible(control && st.moveServerPort > 0 && !st.stopping);
+        r->move.setTooltip("Move this stage to the next free ports of the row, " + juce::String(st.moveServerPort) + " / " + juce::String(st.moveServerPort + 1)
+                           + ", so one range is forwarded for all stages. Its name, players and directory identity stay.");
+        r->traffic.setText(st.running && st.players >= 0 ? juce::String(st.players) + (st.players == 1 ? " player" : " players") + juce::String::fromUTF8("  \xc2\xb7  in ")
+                               + hubRateText((float) st.inBytesPerSec) + juce::String::fromUTF8("  \xc2\xb7  out ") + hubRateText((float) st.outBytesPerSec) : juce::String(), juce::dontSendNotification);
+        const bool up = st.running && !st.stopping;
+        r->state.setText(st.stopping ? "stopping..." : !st.running ? "stopped" : st.portState == 1 ? "running, ports open" : st.portState == 2 ? "running, ports closed" : "running", juce::dontSendNotification);
+        r->state.setColour(juce::Label::textColourId, st.stopping ? pal::yellow : !st.running ? pal::textDim : st.portState == 2 ? pal::red : pal::green);
+        r->state.setTooltip(up ? juce::String::fromUTF8(st.portText.c_str()) : juce::String());
+        r->state.setInterceptsMouseClicks(true, false);
+        r->check.setVisible(control && up);
+        r->startStop.setButtonText(st.running ? "Stop" : "Start");
+        styleButton(r->startStop, st.running ? pal::panelLight : pal::accentSoft, pal::text);
+        r->startStop.setVisible(control);
+        r->startStop.setEnabled(!st.stopping);
+        // A stage this hub made can be deleted at any time; one added by its path can only leave the list, when stopped.
+        r->forget.setButtonText(st.managed ? "Delete" : "Forget");
+        styleButton(r->forget, pal::panelLight, st.managed ? pal::text : pal::textDim);
+        r->forget.setTooltip(st.managed ? "Stop this stage, take it out of the Stages Directory and move its folder to stages-deleted."
+                                        : "Take it off this list. Its folder and files stay.");
+        r->forget.setVisible(control && (st.managed ? !st.stopping : !st.running));
+       #if JUCE_MAC
+        r->open.setVisible(control && st.running && !st.stopping);
+       #endif
+        const juce::File f = st.file;
+        const juce::String g = st.group.empty() ? f.getFullPathName() : juce::String::fromUTF8(st.group.c_str());
+        const bool running = st.running, managed = st.managed;
+        juce::Component::SafePointer<OtherStagesPage> sp(this);   // outside the inner lambdas (MSVC)
+        r->startStop.onClick = [sp, f, g, running]() {
+            if (!sp) return;
+            if (!running) {   // after the click returns: the rows are rebuilt
+                const std::string warn = hub_settings::stageLoadWarning(1);
+                if (warn.empty()) { juce::MessageManager::callAsync([sp, f]() { if (sp) sp->act(f, "start"); }); return; }
+                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "Start stage", juce::String::fromUTF8(warn.c_str()) + "\n\nStart \"" + g + "\" anyway?", "Start", "Cancel", sp.getComponent(),
+                    juce::ModalCallbackFunction::create([sp, f](int ok) { if (ok == 1 && sp) sp->act(f, "start"); }));
+                return;
+            }
+            juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Stop stage", "Stop the stage \"" + g + "\"? Its players drop.", "Stop", "Cancel", sp.getComponent(),
+                juce::ModalCallbackFunction::create([sp, f](int ok) { if (ok == 1 && sp) sp->act(f, "stop"); }));
+        };
+        const int moveTo = st.moveServerPort, serverPort = st.serverPort, udpPort = st.udpPort;
+        r->move.onClick = [sp, f, g, running, moveTo, serverPort, udpPort]() {
+            if (!sp) return;
+            juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Move ports",
+                "Move \"" + g + "\" from ports " + juce::String(serverPort) + " / " + juce::String(udpPort) + " to " + juce::String(moveTo) + " / " + juce::String(moveTo + 1) + "?\n\n"
+                + (running ? "The stage restarts: its players drop and must join again with the new stage link. " : "Its stage link changes. ") + "Forward the new ports before players join.",
+                "Move ports", "Cancel", sp.getComponent(),
+                juce::ModalCallbackFunction::create([sp, f](int ok) { if (ok == 1 && sp) sp->act(f, "moveports"); }));
+        };
+        r->check.onClick = [sp, f]() { if (sp) juce::MessageManager::callAsync([sp, f]() { if (sp) sp->act(f, "checkports"); }); };
+        r->open.onClick = [sp, f]() { if (sp) juce::MessageManager::callAsync([sp, f]() { if (sp) sp->act(f, "show"); }); };
+        r->forget.onClick = [sp, f, g, running, managed]() {
+            if (!sp) return;
+            if (managed) {
+                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "Delete stage",
+                    "Delete the stage \"" + g + "\"?\n\n" + (running ? "It stops now and its players drop. " : "")
+                    + "It leaves the Stages Directory and this list. Its folder is kept in \"stages-deleted\" in this hub's data folder; moving it back to \"stages\" brings the stage back.",
+                    "Delete", "Cancel", sp.getComponent(),
+                    juce::ModalCallbackFunction::create([sp, f](int ok) { if (ok == 1 && sp) sp->act(f, "delete"); }));
+                return;
+            }
+            juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Forget stage", "Take \"" + g + "\" off this list? Its folder and files stay.", "Forget", "Cancel", sp.getComponent(),
+                juce::ModalCallbackFunction::create([sp, f](int ok) { if (ok == 1 && sp) sp->act(f, "forget"); }));
+        };
+        addAndMakeVisible(*r);
+        mRows.push_back(std::move(r));
+    }
+    mEmpty.setVisible(list.empty());
+    layoutRows();
+}
+
+void OtherStagesPage::layoutRows() {
+    auto b = getLocalBounds().reduced(14, 10);
+    mTitle.setBounds(b.removeFromTop(28));
+    mHint.setBounds(b.removeFromTop(SbTextFit::labelWidth(mHint) > b.getWidth() ? 40 : 22));
+    mForward.setBounds(b.removeFromTop(SbTextFit::labelWidth(mForward) > b.getWidth() ? 44 : 24));
+    if (mWarn.isVisible()) mWarn.setBounds(b.removeFromTop(SbTextFit::labelWidth(mWarn) > b.getWidth() ? 40 : 22));
+    b.removeFromTop(6);
+    auto bottom = b.removeFromBottom(40).reduced(0, 4);
+    mNew.setBounds(bottom.removeFromLeft(std::max(160, hubButtonWidth(mNew, bottom.getHeight()))));
+    bottom.removeFromLeft(14);
+    mMsg.setBounds(bottom);
+    if (mRows.empty()) { mEmpty.setBounds(b.removeFromTop(30)); return; }
+    for (auto& r : mRows) r->setBounds(b.removeFromTop(44));
+}
+void OtherStagesPage::resized() { layoutRows(); }
 
 // ─── LogView / LogWindow ──────────────────────────────
 LogView::LogView(juce::File logFile, bool connectionsOnly, bool showControls)
@@ -1770,8 +2151,15 @@ void SettingsPanel::refreshStatus(const juce::String& transient) {
         if (mMeta.cliKeys.count(r->key)) t += juce::String(juce::CharPointer_UTF8(" \xc2\xb7 CLI"));
         if (mMeta.envKeys.count(r->key)) t += juce::String(juce::CharPointer_UTF8(" \xc2\xb7 env"));
         if (r->invalid) { t = "invalid"; c = pal::red; }
+        bool needed = false;   // the stage's place: both parts are needed at the next save
+        if (r->key == "location_city" || r->key == "location_region") {
+            std::string city, region;
+            hub_settings::splitLocation(mEdit.location, city, region);
+            needed = r->key == "location_city" ? city.empty() : (region.empty() || (!city.empty() && !hub_settings::locationProblem(mEdit).empty()));
+            if (needed) { t = region.empty() || r->key == "location_city" ? "needed" : "two letters"; c = pal::red; }
+        }
         r->tag.setText(t, juce::dontSendNotification);
-        r->tag.setColour(juce::Label::textColourId, (differs || r->invalid) ? c : pal::textDim);
+        r->tag.setColour(juce::Label::textColourId, (differs || r->invalid || needed) ? c : pal::textDim);
     }
 
     juce::String s;
@@ -1810,6 +2198,11 @@ bool SettingsPanel::doSave() {
     if (!mInvalid.empty()) { refreshStatus("Fix the invalid field(s) first"); return false; }
     if (auto problem = hub_settings::validate(mEdit); !problem.empty()) {
         refreshStatus("Invalid: " + juce::String(problem));
+        return false;
+    }
+    hub_settings::normaliseLocation(mEdit);
+    if (auto problem = hub_settings::locationProblem(mEdit); !problem.empty()) {
+        refreshStatus("Not saved: " + juce::String(problem) + " (Stage directory section)");
         return false;
     }
     if (auto problem = hub_settings::publicAddressProblem(mEdit.publicAddressHost); !problem.empty()) {
@@ -1879,12 +2272,38 @@ HubContent::HubContent(SonobusHubServer* hub,
         if (!mHub->kickPlayer(user, 60, keep))
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Remove player",
                                                    juce::String::fromUTF8(user.c_str()) + " is no longer on the stage.");
-        refreshRemoved();
+        refreshSessionDetail();
     };
-    mStatusPage.removedTable.onAllowBack = [this](const std::string& user, const std::string& ip) {
+    // Previous players: Remove keeps a player out by name (the hub knows the last address), whether or not they are here
+    mStatusPage.previousTable.onRemove = [this](const std::string& user) {
+        juce::Component::SafePointer<HubContent> sp(this);   // outside the inner lambda (MSVC)
+        hubAskRemoval(&mStatusPage, "Remove player", "Keep " + juce::String::fromUTF8(user.c_str()) + " out of the stage?",
+            [sp, user](SonobusHubServer::RemovalKind keep) {
+                if (!sp || !sp->mHub) return;
+                sp->mHub->kickPlayer(user, 60, keep);   // here or gone: the name and the last address are kept out
+                sp->refreshSessionDetail();
+            });
+    };
+    mStatusPage.previousTable.onForget = [this](const std::string& user) {
+        std::string err;
+        if (mHub && !mHub->forgetPreviousPlayer(user, err)) std::cout << "[HUB-SESSION] forget '" << user << "' refused: " << err << "\n";
+        refreshSessionDetail();
+    };
+    styleButton(mStatusPage.clearPrevious, pal::panelLight, pal::text);
+    mStatusPage.clearPrevious.onClick = [this]() {
+        juce::Component::SafePointer<HubContent> sp(this);   // outside the inner lambda (MSVC)
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Clear list",
+            "Clear the previous players list? Everyone who is not connected leaves it. Removed players stay removed.", "Clear", "Cancel", &mStatusPage,
+            juce::ModalCallbackFunction::create([sp](int r) {
+                if (r != 1 || !sp || !sp->mHub) return;
+                sp->mHub->clearPreviousPlayers();
+                sp->refreshSessionDetail();
+            }));
+    };
+    mStatusPage.previousTable.onAllowBack = [this](const std::string& user, const std::string& ip) {
         if (!mHub) return;
         mHub->allowBack(user, ip);
-        refreshRemoved();
+        refreshSessionDetail();
     };
     // Tab pages are members; the TabbedComponent does NOT own them (deleteComponentWhenNotNeeded=false).
     mTabs.setTabBarDepth(32);
@@ -1915,6 +2334,10 @@ HubContent::HubContent(SonobusHubServer* hub,
     mTabs.addTab("Status",   pal::panel, &mStatusPage, false);
     mTabs.addTab("Settings", pal::panel, &mSettings,   false);
     mTabs.addTab("Log",      pal::panel, mLogPage.get(), false);
+    if (hub_settings::canManageOtherStages()) {   // a stage with its own folder manages no others
+        mStagesPage = std::make_unique<OtherStagesPage>();
+        mTabs.addTab("Other stages", pal::panel, mStagesPage.get(), false);
+    }
     mTabs.setCurrentTabIndex(0, false);
     addAndMakeVisible(mTabs);
 
@@ -1948,11 +2371,39 @@ HubContent::HubContent(SonobusHubServer* hub,
     tabBar.getTabButton(0)->setTooltip("Players, stage link and recent stages.");
     tabBar.getTabButton(1)->setTooltip("Hub settings.");
     tabBar.getTabButton(2)->setTooltip("Connection history and the hub log.");
+    if (mStagesPage) tabBar.getTabButton(3)->setTooltip("Other stages this computer hosts, each with its own settings folder and ports.");
 
     setSize(1500, 800);  // 16 columns like the web page
     // A slow refresh is enough for human-readable stats: each one costs per-peer quantile computes + a full repaint
     // on the same machine whose scheduler headroom the hub audio path depends on. Rates are dt-based, so still exact.
     startTimer(2000);   // 2 s, like the web page's feel without its 1 Hz cost
+    {   // test aid: window pictures (see mSnapDir)
+        auto tap = [](const char* key) -> juce::String {
+            if (const char* e = std::getenv(key); e && e[0]) return juce::String::fromUTF8(e);
+            if (const char* tf = std::getenv("SB_TAPS_FILE"); tf && tf[0])
+                for (const auto& line : juce::StringArray::fromLines(juce::File(juce::String::fromUTF8(tf)).loadFileAsString()))
+                    if (line.trim().startsWith(juce::String(key) + "=")) return line.trim().fromFirstOccurrenceOf("=", false, false).trim();
+            return {};
+        };
+        const juce::String dir = tap("SB_HUB_SNAPSHOT");
+        if (dir.isNotEmpty() && juce::File::isAbsolutePath(dir)) {
+            mSnapDir = juce::File(dir);
+            for (const auto& w : juce::StringArray::fromTokens(tap("SB_HUB_SNAPSHOT_WIDTHS"), ",", "")) if (w.getIntValue() >= 600) mSnapWidths.push_back(w.getIntValue());
+            std::cout << "[HUB] test aid: window pictures to " << dir << "\n";
+            if (const juce::String act = tap("SB_HUB_SNAPSHOT_STAGEACT"); mStagesPage && act.isNotEmpty()) {   // one action in the Other stages list, with a picture at every change of its status text
+                juce::Component::SafePointer<HubContent> sp(this);
+                mStagesPage->onMessage = [sp](const juce::String& text) {
+                    static int n = 0;
+                    const int k = ++n;
+                    std::cout << "[HUB] test aid: other stages status text " << k << ": \"" << text << "\"\n";
+                    juce::MessageManager::callAsync([sp, k]() { if (sp) { const int t0 = sp->mTabs.getCurrentTabIndex(); sp->saveSnapshots("msg" + juce::String(k)); sp->mTabs.setCurrentTabIndex(t0, false); } });
+                };
+                juce::Timer::callAfterDelay(7000, [sp, act]() { if (sp && sp->mStagesPage) { sp->mTabs.setCurrentTabIndex(sp->mTabs.getNumTabs() - 1, false); sp->mStagesPage->testAct(act); } });
+            }
+            if (mStagesPage && tap("SB_HUB_SNAPSHOT_NEWSTAGE").isNotEmpty())   // the New stage question in the pictures too
+                juce::Timer::callAfterDelay(4000, [sp = juce::Component::SafePointer<HubContent>(this)]() { if (sp && sp->mStagesPage) sp->mStagesPage->askNewStage(); });
+        }
+    }
     mUpdateCheck = std::make_unique<HubUpdateCheck>();   // One check at start
     mUpdateCheck->startThread();
 }
@@ -1961,8 +2412,9 @@ HubContent::~HubContent() {
     stopTimer();
     mUpdateCheck.reset();
     mLogWindow.reset();
-    mTabs.clearTabs();   // the Log page is owned by mLogPage, destroyed next
+    mTabs.clearTabs();   // the Log and Other stages pages are owned here, destroyed next
     mLogPage.reset();
+    mStagesPage.reset();
     mGeo.stop();
 }
 
@@ -2124,20 +2576,55 @@ void HubContent::timerCallback() {
         if (mStatusPage.sessionTable.numRows() != before) mStatusPage.resized();
     }
     refreshSessionDetail();
-    refreshRemoved();
     repaint();  // for bandwidth strip
+    if (mSnapDir != juce::File() && (++mSnapTicks % 5) == 0) saveSnapshots();
 }
 
-// The removed-players list follows the hub; it takes room on the page only while there is a row.
-void HubContent::refreshRemoved() {
-    if (!mHub) return;
-    const int before = mStatusPage.removedTable.numRows();
-    mStatusPage.removedTable.setRows(mHub->removedPlayers());
-    const int rows = mStatusPage.removedTable.numRows();
-    if (rows == before) return;
-    mStatusPage.removedLabel.setVisible(rows > 0);
-    mStatusPage.removedTable.setVisible(rows > 0);
-    mStatusPage.resized();
+// Test aid: the window's own picture, every tab at each chosen width, then the window as it was.
+void HubContent::saveSnapshots(const juce::String& tag) {
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || !mSnapDir.createDirectory()) return;
+    const int w0 = top->getWidth(), h0 = top->getHeight(), tab0 = mTabs.getCurrentTabIndex();
+    std::vector<int> widths = mSnapWidths;
+    if (widths.empty()) widths.push_back(w0);
+    for (const int w : widths) {
+        if (top->getWidth() != w) top->setSize(w, h0);
+        for (int t = 0; t < mTabs.getNumTabs(); ++t) {
+            if (mTabs.getTabNames()[t] == "Settings" || mTabs.getTabNames()[t] == "Log") continue;   // passwords and addresses stay out of pictures
+            mTabs.setCurrentTabIndex(t, false);
+            const auto img = createComponentSnapshot(getLocalBounds(), true, 1.0f);
+            const juce::File f = mSnapDir.getChildFile("hub-" + juce::String(w) + "-" + mTabs.getTabNames()[t].removeCharacters(" ").toLowerCase() + (tag.isEmpty() ? juce::String() : "-" + tag) + ".png");
+            juce::FileOutputStream out(f);
+            if (out.openedOk()) { out.setPosition(0); out.truncate(); juce::PNGImageFormat().writeImageToStream(img, out); }
+        }
+    }
+    mTabs.setCurrentTabIndex(tab0, false);
+    if (top->getWidth() != w0) top->setSize(w0, h0);
+    if (!mSnapHeadingsLogged) {   // each section heading's hover text, and what the pointer would find on the heading
+        mSnapHeadingsLogged = true;
+        std::vector<juce::Label*> heads = { &mStatusPage.peerLabel, &mStatusPage.sessionsLabel, &mStatusPage.recentLabel };
+        if (mStagesPage) heads.push_back(&mStagesPage->heading());
+        for (int t = 0; t < mTabs.getNumTabs(); ++t) {
+            mTabs.setCurrentTabIndex(t, false);
+            for (auto* l : heads) {
+                if (!l->isShowing()) continue;
+                auto* parent = l->getParentComponent();
+                auto* at = parent != nullptr ? parent->getComponentAt(l->getBounds().getCentre()) : nullptr;
+                auto* client = dynamic_cast<juce::TooltipClient*>(at);
+                const juce::String found = client != nullptr ? client->getTooltip() : juce::String();
+                std::cout << "[HUB] test aid: heading '" << l->getText().trim().upToFirstOccurrenceOf("   ", false, false) << "' " << l->getWidth() << "x" << l->getHeight()
+                          << " hover text " << l->getTooltip().length() << " chars; the pointer on it finds " << (at == l ? "the heading" : at == nullptr ? "NOTHING" : typeid(*at).name())
+                          << ", text " << (found == l->getTooltip() && found.isNotEmpty() ? "the same" : "DIFFERENT or empty") << ": \"" << found.substring(0, 60) << "...\"\n";
+            }
+        }
+        mTabs.setCurrentTabIndex(tab0, false);
+        std::cout << "[HUB] test aid: tooltip window " << (mTooltips.getParentComponent() == nullptr ? "present (desktop-wide, 500 ms)" : "present (inside a component)") << "\n";
+    }
+    if (auto* modal = juce::Component::getCurrentlyModalComponent()) {   // an open question
+        const auto img = modal->createComponentSnapshot(modal->getLocalBounds(), true, 1.0f);
+        juce::FileOutputStream out(mSnapDir.getChildFile("hub-question.png"));
+        if (out.openedOk()) { out.setPosition(0); out.truncate(); juce::PNGImageFormat().writeImageToStream(img, out); }
+    }
 }
 
 // The personnel table shows the SELECTED session's players (newest first) — or, with nothing
@@ -2147,12 +2634,23 @@ void HubContent::refreshSessionDetail() {
     if (!mHub) return;
     const auto* sel = mStatusPage.sessionTable.selected();
     std::vector<SonobusHubServer::RecentPlayer> rows;
+    std::vector<SonobusHubServer::PreviousRow> all;
     if (sel) rows.assign(sel->players.rbegin(), sel->players.rend());
-    else rows = mHub->recentPlayers(30);
+    else all = mHub->previousRows();   // no stage selected: the removed players, then everyone who joined, with Remove
     for (auto& r : rows) r.location = mGeo.locationFor(r.ip, r.lan, mGeoEnabled);
-    mStatusPage.recentTable.setRows(std::move(rows));
+    for (auto& r : all) if (r.player.joins > 0) r.player.location = mGeo.locationFor(r.player.ip, r.player.lan, mGeoEnabled);
+    const int n = (int) (sel ? rows.size() : all.size());
+    if (sel) mStatusPage.recentTable.setRows(std::move(rows));
+    else mStatusPage.previousTable.setRows(std::move(all));
+    const bool modeChanged = mStatusPage.previousTable.isVisible() != (sel == nullptr);
+    mStatusPage.recentTable.setVisible(sel != nullptr);
+    mStatusPage.previousTable.setVisible(sel == nullptr);
+    if (modeChanged) mStatusPage.resized();
     mStatusPage.recentLabel.setText(sel ? "  Players seen on \"" + juce::String::fromUTF8(sel->group.c_str()) + "\""
-                                        : juce::String("  Players seen on this stage"), juce::dontSendNotification);
+                                        : "  Previous players     " + juce::String(n), juce::dontSendNotification);
+    mStatusPage.clearPrevious.setVisible(sel == nullptr && mStatusPage.previousTable.anyGone());
+    mStatusPage.recentLabel.setTooltip(sel ? "The distinct players seen on the selected stage (from the hub's own join/leave events), newest first"
+                                           : "Everyone who joined this hub, newest first (the last 1000). Removed players stay at the top until you allow them back. Remove keeps a player out, like Kick; the X takes a name off this list. Click a stage above to see only its players.");
     mStatusPage.sessionApply.setEnabled(sel != nullptr);
     mStatusPage.sessionPwEditor.setEnabled(sel != nullptr);
     {   // Prefill only when the SELECTION changes
@@ -2163,6 +2661,26 @@ void HubContent::refreshSessionDetail() {
         }
     }
     mStatusPage.sessionPwEditor.setTextToShowWhenEmpty(!sel ? "select a stage" : "(no password)", pal::textDim);
+}
+
+// ─── Background stages (Mac) ──────────────────────────────────────────────────
+// A stage with its own settings folder (an "other stage") runs in the background on a Mac: no Dock icon, no window
+// at start. The main hub's "Open window" writes SHOW into the stage's folder; the window then shows until it is
+// closed, and the stage keeps running. The main hub (default folder) keeps its Dock icon and window.
+#if JUCE_MAC
+extern "C" void* objc_getClass(const char*);
+extern "C" void* sel_registerName(const char*);
+extern "C" void* objc_msgSend(void*, void*, ...);
+#endif
+namespace {
+bool g_backgroundStage = false;
+#if JUCE_MAC
+void setActivationPolicyRaw(long policy, bool activate) {
+    void* app = ((void* (*)(void*, void*)) objc_msgSend)(objc_getClass("NSApplication"), sel_registerName("sharedApplication"));
+    ((void (*)(void*, void*, long)) objc_msgSend)(app, sel_registerName("setActivationPolicy:"), policy);   // 0 regular, 1 accessory
+    if (activate) ((void (*)(void*, void*, char)) objc_msgSend)(app, sel_registerName("activateIgnoringOtherApps:"), 1);
+}
+#endif
 }
 
 // ─── HubMainWindow ────────────────────────────────────────────────────────────
@@ -2191,11 +2709,14 @@ HubMainWindow::HubMainWindow(const juce::String& title,
         const int availH = disp != nullptr ? disp->userArea.getHeight() - 60 : 900;
         centreWithSize(std::max(1180, std::min(1820, avail)), std::max(760, std::min(900, availH)));   // room for the status lines and the table
     }
-    setVisible(true);
-    toFront(true);
+    if (!g_backgroundStage) {
+        setVisible(true);
+        toFront(true);
+    }
 }
 
 void HubMainWindow::closeButtonPressed() {
+    if (g_backgroundStage) { setVisible(false); return; }   // a background stage keeps running without its window
 #if JUCE_WINDOWS
     if (auto* app = dynamic_cast<HubJuceApp*>(juce::JUCEApplication::getInstance())) { app->userRequestedStop(); return; }
 #endif
@@ -2260,12 +2781,21 @@ static void windowsGuiSetup() {
               << "; power throttling off: speed " << (speed ? "yes" : "no") << ", timer " << (timer ? "yes" : "no") << "\n";
 }
 
-// The Stop file writes QUIT into the data folder; looked for once a second on the message thread.
+#endif
+
+// The Stop file (Windows) and the main hub's Stop (other stages) write QUIT into the data folder; looked for once
+// a second on the message thread.
 namespace {
 class QuitFileWatch : public juce::Timer {
 public:
-    explicit QuitFileWatch(std::function<void()> fn) : mFn(std::move(fn)) { mFile.deleteFile(); startTimer(1000); }
+    QuitFileWatch(std::function<void()> fn, std::function<void(bool)> showFn = {}) : mFn(std::move(fn)), mShowFn(std::move(showFn)) { mFile.deleteFile(); mShow.deleteFile(); startTimer(1000); }
     void timerCallback() override {
+        if (mShowFn && mShow.existsAsFile()) {
+            const bool settings = mShow.loadFileAsString().trim() == "settings";   // the main hub's Settings button
+            mShow.deleteFile();
+            std::cout << "[HUB] SHOW file found, opening the window" << (settings ? " at Settings\n" : "\n");
+            mShowFn(settings);
+        }
         if (!mFile.existsAsFile()) return;
         mFile.deleteFile();
         stopTimer();
@@ -2274,23 +2804,37 @@ public:
     }
 private:
     juce::File mFile = hub_settings::dataDir().getChildFile("QUIT");
+    juce::File mShow = hub_settings::dataDir().getChildFile("SHOW");
     std::function<void()> mFn;
+    std::function<void(bool)> mShowFn;
 };
 }
-#endif
 
 void HubJuceApp::initialise(const juce::String&) {
     // Text that does not fit elides instead of compressing the glyphs
     juce::Font::setDefaultMinimumHorizontalScaleFactor(1.0f);
+    const bool firstLaunch = !mMeta.loadedFromFile && mMeta.loadError.empty()
+                             && mMeta.file != juce::File() && mMeta.cliKeys.count("group") == 0;
 #if JUCE_MAC
-    forceRegularActivationPolicy();
+    g_backgroundStage = hub_settings::isStage() && !firstLaunch;
+    if (g_backgroundStage) { setActivationPolicyRaw(1, false); std::cout << "[HUB] own settings folder: runs in the background (no Dock icon, no window; the main hub's Other stages tab opens it)\n"; }
+    else forceRegularActivationPolicy();
 #endif
 #if JUCE_WINDOWS
     windowsGuiSetup();
     mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); });
+#else
+    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); }, [this](bool settings) {
+        if (!mWindow) return;
+        if (settings) if (auto* content = dynamic_cast<HubContent*>(mWindow->getContentComponent())) content->showSettingsTab();
+       #if JUCE_MAC
+        setActivationPolicyRaw(1, true);
+       #endif
+        if (mWindow->isMinimised()) mWindow->setMinimised(false);
+        mWindow->setVisible(true);
+        mWindow->toFront(true);
+    });
 #endif
-    const bool firstLaunch = !mMeta.loadedFromFile && mMeta.loadError.empty()
-                             && mMeta.file != juce::File() && mMeta.cliKeys.count("group") == 0;
     if (firstLaunch) askFirstLaunch();
     else startHubAndWindow();
 }
@@ -2353,6 +2897,7 @@ void HubJuceApp::startHubAndWindow() {
     hub_settings::applyToHub(*mHub, mArgs);   // One shared setter path
     if (mMeta.file != juce::File()) mHub->setSessionsFile(mMeta.file.getSiblingFile("hub_sessions.json").getFullPathName().toStdString());   // Recent sessions (+ their players) persist next to hub_settings.json
     if (mMeta.file != juce::File()) mHub->setRemovedPlayersFile(mMeta.file.getSiblingFile("hub_removed_players.json").getFullPathName().toStdString());   // permanent removals, next to the settings
+    if (mMeta.file != juce::File()) mHub->setPlayerHistoryFile(mMeta.file.getSiblingFile("hub_players.json").getFullPathName().toStdString());   // previous players (last 1000)
 
     if (!mHub->start(serverHost, serverPort, mArgs.userName, mArgs.groupName, mArgs.groupPassword,
                      mArgs.udpPort, mArgs.sampleRate, mArgs.blockSize, mArgs.channels)) {
@@ -2400,6 +2945,7 @@ void HubJuceApp::doRestart() {
         hub_settings::applyToHub(*mHub, mArgs);
         if (mMeta.file != juce::File()) mHub->setSessionsFile(mMeta.file.getSiblingFile("hub_sessions.json").getFullPathName().toStdString());   // Recent sessions
         if (mMeta.file != juce::File()) mHub->setRemovedPlayersFile(mMeta.file.getSiblingFile("hub_removed_players.json").getFullPathName().toStdString());   // permanent removals, next to the settings
+        if (mMeta.file != juce::File()) mHub->setPlayerHistoryFile(mMeta.file.getSiblingFile("hub_players.json").getFullPathName().toStdString());   // previous players (last 1000)
         std::string serverHost;
         int serverPort = 0;
         hub_settings::resolveServerEndpoint(mArgs, serverHost, serverPort);
@@ -2450,8 +2996,8 @@ void HubJuceApp::makeWindow() {
         if (bundle.startsWith(title)) title = bundle;
     }
    #endif
-    if (!mArgs.groupName.empty())   // Which stage this window serves
-        title << ": " << juce::String::fromUTF8(mArgs.groupName.c_str());
+    if (!mArgs.groupName.empty())   // Which stage this window serves; one of a main hub's other stages says so
+        title << (hub_settings::isStage() ? " (other stage): " : ": ") << juce::String::fromUTF8(mArgs.groupName.c_str());
     mWindow = std::make_unique<HubMainWindow>(
         title, mHub.get(), mArgs, mMeta, std::move(cb), restartFn, quitFn, applyGroupFn, applyHoldFn, applySessionFn);
 #if JUCE_WINDOWS
@@ -2470,11 +3016,12 @@ void HubJuceApp::userRequestedStop() {
             "Stop the hub? Players on the stage will be disconnected.", "Stop", "Cancel", nullptr,
             juce::ModalCallbackFunction::create([this](int result) {
                 mStopAsked = false;
-                if (result == 1) quit();
+                if (result == 1) { hub_settings::stageQuitByOperator(); quit(); }
             }));
         return;
     }
 #endif
+    hub_settings::stageQuitByOperator();   // a stage quit in its own window stays stopped
     quit();
 }
 

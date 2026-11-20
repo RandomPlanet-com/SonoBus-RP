@@ -123,6 +123,7 @@ struct HubLaunchArgs {
     std::string stageDescription;
     std::string stageCountry;  // two-letter country code for the listing, for example US; empty = not given
     std::string stageNames = "Automatic";   // player names in the listing: Automatic (shown when open, hidden when locked) / Show / Hide
+    int forgetPlayersDays = 0; // previous players not seen for this many days are forgotten; 0 = never
     std::string stageDirectory = "https://stages.randomplanet.com/api/1/";   // not on the form
     std::string stageHubId, stageHubKey;    // this hub's identity at the directory, created on first start; never shown
 };
@@ -166,6 +167,11 @@ juce::File dataDir();                    // settings, taps, stats and session hi
 // stats, directory files) and allows a second hub on the machine. Call once at startup.
 bool useSettingsFolderAsDataDir(const juce::File& settingsFile);
 bool hasOwnDataDir();
+// True when this hub is a stage of a main hub: its settings file sits in that hub's stages/ folder, or its folder
+// holds the marker a main hub wrote, or (Mac and Windows) it was started beside the hub of the default folder.
+// Every other hub is a main hub, also one started with its own settings file: it keeps its stages in that folder.
+bool isStage();
+juce::File stageMainFolder();            // a stage: its main hub's data folder
 juce::File defaultLogFile();
 void applyDefaults(HubLaunchArgs& a);    // fills values that depend on the machine
 void migrateOldDataDir();                // call once, before anything reads dataDir()
@@ -204,6 +210,77 @@ bool ensureStageIdentity(HubLaunchArgs& a);
 // Resolve the AOO signaling endpoint the hub's own client connects to.
 void resolveServerEndpoint(const HubLaunchArgs& a, std::string& host, int& port);
 
+// ─── Other stages on this computer ───
+// Extra hubs, each run by this same app with its own settings folder (--settings-file). A main hub (see isStage)
+// lists them, makes new ones, starts and stops them; a stage manages nothing. "Default folder" below = the main
+// hub's data folder: the default one, or the folder of the settings file a main hub was started with.
+// The list = other_stages.json in that folder (stages added by path, and which stages were started) plus
+// every stage folder under <default folder>/stages. New stage makes such a folder, named after the stage, with
+// the main stage's settings and its own name, password, ports and log. Ports are one row: the main stage's pair
+// (12999 / 13000), then 13001 / 13002, 13003 / 13004, ... so one range is forwarded for all stages. Delete stops the stage (its clean stop
+// takes it out of the stage directory) and moves the folder to <default folder>/stages-deleted; moving it back
+// brings the stage back. A stage added by path can only be taken off the list.
+// Running = the stage's hub.pid names a live process of this app. Stop = a QUIT file in its folder, which the
+// stage looks for once a second and then quits cleanly. On a Mac a stage with its own folder runs in the
+// background (no Dock icon, no window); a SHOW file opens its window until it is closed. On Linux the stages are
+// child processes of the main hub inside its service: they stop with it and come back
+// with it. On every system the main hub, at its start, starts the stages again that were started and not stopped
+// by the operator; before an update replaces the program it stops them all, so they come back on the new one.
+// Each stage writes hub_status.json (players, bytes per second) every few seconds for the list.
+// Control path only.
+struct OtherStage {
+    juce::File file;                 // its hub_settings.json
+    std::string group;               // stage name from that file
+    int serverPort = 0, udpPort = 0, webPort = 0;
+    bool running = false;
+    bool stopping = false;           // QUIT written, not gone yet
+    bool managed = false;            // its folder is under <default folder>/stages: Delete, not Forget
+    int moveServerPort = 0;          // a lower free pair of the port row starts here; 0 = none
+    int players = -1;                // from its status file while it runs; -1 = not known
+    double inBytesPerSec = -1.0, outBytesPerSec = -1.0;
+    int portState = -1;              // its port check: 1 open, 2 closed, 0 or 3 no verdict; -1 = not known
+    int portRuns = 0;                // port checks it has finished since its start
+    std::string portText;            // the check's own line
+    std::string problem;             // the file cannot be read, or the like
+};
+struct NewStage {
+    std::string name, password, city, region;   // city + state / province / region, both needed
+    std::string webPassword;         // empty = the main hub's web password
+    bool listed = false;             // in the stage directory
+};
+bool canManageOtherStages();         // the main hub only
+bool canStartOtherStages();
+std::vector<OtherStage> otherStages();
+bool addOtherStage(const juce::File& settingsFile, std::string& err);
+bool forgetOtherStage(const juce::File& settingsFile, std::string& err);   // a stopped stage added by path leaves the list; its files stay
+bool startOtherStage(const juce::File& settingsFile, std::string& err);
+bool stopOtherStage(const juce::File& settingsFile, std::string& err);
+bool showOtherStage(const juce::File& settingsFile, std::string& err, bool settings = false);   // Mac: SHOW file, the background stage opens its window (at its Settings tab)
+int mainHubWebPort();                // a stage: the web page port of its main hub, 0 = none
+// Makes the folder and settings of a new stage, puts it on the list and starts it. `made` = what it got.
+bool createStage(const NewStage& in, OtherStage& made, std::string& err);
+// Stops it if it runs, then moves its folder to stages-deleted (after the stop, in the background, when it was running).
+bool deleteStage(const juce::File& settingsFile, std::string& err);
+// What the operator opens for players, one line for the main stage and every listed stage: the port ranges to
+// forward on the router, or the firewall command on Linux.
+std::string stagesForwardHelp();
+// Moves a listed stage to the lowest free pair of the port row (main stage's ports + 2, + 4, ...); a running stage restarts.
+bool moveStagePorts(const juce::File& settingsFile, std::string& err);
+int stageCores();                    // processor cores of this computer
+int stagesRunning();                 // this hub and every other stage that runs
+// Empty, or why `extra` more stages are more than this computer should run (a warning, never a refusal).
+std::string stageLoadWarning(int extra);
+void writeInstancePid();             // a stage with its own folder: hub.pid there, once it holds the folder lock
+void registerWithMainHub();          // a stage with its own folder: onto the main hub's Other stages list (once, at start)
+void writeStageStatus(int players, double inBytesPerSec, double outBytesPerSec,
+                      int portState, int portRuns, const std::string& portText);   // a stage: hub_status.json
+// Asks a running stage to check its ports now (a CHECK file in its folder; the result comes with its status file).
+bool checkStagePorts(const juce::File& settingsFile, std::string& err);
+void stageQuitByOperator();          // a stage with its own folder, quit in its own window: not started again by the main hub
+void restartStartedStages();         // main hub, at start: the stages that were started and not stopped run again
+void stopChildStages();              // Linux main hub, at exit: its stages stop with it (they stay marked as started)
+int stopStagesForUpdate();           // main hub, before the program is replaced: every stage stops, marked as started
+
 // Build the argv for a "Save & Restart hub" relaunch: keeps argv[0] and the
 // pass-through options (--nogui, --settings-file, --no-settings, --dump-peer,
 // --dump-secs), DROPS every settings-covered option (so the saved file is
@@ -231,6 +308,15 @@ std::string validate(const HubLaunchArgs& a);
 // "Public address" as typed: empty = fine, else why it cannot work (an address inside a private network).
 // Checked when the operator saves; a value already in a settings file only gets a warning in the log.
 std::string publicAddressProblem(const std::string& host);
+// The stage's place is one stored text, "City, ST" ("Chicago, IL", "Toronto, ON", "Frankfurt, HE"); the forms show
+// it as City and State / Province / Region (form keys location_city, location_region). Both are needed when the
+// operator saves; a value already in a settings file is never rejected at load. For the United States and Canada
+// (stage_country US / CA) the region is one of the two-letter codes; elsewhere any text.
+void splitLocation(const std::string& location, std::string& city, std::string& region);
+std::string joinLocation(const std::string& city, const std::string& region);
+const char* regionCodes(const std::string& country);   // comma list for US and CA, else ""
+void normaliseLocation(HubLaunchArgs& a);               // trims, upper-case code for US and CA
+std::string locationProblem(const HubLaunchArgs& a);   // empty = fine, else what to enter
 
 // Compare two models field-by-field; returns the JSON keys that differ.
 std::vector<std::string> diffKeys(const HubLaunchArgs& x, const HubLaunchArgs& y);

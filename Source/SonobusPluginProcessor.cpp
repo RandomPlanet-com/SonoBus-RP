@@ -4,6 +4,7 @@
 
 
 
+#include <random>
 #include "SonobusPluginProcessor.h"
 #include "SonobusPlusVersion.h"
 #include "SbDataPaths.h"
@@ -596,6 +597,7 @@ static String peerStateCacheMapKey("PeerStateCacheMap");
 static String peerStateCacheKey("PeerStateCache");
 static String peerNameKey("name");
 static String peerLevelKey("level");
+static String peerLevelSetKey("levelset");   // the level was set by the listener (not the starting level)
 static String peerBalanceKey("balance");
 static String peerMonoPanKey("pan");
 static String peerPan1Key("span1");
@@ -765,6 +767,7 @@ struct SonobusAudioProcessor::RemotePeer {
     std::unique_ptr<LatencyMeasurer> latencyMeasurer;
 
     float gain = 1.0f;
+    bool  gainSet = false;       // the listener moved this row's fader (saved per player name)
     float balance = 0.0f;        // left/right balance of the player's whole mix, -1 left .. 1 right, 0 = centre
 
     float buffertimeMs = 0.0f;
@@ -1514,7 +1517,8 @@ mState (*this, &mUndoManager, "SonoBusAoO",
     }
     
     loadGlobalState();
-    
+    sbLoadInstallId(isplugin);
+
     moveOldMisplacedFiles();
 
     mFreshInit = true;
@@ -11190,6 +11194,11 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                 }
                 if (hsr > 0) sHubSampleRate.store((int) hsr, std::memory_order_relaxed);
             }
+            // Version report (with the install id) right away, not only with the 10-s report: a hub that removed
+            // this install under another name recognises it within about a second. Control path only.
+            if (isHostedMixModeEnabled() && hubUser == mHubPeerUsername) {
+                sbAsync([this]() { for (int delayMs : {300, 1500}) sbAfter(delayMs, [this]() { sbSendVersionToHub(); }); });   // timers from the message thread
+            }
             (void)hubPort;  // we use the packet source endpoint, not the
                             // advertised audio port — the packet's actual
                             // source endpoint is what the AOO library binds
@@ -11952,7 +11961,8 @@ void SonobusAudioProcessor::sbSendHxver(RemotePeer * hubPeer)
     osc::OutboundPacketStream vm(vb, sizeof(vb));
     try {
         vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.substring(0, 48).toRawUTF8()
-           << plug.substring(0, 40).toRawUTF8() << osc::EndMessage;   // Fourth: plugin format and host, empty in the app
+           << plug.substring(0, 40).toRawUTF8()      // Fourth: plugin format and host, empty in the app
+           << mInstallId.toRawUTF8() << osc::EndMessage;   // Fifth: this install's anonymous id (older hubs ignore it)
         sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
     } catch (const osc::Exception&) {}
 }
@@ -14225,6 +14235,8 @@ void SonobusAudioProcessor::setRemotePeerLevelGain(int index, float levelgain)
     if (index < mRemotePeers.size()) {
         RemotePeer * remote = mRemotePeers.getUnchecked(index);
         remote->gain = levelgain;
+        remote->gainSet = true;
+        if (sbDiagOn()) fprintf(stderr, "[SB-ROWLVL] '%s' set %.1f dB\n", remote->userName.toRawUTF8(), Decibels::gainToDecibels(levelgain));
         commitCacheForPeer(remote);   // Row fader survives a quit at any moment (hub mode fader is this local gain)
     }
 }
@@ -16423,7 +16435,9 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
                 retpeer->userName = username;
                 retpeer->groupName = groupname;
                 retpeer->relayedViaHub = !isHubPeer(username);   
-                if (findAndLoadCacheForPeer(retpeer)) {
+                const bool cached = findAndLoadCacheForPeer(retpeer);
+                sbApplyHubStartLevel(retpeer);
+                if (cached) {
                     g_sbFmtWhy = "addpeer-or-cache";
                     setupSourceFormat(retpeer, retpeer->oursource.get());
                     if (retpeer->latencysource) setupSourceFormat(retpeer, retpeer->latencysource.get(), true);
@@ -16480,6 +16494,7 @@ SonobusAudioProcessor::RemotePeer * SonobusAudioProcessor::doAddRemotePeerIfNece
         retpeer->gain = mDefUserLevel.get();
 
         findAndLoadCacheForPeer(retpeer);
+        sbApplyHubStartLevel(retpeer);
 
         // HostedMix — every feed shares the hub->us path,
         // so a joining peer inherits the ONE unified receive-buffer policy,
@@ -16783,6 +16798,7 @@ void SonobusAudioProcessor::commitCacheForPeer(RemotePeer * retpeer)
     newcache.sendFormat = retpeer->formatIndex;
     newcache.numChanGroups = retpeer->numChanGroups;
     newcache.mainGain = retpeer->gain;
+    newcache.mainGainSet = retpeer->gainSet;
     newcache.mainBalance = retpeer->balance;
     newcache.numMultiChanGroups = retpeer->lastMultiNumChanGroups;
     newcache.modifiedChanGroups = retpeer->modifiedMultiChanGroups;
@@ -16806,6 +16822,17 @@ void SonobusAudioProcessor::commitCacheForPeer(RemotePeer * retpeer)
     }
 }
 
+// Hub mode: the hub's own row stays at unity (it is hidden and is not a player). A player whose fader this
+// listener has not moved starts at the Default User Level; a level the listener set is kept.
+void SonobusAudioProcessor::sbApplyHubStartLevel(RemotePeer * peer)
+{
+    if (!isHostedMixModeEnabled() || peer->infoOnly || peer->userName.isEmpty()) return;
+    const char * why = "saved";
+    if (isHubPeer(peer->userName)) { peer->gain = 1.0f; why = "hub row"; }
+    else if (!peer->gainSet) { peer->gain = mDefUserLevel.get(); why = "default"; }
+    if (sbDiagOn()) fprintf(stderr, "[SB-ROWLVL] '%s' start %.1f dB (%s)\n", peer->userName.toRawUTF8(), Decibels::gainToDecibels(peer->gain), why);
+}
+
 bool SonobusAudioProcessor::findAndLoadCacheForPeer(RemotePeer * retpeer)
 {
     if (retpeer->userName.isEmpty()) {
@@ -16815,6 +16842,7 @@ bool SonobusAudioProcessor::findAndLoadCacheForPeer(RemotePeer * retpeer)
     
     // look for current peer by user name in peer cache and apply settings
     PeerStateCacheMap::iterator found  = mPeerStateCacheMap.find(retpeer->userName);
+    const bool exact = found != mPeerStateCacheMap.end();
     if (found == mPeerStateCacheMap.end()) {
         // no exact match, look for ones starting with the same beginning
         String namebase = retpeer->userName;
@@ -16851,6 +16879,7 @@ bool SonobusAudioProcessor::findAndLoadCacheForPeer(RemotePeer * retpeer)
         retpeer->formatIndex = cache.sendFormat;
         retpeer->numChanGroups = cache.numChanGroups; // restore this?
         retpeer->gain = cache.mainGain;
+        retpeer->gainSet = exact && cache.mainGainSet;   // a similar name is another player
         retpeer->balance = cache.mainBalance;
         retpeer->lastMultiNumChanGroups = cache.numMultiChanGroups;
         retpeer->modifiedChanGroups = retpeer->modifiedMultiChanGroups = cache.modifiedChanGroups;
@@ -20609,6 +20638,7 @@ ValueTree SonobusAudioProcessor::PeerStateCache::getValueTree() const
     item.setProperty(peerSendFormatKey, sendFormat, nullptr);
     item.setProperty(numChanGroupsKey, numChanGroups, nullptr);
     item.setProperty(peerLevelKey, mainGain, nullptr);
+    item.setProperty(peerLevelSetKey, mainGainSet, nullptr);
     item.setProperty(peerBalanceKey, mainBalance, nullptr);
     item.setProperty(peerOrderPriorityKey, orderPriority, nullptr);
     item.setProperty(peerHubMixMutedKey, hubMixMuted, nullptr);    // Row MUTE/SOLO survive quit
@@ -20653,6 +20683,9 @@ void SonobusAudioProcessor::PeerStateCache::setFromValueTree(const ValueTree & i
     numChanGroups = std::max(0, std::min((int) (MAX_CHANGROUPS-1), (int)item.getProperty(numChanGroupsKey, numChanGroups)));
 
     mainGain = item.getProperty(peerLevelKey, mainGain);
+    // Absent in older files: a level other than 0 dB counts as set
+    mainGainSet = item.hasProperty(peerLevelSetKey) ? (bool) item.getProperty(peerLevelSetKey)
+                                                    : std::fabs(mainGain - 1.0f) > 1e-4f;
     mainBalance = jlimit(-1.0f, 1.0f, (float) item.getProperty(peerBalanceKey, mainBalance));   // absent in old files -> centre
     orderPriority = item.getProperty(peerOrderPriorityKey, orderPriority);
     hubMixMuted = item.getProperty(peerHubMixMutedKey, hubMixMuted);    // Absent in old files -> false
@@ -20751,6 +20784,24 @@ void SonobusAudioProcessor::loadGlobalState()
     if (tree.isValid()) {
         mGlobalState = tree;
     }
+}
+
+// One random anonymous id per install (the app and the plugins each keep their own, in GlobalState.xml), made at the
+// first start. Not derived from the computer, the user or the name. Sent to a hub with /sb/hxver so a removed player
+// is still recognised under another name. Control path only.
+void SonobusAudioProcessor::sbLoadInstallId(bool isplugin)
+{
+    const Identifier key(isplugin ? "sbPluginInstallId" : "sbInstallId");
+    String v = mGlobalState.getProperty(key).toString();
+    if (v.length() != 32 || !v.containsOnly("0123456789abcdef")) {
+        std::random_device rd;
+        v.clear();
+        for (int i = 0; i < 4; ++i) v << String::toHexString((int) rd()).paddedLeft('0', 8);
+        v = v.toLowerCase().substring(0, 32);
+        mGlobalState.setProperty(key, v, nullptr);
+        storeGlobalState();
+    }
+    mInstallId = v;
 }
 
 bool SonobusAudioProcessor::storeGlobalState()
@@ -21709,4 +21760,11 @@ double SonobusAudioProcessor::getMonitoringDelayTimeFromAvgPeerLatency(float sca
 AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new SonobusAudioProcessor();
+}
+
+// A run-scoped switch from the taps file or the launch environment is "1".
+bool SonobusAudioProcessor::sbTapOn(const char* key)
+{
+    const char* v = sbtap::tapConf(key);
+    return v && v[0] == '1';
 }

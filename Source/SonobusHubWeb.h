@@ -71,6 +71,10 @@ private:
     std::string kickRequest(const std::string& body, bool& ok);   // POST /api/kick
     std::string unkickRequest(const std::string& body, bool& ok); // POST /api/unkick
     std::string removedJson() const;                              // GET /api/removed
+    std::string removeRequest(const std::string& body, bool& ok); // POST /api/remove (a previous player)
+    std::string previousJson() const;                             // GET /api/previous (newest first)
+    std::string stagesJson() const;                               // GET /api/stages (other stages on this computer)
+    std::string stagesRequest(const std::string& action, const std::string& body, bool& ok);   // POST /api/stages/<action>
     std::string stagePasswordRequest(const std::string& body, bool& ok);   // POST /api/stagepassword
     std::string licensesText() const;
     bool updateReady() const;

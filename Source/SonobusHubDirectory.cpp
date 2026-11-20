@@ -136,10 +136,12 @@ void HubStageDirectory::run() {
     int intervalS = 60;
     int64_t nextAt = 0;
     std::string heldWhy;   // the hold last acted on
+    std::string lastOutcome;   // the check-in outcome last logged
     while (!threadShouldExit()) {
         const auto st = mHub.stageSettings();
         const uint64_t gen = mHub.stageSettingsGeneration();
         const int64_t now = juce::Time::currentTimeMillis();
+        if (!mListed && lastOutcome == "listed") lastOutcome.clear();   // the listing was taken down: the next outcome is news
         if (!st.list) {
             if (mListed) leave();
             seenGen = gen;
@@ -175,7 +177,9 @@ void HubStageDirectory::run() {
             auto v = juce::JSON::parse(juce::String::fromUTF8(reply.c_str()));
             auto* o = v.getDynamicObject();
             if (!reached || o == nullptr) {
+                const std::string outcome = "directory not reachable" + (status > 0 ? " (HTTP " + std::to_string(status) + ")" : std::string());
                 mHub.setStageListingStatus(3, "Directory not reachable" + (status > 0 ? " (HTTP " + std::to_string(status) + ")" : std::string()));
+                if (outcome != lastOutcome) { lastOutcome = outcome; std::cout << "[HUB-STAGES] check-in failed: " << outcome << ", next try in 60 s\n"; }
                 intervalS = 60;
             } else {
                 const bool listed = (bool) o->getProperty("listed");
@@ -184,7 +188,8 @@ void HubStageDirectory::run() {
                 if (listed) mHub.setStageListingStatus(1, "Listed at " + host.toStdString());
                 else if (reason == "waiting for approval") mHub.setStageListingStatus(2, "Waiting for approval at " + host.toStdString());
                 else mHub.setStageListingStatus(2, "Not listed: " + (reason.empty() ? std::string("refused") : reason));
-                if (listed != mListed) std::cout << "[HUB-STAGES] " << (listed ? "listed" : "not listed: " + reason) << "\n";
+                const std::string outcome = listed ? std::string("listed") : "not listed: " + (reason.empty() ? std::string("refused") : reason);
+                if (outcome != lastOutcome) { lastOutcome = outcome; std::cout << "[HUB-STAGES] " << outcome << "\n"; }
                 mListed = listed;
                 const int next = (int) o->getProperty("next_checkin_s");
                 intervalS = juce::jlimit(15, 600, next > 0 ? next : 60);

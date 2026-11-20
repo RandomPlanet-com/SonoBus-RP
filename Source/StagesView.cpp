@@ -83,6 +83,16 @@ juce::Colour pingColour(float ms) {
     return ms <= sbplus::kStagePingGreenMs ? kGood : ms <= sbplus::kStagePingYellowMs ? kWarn : kBad;
 }
 
+// The open / closed arrow of a stage row, also drawn by the header's Expand all cell
+void drawOpenArrow(juce::Graphics& g, const juce::Rectangle<float>& area, bool open, juce::Colour c) {
+    const auto a = area.withSizeKeepingCentre(9.0f, 9.0f);
+    juce::Path p;
+    if (open) p.addTriangle(a.getX(), a.getY() + 1.5f, a.getRight(), a.getY() + 1.5f, a.getCentreX(), a.getBottom() - 0.5f);
+    else      p.addTriangle(a.getX() + 1.5f, a.getY(), a.getRight() - 0.5f, a.getCentreY(), a.getX() + 1.5f, a.getBottom());
+    g.setColour(c);
+    g.fillPath(p);
+}
+
 void drawLock(juce::Graphics& g, juce::Rectangle<int> cell, juce::Colour c) {
     const auto r = cell.toFloat().withSizeKeepingCentre(10.0f, 12.0f);
     g.setColour(c);
@@ -366,12 +376,7 @@ public:
     void paintVerticalConnectingLine(juce::Graphics&, const juce::Line<float>&) override {}
 
     void paintOpenCloseButton(juce::Graphics& g, const juce::Rectangle<float>& area, juce::Colour, bool mouseOver) override {
-        const auto a = area.withSizeKeepingCentre(9.0f, 9.0f);
-        juce::Path p;
-        if (isOpen()) p.addTriangle(a.getX(), a.getY() + 1.5f, a.getRight(), a.getY() + 1.5f, a.getCentreX(), a.getBottom() - 0.5f);
-        else          p.addTriangle(a.getX() + 1.5f, a.getY(), a.getRight() - 0.5f, a.getCentreY(), a.getX() + 1.5f, a.getBottom());
-        g.setColour(mouseOver ? kText : kDim);
-        g.fillPath(p);
+        drawOpenArrow(g, area, isOpen(), mouseOver ? kText : kDim);
     }
 
     void paintItem(juce::Graphics& g, int width, int height) override {
@@ -483,7 +488,8 @@ public:
     }
     void itemOpennessChanged(bool open) override {
         if (owner.mRebuilding) return;
-        if (open) owner.mOpen.insert(stage.id); else owner.mOpen.erase(stage.id);
+        owner.mOpenChoice[stage.id] = open;
+        owner.updateExpandAll();
     }
     void itemSelectionChanged(bool selected) override {
         if (owner.mRebuilding) return;
@@ -492,9 +498,38 @@ public:
         owner.updateConnect();
     }
 
+    const Stage& getStage() const { return stage; }
+
 private:
     StagesView& owner;
     Stage stage;
+};
+
+// The header cell above the open arrows: one click opens or closes every stage.
+class StagesView::ExpandAllButton : public juce::Button
+{
+public:
+    ExpandAllButton() : juce::Button("ExpandAll") { setWantsKeyboardFocus(false); setShowsOpen(false); }
+
+    bool showsOpen() const { return open; }
+    void setShowsOpen(bool o) {
+        open = o;
+        setTooltip(o ? TRANS("Collapse all") : TRANS("Expand all"));
+        repaint();
+    }
+
+    void paintButton(juce::Graphics& g, bool over, bool down) override {
+        auto r = getLocalBounds();
+        g.setColour(kHeaderBg);
+        g.fillRect(r);
+        g.setColour(kSep);   // the header's own lines
+        g.fillRect(r.removeFromBottom(1));
+        g.fillRect(r.removeFromRight(1));
+        drawOpenArrow(g, r.toFloat(), open, over || down ? kText : kDim);
+    }
+
+private:
+    bool open = false;
 };
 
 // The opened part of a stage: a small table of who is playing, then how long it has been listed and the invite link.
@@ -739,6 +774,9 @@ StagesView::StagesView()
     mHeader.setSortColumnId(colPing, true);
     mHeader.addListener(this);
     addAndMakeVisible(mHeader);
+    mExpandAll = std::make_unique<ExpandAllButton>();
+    mExpandAll->onClick = [this] { setAllOpen(! mExpandAll->showsOpen()); };
+    addAndMakeVisible(*mExpandAll);
 
     mTree.setColour(juce::TreeView::backgroundColourId, kBg);
     mTree.setIndentSize(kIndent);
@@ -781,6 +819,9 @@ void StagesView::setActive(bool active)
 {
     if (mWorker->active.exchange(active) == active) return;
     if (active) {
+        mAllOpen = true;   // each viewing starts with the stages open
+        mOpenChoice.clear();
+        rebuild();
         mTouchedAt = juce::Time::getMillisecondCounter();
         mIdle = false;
         mWorker->idle = false;
@@ -924,6 +965,7 @@ void StagesView::resized()
     header.removeFromRight(mTree.getViewport()->getScrollBarThickness());
     mHeader.setBounds(header);
     mHeader.resizeAllColumnsToFit(header.getWidth());
+    mExpandAll->setBounds(columnRect(colOpen).translated(header.getX(), header.getY()).withHeight(header.getHeight()));
     mTree.setBounds(r);
     if (mRoot != nullptr) mRoot->treeHasChanged();
 }
@@ -1161,7 +1203,7 @@ void StagesView::rebuild()
         }
         item->addSubItem(new SubItem(*this, s, SubItem::info));
         mRoot->addSubItem(item);
-        if (mOpen.count(s.id) > 0) item->setOpen(true);
+        if (wantOpen(s)) item->setOpen(true);
         if (s.id == mSelectedId) item->setSelected(true, false, juce::dontSendNotification);
     }
     mRebuilding = false;
@@ -1169,6 +1211,57 @@ void StagesView::rebuild()
     mTree.getViewport()->setViewPosition(0, scrollY);
     updateStatus();
     updateConnect();
+    updateExpandAll();
+}
+
+bool StagesView::wantOpen(const Stage& s) const
+{
+    const auto it = mOpenChoice.find(s.id);
+    if (it != mOpenChoice.end()) return it->second;
+    return mAllOpen && s.count > 0;   // a stage with nobody on it shows just its row
+}
+
+bool StagesView::mostlyOpen() const
+{
+    int withPlayers = 0, openWith = 0, all = 0, openAll = 0;
+    for (int i = 0; i < mRoot->getNumSubItems(); ++i) {
+        const auto* item = dynamic_cast<const StageItem*>(mRoot->getSubItem(i));
+        if (item == nullptr) continue;
+        const bool o = item->isOpen();
+        ++all; openAll += o ? 1 : 0;
+        if (item->getStage().count > 0) { ++withPlayers; openWith += o ? 1 : 0; }
+    }
+    return withPlayers > 0 ? openWith * 2 >= withPlayers : all > 0 && openAll * 2 >= all;
+}
+
+void StagesView::setAllOpen(bool open)
+{
+    touched();
+    mAllOpen = open;
+    if (open) {
+        for (auto it = mOpenChoice.begin(); it != mOpenChoice.end();)   // keeps empty stages the user opened
+            it = it->second ? std::next(it) : mOpenChoice.erase(it);
+        bool anyPlayers = false;
+        for (const auto& s : mRows) anyPlayers = anyPlayers || s.count > 0;
+        if (! anyPlayers)   // nobody anywhere: open every stage
+            for (const auto& s : mRows) mOpenChoice[s.id] = true;
+    } else {
+        mOpenChoice.clear();
+    }
+    mRebuilding = true;
+    for (int i = 0; i < mRoot->getNumSubItems(); ++i)
+        if (auto* item = dynamic_cast<StageItem*>(mRoot->getSubItem(i)))
+            item->setOpen(wantOpen(item->getStage()));
+    mRebuilding = false;
+    updateExpandAll();
+}
+
+void StagesView::updateExpandAll()
+{
+    if (mExpandAll != nullptr && mRoot != nullptr) {
+        const bool o = mostlyOpen();
+        if (o != mExpandAll->showsOpen()) mExpandAll->setShowsOpen(o);
+    }
 }
 
 void StagesView::flash(const juce::String& note)

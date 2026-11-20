@@ -2,6 +2,31 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-20
+
+### SonoBus RP 1.3.6
+
+- Default User Level now sets the starting level of each new player on a stage; players you have set before keep your level.
+- Stages list: stages open with their players shown; Expand all / Collapse all in the header corner.
+- Tick boxes take clicks on the box and its text only.
+- The sort arrow in table headers is easy to see.
+- Sends the hub an anonymous install id, so a removal by the host still holds after a name change.
+
+### SonoBus RP Plugins 1.3.6
+
+- The changes of SonoBus RP 1.3.6.
+
+### SonoBus RP Hub 1.3.5
+
+- Previous players: kept (up to 1000); remove with the same choices as Kick; forget one or clear the list.
+- A removed player stays out under another name (players 1.3.6 and newer); Allow back from the list.
+- Optional: forget players not seen for a number of days (off by default).
+- Run MULTIPLE stages on one server: New stage, Start, Stop, Settings, Move ports, Delete, from the window or the web page.
+- Stages take the next ports in a row, so one port range covers them all.
+- Stages come back by themselves after a restart or an update.
+- A stage's place is City and State / Region.
+- Wider version column; plugin players show Mac AU, Mac VST3 or Win VST3.
+
 ## 2026-11-19
 
 ### SonoBus RP Plugins 1.3.5

@@ -3,6 +3,7 @@
 // SonobusHubUpdater: see SonobusHubUpdater.h
 #include "SonobusHubUpdater.h"
 #include "SonobusHubGeo.h"
+#include "SonobusHubSettings.h"
 #include <cstdio>
 #include <iostream>
 
@@ -216,7 +217,7 @@ bool hubCanUpdateInPlace() {
 #endif
 }
 
-juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(const juce::String&)>& progress) {
+static juce::Result installUpdate(const HubUpdateZip& zip, const std::function<bool(const juce::String&)>& progress) {
     using R = juce::Result;
 #if JUCE_MAC
     if (!hubCanUpdateInPlace()) return R::fail("This copy of the hub cannot update itself. Use the installer instead.");
@@ -254,6 +255,7 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     const auto newBuild = plistValue(staged, "CFBundleVersion"), curBuild = plistValue(current, "CFBundleVersion");
     if (!buildIsNewer(curBuild, newBuild)) return R::fail("The download (" + newBuild + ") is not newer than this hub (" + curBuild + ")");
     if (!progress("Installing...")) return R::fail("Cancelled");
+    hub_settings::stopStagesForUpdate();   // the other stages run this same program: they stop now and start again with the new hub
 
     const auto previous = parent.getChildFile(current.getFileName() + ".previous");
     previous.deleteRecursively();
@@ -300,6 +302,7 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     const juce::String curBuild(hubBuildId());
     if (!buildIsNewer(curBuild, newBuild)) return R::fail("The download (" + newBuild + ") is not newer than this hub (" + curBuild + ")");
     if (!progress("Installing...")) return R::fail("Cancelled");
+    hub_settings::stopStagesForUpdate();   // the other stages run this same program: they stop now and start again with the new hub
 
     const auto previous = parent.getChildFile(current.getFileName() + ".previous");
     previous.deleteFile();
@@ -343,6 +346,7 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     const juce::String curBuild(hubBuildId());
     if (!buildIsNewer(curBuild, newBuild)) return R::fail("The download (" + newBuild + ") is not newer than this hub (" + curBuild + ")");
     if (!progress("Installing...")) return R::fail("Cancelled");
+    hub_settings::stopStagesForUpdate();   // the other stages run this same program: they stop now and start again with the new hub
 
     // A running program can be renamed but not overwritten: it steps aside as <name>.previous (one kept).
     const auto previous = parent.getChildFile(current.getFileName() + ".previous");
@@ -361,6 +365,14 @@ juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(
     juce::ignoreUnused(zip, progress);
     return R::fail("In-place update is not available on this system");
 #endif
+}
+
+// The main hub's other stages stop just before the program is replaced and come back when the new hub starts. When
+// the update fails, they are started again here, on the hub that keeps running.
+juce::Result hubInstallUpdate(const HubUpdateZip& zip, const std::function<bool(const juce::String&)>& progress) {
+    const auto r = installUpdate(zip, progress);
+    if (r.failed()) hub_settings::restartStartedStages();
+    return r;
 }
 
 } // namespace sb_hub_gui

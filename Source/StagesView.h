@@ -64,6 +64,7 @@ private:
     class Worker;
     class StageItem;
     class SubItem;
+    class ExpandAllButton;
 
     void tableColumnsChanged(juce::TableHeaderComponent*) override;
     void tableColumnsResized(juce::TableHeaderComponent*) override;
@@ -86,6 +87,10 @@ private:
     void layoutConnectRow();
     void updateConnect();
     void connectSelected();
+    bool wantOpen(const Stage& s) const;   // stages open by default; the user's choices hold for this viewing
+    bool mostlyOpen() const;
+    void setAllOpen(bool open);
+    void updateExpandAll();
 
     juce::TextEditor mSearch;
     juce::ComboBox mGenre, mCountry, mKind;
@@ -97,12 +102,14 @@ private:
     juce::uint32 mNoticeAt = 0;
     juce::String mHereShown;
     juce::TableHeaderComponent mHeader;
+    std::unique_ptr<ExpandAllButton> mExpandAll;   // the header cell above the open arrows
     juce::TreeView mTree;
     std::unique_ptr<juce::TreeViewItem> mRoot;
     juce::Rectangle<int> mFooter;
 
     std::vector<Stage> mStages, mRows;   // all stages, and the rows shown
-    std::set<juce::String> mOpen;
+    std::map<juce::String, bool> mOpenChoice;   // stages the user opened or closed while the list is showing
+    bool mAllOpen = true;                        // what an untouched stage with players shows
     juce::String mSelectedId, mNote;
     juce::uint32 mNoteUntil = 0;
     juce::int64 mFetchedAt = 0;

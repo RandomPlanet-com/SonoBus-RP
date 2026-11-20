@@ -18,6 +18,10 @@ public:
 
     void setLanguageCode(const String & lang, bool useUniversalFont=false);
 
+    // Table headers: the sort arrow in the header's text colour (the default draws it black)
+    void drawTableHeaderColumn (Graphics&, TableHeaderComponent&, const String& columnName, int columnId,
+                                int width, int height, bool isMouseOver, bool isMouseDown, int columnFlags) override;
+
     //void fillWithBackgroundTexture (Graphics&);
     //static void fillWithBackgroundTexture (Component&, Graphics&);
 

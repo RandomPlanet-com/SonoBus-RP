@@ -1060,6 +1060,15 @@ void OptionsView::resized()  {
     optionsBox.performLayout(mOptionsComponent->getLocalBounds());
     recOptionsBox.performLayout(mRecOptionsComponent->getLocalBounds());
 
+    // A tick box takes clicks on the box and its text only, not on the empty rest of its row
+    for (auto * holder : { mOptionsComponent.get(), mRecOptionsComponent.get() }) {
+        for (auto * child : holder->getChildren()) {
+            if (auto * toggle = dynamic_cast<ToggleButton*>(child)) {
+                toggle->setSize(jmin(toggle->getWidth(), SbTextFit::toggleWidth(*toggle, toggle->getHeight())), toggle->getHeight());
+            }
+        }
+    }
+
     mOptionsAutosizeStaticLabel->setBounds(mBufferTimeSlider->getBounds().removeFromLeft(mBufferTimeSlider->getWidth()*0.75));
 
     auto deflabbounds = mOptionsDefaultLevelSlider->getBounds().removeFromLeft(mOptionsDefaultLevelSlider->getWidth()*0.75);

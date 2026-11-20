@@ -171,7 +171,7 @@ th,td{padding:7px 6px;text-align:left;white-space:nowrap;border-bottom:1px solid
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--card);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;white-space:normal;line-height:1.15;vertical-align:bottom}
 th.num,td.num{text-align:left}
 .u{color:var(--dim);font-size:11px;margin-left:2px}.sl{margin:0 4px}.sw{white-space:nowrap}.sa{color:#fff;margin-left:4px;font-size:10px}
-#ptable{width:1749px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}#ptable th.nosort{cursor:default}.nc{text-transform:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}td.ifc{position:relative;overflow:visible}td.ifc:hover::after{content:attr(data-tip);position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}
+#ptable{width:1791px}#rtable{width:auto}#ptable th{cursor:pointer;user-select:none}#ptable th.nosort{cursor:default}.nc{text-transform:none}th.ctr,td.ctr{text-align:left}.tip{display:none;position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}td.user:hover .tip{display:block}td.ifc{position:relative;overflow:visible}td.ifc:hover::after{content:attr(data-tip);position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:-12px;z-index:6;background:#262626;border:1px solid #4a4a4a;border-radius:5px;padding:3px 8px;font-size:12px;color:#cfcfcf;white-space:nowrap}
 td.user{white-space:normal;word-break:break-word;position:relative;overflow:visible}td.ins{white-space:normal;word-break:break-word}
 tr:last-child td{border-bottom:0}
 .g{color:#5fd26b}.y{color:#e3c141}.r{color:#ff5e5e}.d{color:#777}.rec{color:#ff5e5e;font-weight:700}
@@ -190,6 +190,8 @@ tr:last-child td{border-bottom:0}
 .row input[type=checkbox]{width:18px;height:18px;accent-color:var(--teal)}
 .tag{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
 .tag.live{color:#5fd26b}.tag.restart{color:#e3c141}.tag.relaunch{color:#f0a04b}
+.mask{-webkit-text-security:disc}.eye{padding:2px 8px;font-size:12px;margin-left:-8px}
+.pill{display:inline-block;background:var(--teal2);color:var(--teal);border:1px solid var(--teal);border-radius:10px;padding:0 8px;font-size:12px;font-weight:600;margin-right:6px}
 .msg{margin-left:6px;color:var(--dim)}.msg.ok{color:#5fd26b}.msg.err{color:#ff5e5e}
 .notice{color:var(--dim);padding:6px 0}
 iframe.log{width:100%;height:70vh;border:0;background:#0e0e0e;border-radius:6px}
@@ -197,7 +199,7 @@ iframe.log{width:100%;height:70vh;border:0;background:#0e0e0e;border-radius:6px}
 button.kick{padding:1px 6px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.kick:hover{background:#6a2a2a}
 button.slink{padding:2px 8px;font-size:12px;margin-right:6px}button.srm{padding:1px 7px;font-size:12px;background:#3a2020;border-color:#5a2a2a}button.srm:hover{background:#6a2a2a}#stable tbody tr[data-g]{cursor:pointer}#stable tbody tr[data-g]:hover td{background:#1b1b1b}#stable tbody tr.sel td{background:var(--teal2)}
 td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
-#xtable{width:auto}
+#pvtable{width:auto}td.rmst{color:#e3c141}.aka{display:block;font-size:11.5px;color:var(--dim)}button.pvx:disabled{opacity:.35;cursor:not-allowed}td.ver{white-space:normal;line-height:1.2}td.ver .vh{display:block;font-size:11.5px;color:var(--dim)}
 .ovl{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:20}
 .dlg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:300px;max-width:90vw}
 .dlg label{display:block;padding:4px 0;cursor:pointer}.dlg input[type=radio]{accent-color:var(--teal);margin-right:8px}.dlg .hint{margin:8px 0 0}
@@ -214,7 +216,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
 <div class="u2"><span id="upd_l"></span><a id="upd_n" href="#" target="_blank" rel="noopener" title="Opens the list of changes on the website"></a></div></div>
 <button id="updgo"></button></div>
 <div class="card">
- <div class="head"><img class="logo" src="/icon.png" alt=""><div class="titles"><h1 id="title">SonoBus RP Hub</h1><span class="sub" id="where"></span></div></div>
+ <div class="head"><img class="logo" src="/icon.png" alt=""><div class="titles"><h1 id="title">SonoBus RP Hub</h1><span class="sub" id="where"></span><span class="sub" id="stagenote"></span></div></div>
  <div class="kvs" id="hub"><span class="kv">uptime <b class="slot" id="k_up">–</b></span><span class="kv">players <b class="slot" id="k_n">–</b></span><span class="kv">audio <b class="slot" id="k_audio">–</b></span><span class="kv">codec <b class="slot" id="k_codec">–</b></span><span class="kv">hub CPU <b class="slot" id="k_cpu">–</b></span><span class="kv">server <b class="slot" id="k_srv">–</b></span><span class="kv">audio UDP <b class="slot" id="k_udp">–</b></span><span class="kv">version <b class="slot" id="k_ver">–</b> <span class="d" id="k_build"></span></span><span class="kv r" id="k_err"></span></div>
  <div class="tools">
   <button id="copy" title="Copy this hub's stage link for players">Copy Stage Link</button><span id="link" class="link"></span>
@@ -224,21 +226,18 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
   <button id="viewlog" title="Open the hub's connection log in a new window">View Log</button>
  </div>
 </div>
-<div class="tabs" style="position:relative"><a href="/licenses" target="_blank" class="d" style="position:absolute;right:4px;bottom:6px;font-size:12px" title="Third-party notices for the libraries in this hub">Notices</a><a class="tab" href="#status" data-tab="status" title="Players, stage link and recent stages.">Status</a><a class="tab" href="#settings" data-tab="settings" title="Hub settings.">Settings</a><a class="tab" href="#log" data-tab="log" title="Connection history and the hub log.">Log</a></div>
+<div class="tabs" style="position:relative"><a href="/licenses" target="_blank" class="d" style="position:absolute;right:4px;bottom:6px;font-size:12px" title="Third-party notices for the libraries in this hub">Notices</a><a class="tab" href="#status" data-tab="status" title="Players, stage link and recent stages.">Status</a><a class="tab" href="#settings" data-tab="settings" title="Hub settings.">Settings</a><a class="tab" href="#log" data-tab="log" title="Connection history and the hub log.">Log</a><a class="tab" href="#stages" data-tab="stages" id="stagestab" style="display:none" title="Other stages this computer hosts, each with its own settings folder and ports.">Other stages</a></div>
 <div class="card pane" id="pane-status">
  <div class="tools" style="margin:0 0 12px"><label for="grp">Stage</label><input type="text" id="grp" title="Type a new stage name, then click Apply."><button id="grpbtn" class="warn" title="Switch the hub to this stage. The hub restarts and players must rejoin.">Apply (restarts hub)</button><span style="flex:1 1 auto"></span><input type="text" id="gmsg" maxlength="1000" placeholder="Message to the stage" title="Sends a chat message to every player, from Hub."><button id="gmsgbtn" title="Send this message to every player.">Send</button><span id="gmsgnote" class="msg"></span></div>
- <h2>Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
- <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:118px"><col style="width:56px"></colgroup><thead><tr>
- <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version and system, as the player reports it (hover a row for the build); older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
+ <h2 title="Everyone connected to this hub right now. The heading counts the players connected now and the different players who have joined since the hub started.">Players<span id="pcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px" title="Players connected right now, and how many different players have joined since the hub started"></span></h2>
+ <div class="wrap"><table id="ptable"><colgroup><col style="width:190px"><col style="width:140px"><col style="width:150px"><col style="width:70px"><col style="width:82px"><col style="width:88px"><col style="width:60px"><col style="width:130px"><col style="width:68px"><col style="width:94px"><col style="width:152px"><col style="width:104px"><col style="width:58px"><col style="width:88px"><col style="width:101px"><col style="width:160px"><col style="width:56px"></colgroup><thead><tr>
+ <th title="Point at a name to see the player's address">Player</th><th title="The instrument this player has set; empty when not set">Instrument</th><th title="City / region looked up from the player's public address">Location</th><th class="num">Inputs</th><th title="Signal level of this player's inputs as the hub receives them">Signal</th><th class="ctr" title="What this player sends into the hub / what the hub sends to this player, in Mb/s (bits)">Up / Down <span class="nc">Mb/s</span></th><th class="num" title="Blocks the hub lost from this player's uplink (late past the hold or never arrived) — hub-side, unlike Dropouts">Lost (hub)</th><th class="ctr" title="This player's audio reaching the hub / the hub's audio reaching this player (ms): network one-way + the buffer at the receiving end">To / From hub</th><th class="num" title="How full the hub's jitter buffer for this player's stream is">JitBuf</th><th class="num" title="Arrival jitter of this player's packets at the hub (p99 of the last window) — the number the hold follows">Net jitter</th><th class="ctr" title="The hub's hold on this player's incoming stream / the player's own receive buffer as it reports it (ms); A = Auto, M = Manual">Hub / Player buf</th><th class="ctr" title="Underruns + pops the player itself heard since it joined (player-side); (+n) = in the last 10 s; xN = CoreAudio overloads in the last 10 s">Dropouts</th><th class="num" title="Age of the last hub latency report the player received">Lat feed</th><th title="The player's audio device buffer (samples) @ sample rate">Device</th><th title="Time since this player joined">Connected</th><th title="The player's version, system and plugin format; a plugin's host on the second line (hover for the build). Older players do not report it">Version</th><th class="nosort"></th></tr></thead><tbody id="rows"><tr id="norows"><td colspan="17" class="d">no players</td></tr></tbody></table></div>
 )HTML" R"HTML( <div class="foot"><span class="kv">IN <b id="f_in">–</b></span><span class="kv">OUT <b id="f_out">–</b></span></div>
- <div id="xwrap" style="display:none">
-  <h2 style="margin-top:20px" title="Players the host removed from this stage. Allow back lets a player join again at once.">Removed players</h2>
-  <div class="wrap" id="xtwrap"><table id="xtable"><colgroup><col style="width:220px"><col style="width:190px"><col style="width:176px"><col style="width:120px"><col style="width:110px"></colgroup><thead><tr><th title="The name the player had when removed">Player</th><th title="The address the player had when removed. The name and the address are both kept out.">Address</th><th title="When the host removed this player">Removed</th><th title="How long this player is still kept out">Time left</th><th></th></tr></thead><tbody id="removed"></tbody></table></div>
-  <div id="xnote" class="notice" style="display:none">Set a Web password to see and manage removed players.</div>
- </div>
+ <h2 style="margin-top:20px" title="Everyone who joined this hub, newest first (the last 1000). Removed players stay at the top until you allow them back. Remove keeps a player out, like Kick; the X only takes a name off this list.">Previous players<span id="pvcount" style="color:var(--dim);font-weight:400;font-size:13px;margin-left:12px"></span><button id="pvclear" class="srm" style="display:none;font-weight:400;margin-left:16px;vertical-align:2px" title="Take everyone who is not connected off this list. Removed players stay removed.">Clear list</button></h2>
+ <div class="wrap"><table id="pvtable"><colgroup><col style="width:220px"><col style="width:190px"><col style="width:190px"><col style="width:60px"><col style="width:52px"><col style="width:236px"><col style="width:104px"><col style="width:40px"></colgroup><thead><tr><th title="The name the player joined with">Player</th><th title="City / region looked up from the player's last address">Location</th><th title="When this player was last on the stage">Last seen</th><th class="num" title="How many times this player has joined">Joins</th><th title="Whether this player is on the local network or the internet">Net</th><th title="For a player you removed: how long the removal lasts. Point at it to see the address.">Status</th><th></th><th></th></tr></thead><tbody id="prevrows"><tr><td colspan="8" class="d">loading…</td></tr></tbody></table></div>
 
  <h2 style="margin-top:20px" title="Stages this hub has served (newest first). Click one to see its players and to switch the hub back to it with the settings it ran with.">Recent stages</h2>
- <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:150px"><col style="width:150px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Stage</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Stage link (this hub's address + that stage name and password)">Stage link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
+ <div class="wrap"><table id="stable"><colgroup><col style="width:220px"><col style="width:190px"><col style="width:190px"><col style="width:70px"><col><col style="width:44px"></colgroup><thead><tr><th>Stage</th><th>First used</th><th>Last used</th><th class="num">Players</th><th title="Stage link (this hub's address + that stage name and password)">Stage link</th><th></th></tr></thead><tbody id="sessions"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
  <div id="sdetail" style="display:none">
   <h2 style="margin-top:18px" id="sdtitle">Stage</h2>
   <div class="wrap"><table id="rtable"><colgroup><col style="width:200px"><col style="width:170px"><col style="width:176px"><col style="width:176px"><col style="width:52px"><col style="width:52px"><col style="width:36px"></colgroup><thead><tr><th>Player</th><th>Location</th><th>Last joined</th><th>Last left</th><th class="num">Joins</th><th>Net</th><th></th></tr></thead><tbody id="recent"><tr><td colspan="6" class="d">–</td></tr></tbody></table></div>
@@ -258,6 +257,20 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
   <span id="smsg" class="msg"></span>
  </div>
 </div>
+)HTML" R"HTML(<div class="card pane" id="pane-stages">
+ <h2 title="Other stages this computer hosts. New stage makes one with this hub's audio settings and the next ports; Delete moves its folder to stages-deleted; a stage added by its path can only be taken off the list.">Other stages on this computer</h2>
+ <div class="hint" style="margin:0 0 10px">Each stage runs as its own instance on this hub server, with its own settings folder, ports, log and web page. Players join each stage by its own link.</div>
+ <div id="osfwd" style="margin:0 0 10px;font-weight:600" title="Open these ports for players outside this network: the main stage and every stage in this list."></div>
+ <div id="oswarn" class="y" style="display:none;margin:0 0 10px"></div>
+ <div class="wrap"><table id="ostable"><colgroup><col style="width:200px"><col><col style="width:200px"><col style="width:120px"><col style="width:190px"><col style="width:430px"></colgroup><thead><tr><th title="The stage name in that stage's settings">Stage</th><th title="That stage's folder: its settings, log and lists">Folder</th><th title="Connection port (TCP and UDP) / audio port (UDP) / web page port">Ports</th><th>State</th><th title="Players on that stage and what it receives and sends now">Players, in / out</th><th></th></tr></thead><tbody id="osrows"><tr><td colspan="6" class="d">loading…</td></tr></tbody></table></div>
+ <div id="osact" class="msg" style="margin:8px 0 0;min-height:18px"></div>
+ <div id="osnew" style="display:none;margin-top:14px">
+  <h2 style="font-size:15px">New stage</h2>
+  <div class="tools" style="flex-wrap:wrap;gap:8px 14px"><label for="osname">Stage name</label><input type="text" id="osname" style="width:200px" maxlength="60" title="The name players join. Its folder gets this name."><label for="ospw">Stage password (players)</label><input type="text" id="ospw" style="width:140px" placeholder="none" autocomplete="off" title="Players need it to join. Leave empty for an open stage."><label title="Show this stage in the Stages Directory once its ports are open to players"><input type="checkbox" id="oslist"> Listed in the Stages Directory</label><label for="oscity">City</label><input type="text" id="oscity" style="width:150px" title="The stage's city, shown on its page and in the Stages Directory"><label for="osregion">State / Province / Region</label><input type="text" id="osregion" style="width:90px" list="osrgl" title="For the United States and Canada the two-letter code, for example GA or ON; elsewhere as you write it"><datalist id="osrgl"></datalist><label for="oswpw">Web page password (this stage's own page)</label><input type="text" class="mask" id="oswpw" style="width:140px" placeholder="same as this hub" autocomplete="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" title="The password of the new stage's own web page. Leave empty to use this hub's."><button type="button" class="eye" data-for="oswpw" title="Show or hide what you typed">show</button><button id="osnewbtn" title="Make the stage with this hub's audio settings and the next free ports, and start it.">Create stage</button></div>
+  <div id="osmsg" class="msg" style="margin-top:8px;white-space:pre-line"></div>
+ </div>
+ <div id="osnote" class="notice" style="display:none"></div>
+</div>
 <div class="card pane" id="pane-log">
  <h2>Log</h2>
  <iframe class="log" id="logframe" title="hub log"></iframe>
@@ -268,7 +281,7 @@ td.pl{white-space:normal;word-break:break-word;color:var(--dim)}
  <label><input type="radio" name="kkeep" value="hour" checked>1 hour</label>
  <label><input type="radio" name="kkeep" value="restart">Until the hub restarts</label>
  <label><input type="radio" name="kkeep" value="permanent">Permanently</label>
- <div class="hint">You can allow them back at any time under Removed players.</div>
+ <div class="hint">You can allow them back at any time in the Previous players list.</div>
  <div class="tools"><span style="flex:1 1 auto"></span><button id="kdcancel">Cancel</button><button id="kdok" class="warn">Remove</button></div>
 </div></div>
 <script>
@@ -323,7 +336,7 @@ function drawSessions(){const tb=$('sessions');
  tb.querySelectorAll('button.srm').forEach(b=>{b.onclick=async(ev)=>{ev.stopPropagation();const g=b.closest('tr').dataset.g;if(!confirm('Remove the stage "'+g+'" from Recent stages?'))return;
    try{const r=await fetch(api('/api/sessions/remove'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:g})});const d=await r.json();if(!d.ok){alert(d.error||'remove failed');return;}if(selGroup===g)selGroup=null;loadSessions(true);}catch(e){alert('remove failed');}};});
  drawDetail();}
-function drawDetail(){const picked=sessions.find(x=>x.group===selGroup),s=picked||sessions.find(x=>x.current);const d=$('sdetail');if(!s){d.style.display='none';return;}d.style.display='';
+function drawDetail(){const picked=sessions.find(x=>x.group===selGroup),s=picked;const d=$('sdetail');if(!s){d.style.display='none';return;}d.style.display='';
  $('spw').closest('.tools').style.display=picked?'':'none';
  setT($('sdtitle'),(picked?'Players seen on "'+s.group+'"':'Players seen on this stage')+' ('+s.playerCount+')');
  $('recent').innerHTML=s.players.length?sortRows(s.players,rSort,RKEYS).map(p=>`<tr><td class="user">${esc(p.user)}</td><td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${ft(p.lastJoinMs)}</td><td>${p.lastLeftMs>=p.lastJoinMs?ft(p.lastLeftMs):'<span class="g">connected</span>'}</td><td class="num">${p.joins}</td><td>${p.lan?'LAN':'WAN'}</td><td>${p.lastLeftMs>=p.lastJoinMs?`<button class="srm prm" data-u="${esc(p.user)}" title="Remove this player from this stage's list">✕</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="d">no players recorded on this stage</td></tr>';
@@ -338,11 +351,12 @@ $('sapply').onclick=async()=>{const s=sessions.find(x=>x.group===selGroup);if(!s
  if(!d.ok){m.textContent=d.error||('HTTP '+r.status);m.className='msg err';return;}
  restarting=true;$('spw').value='';$('sapply').disabled=true;m.textContent=`applied "${d.group}" (${d.applied} settings${d.passwordOverridden?', new password':''}) — hub restarting, players must rejoin…`;m.className='msg ok';}
  catch(e){m.textContent='apply failed: '+e;m.className='msg err';}};
-function showTab(t){if(!['status','settings','log'].includes(t))t='status';curTab=t;
+function showTab(t){if(!['status','settings','log','stages'].includes(t))t='status';curTab=t;
  document.querySelectorAll('.tab').forEach(a=>a.classList.toggle('on',a.dataset.tab===t));
  document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='pane-'+t));
  if(t==='log'&&!$('logframe').src)$('logframe').src=api('/log?embed=1');
  if(t==='settings')loadSettings();
+ if(t==='stages')loadStages();
  if(location.hash!=='#'+t)history.replaceState(null,'','#'+t);}
 window.addEventListener('hashchange',()=>showTab(location.hash.slice(1)));
 async function tick(){
@@ -350,7 +364,8 @@ async function tick(){
  const d=await r.json();const now=Date.now();const dt=prev?(now-prevT)/1000:0;const h=d.hub;
  if(restarting){restarting=false;$('smsg').textContent='hub is back up';$('smsg').className='msg ok';loadSettings();$('sdmsg').textContent='hub is back up';$('sdmsg').className='msg ok';$('sapply').disabled=false;loadSessions(true);}
  setT($('title'),'SonoBus RP Hub — '+h.group);
- const tabTitle=(h.group?h.group+' · ':'')+'SonoBus RP Hub';if(document.title!==tabTitle)document.title=tabTitle;
+ setH($('stagenote'),h.isStage?'<span class="pill">Other stage</span> This page is for the stage “'+esc(h.group)+'” only, one of the other stages on this hub server.'+(h.mainWebPort>0?' <a href="http://'+location.hostname+':'+h.mainWebPort+'/#stages" style="color:var(--teal)">Main hub page</a>':''):'');
+ const tabTitle=(h.group?h.group+' · ':'')+(h.isStage?'other stage · ':'')+'SonoBus RP Hub';if(document.title!==tabTitle)document.title=tabTitle;
  npeers=d.peers.length;setT($('pcount'),d.peers.length+' now · '+(h.playersSinceStart||0)+' since hub start');
  setT($('where'),(h.platform||'')+(h.location?'  ·  '+h.location:''));
  setT($('link'),h.joinLink||'');
@@ -366,6 +381,7 @@ async function tick(){
  setT($('slim'),stageLimits(h.stageMaxPlayers|0,h.stageMaxChannels|0,tout));
  setT($('k_up'),dur(h.uptimeSec));setT($('k_n'),String(d.peers.length));setT($('k_audio'),`${h.sampleRate} Hz / ${h.blockSize} samples`);setT($('k_codec'),h.codec);
  setT($('k_cpu'),h.cpuPct.toFixed(1)+'%');setT($('k_srv'),`${h.publicAddress}:${h.serverPort}`);setT($('k_udp'),String(h.udpPort));
+ if(h.settingsEnabled&&osManage===null)loadStages();if(curTab==='stages'&&(osTick++%2)===0)loadStages();
  drawUpdate(h);if(document.activeElement!==$('grp'))$('grp').value=h.group||'';setT($('k_ver'),'Hub '+(h.hubVersion||''));setT($('k_build'),`(build ${h.build||''}${h.commit?', '+h.commit:''})`);setT($('k_err'),'');
  if(curTab==='status'){
   const seen=new Set();
@@ -389,12 +405,13 @@ async function tick(){
    // Columns are fixed, so a value that gains a digit moves nothing outside its own cell.
    const pair=(x,y)=>`${x}<span class="d sl">/</span>${y}`;
    const mb=(v)=> v<0?'–':(v*8/1e6).toFixed(1);
-   const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}${p.plug&&/^(Mac|Windows|Linux|other)$/.test(p.os||'')?' · '+esc(p.plug):''}`:'<span class="d">–</span>';
+   const bare=/^(Mac|Windows|Linux|other)$/.test(p.os||''),host=(!bare&&p.plug&&p.plug.includes(' in '))?p.plug.slice(p.plug.indexOf(' in ')+4):'';
+   const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}${p.plug&&bare?' · '+esc(p.plug):''}${host?'<span class="vh">'+esc(host)+'</span>':''}`:'<span class="d">–</span>';
    const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,esc(p.inst||''),loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
 
    rowKeys.set(p.id,[p.user.toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
    let tr=rowMap.get(p.id);
-   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===7)td.className='ctr ifc';if(i===0)td.className='user';if(i===1)td.className='ins';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
+   if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===7)td.className='ctr ifc';if(i===0)td.className='user';if(i===1)td.className='ins';if(i===VERC)td.className='ver';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
    cells.forEach((c,i)=>setH(tr.children[i],c));
    {const it=(p.ifaceMs===undefined||p.ifaceMs<0)?'Audio interface: not known':'Audio interface '+p.ifaceMs.toFixed(1)+' ms';const ic=tr.children[7];if(ic.dataset.tip!==it)ic.dataset.tip=it;}   // the tip lives on the stable cell and is set only when its text changes
    setH(tr.children[COLS-1],h.settingsEnabled?`<button class="kick" data-u="${esc(p.user)}" title="Remove this player from the stage. You choose how long they stay out.">Kick</button>`:'');   // rebuilt only when the name or the setting changes
@@ -403,7 +420,7 @@ async function tick(){
   applySort();
   $('norows').style.display=rowMap.size?'none':'';
   if((sessN++%10)===0)loadSessions(false);
-  drawRemoved(h);
+  if((sessN%5)===1||h.settingsEnabled!==pvEnabled||(h.removedCount|0)!==pvRem){pvEnabled=h.settingsEnabled;pvRem=h.removedCount|0;loadPrev();}
   setT($('f_in'),kb(tin));setT($('f_out'),kb(tout));}
  prev=d;prevT=now;}catch(e){setT($('k_err'),restarting?'hub restarting…':'hub not responding: '+e);}
 }
@@ -413,28 +430,89 @@ $('pcbtn').onclick=async()=>{const r=await fetch(api('/api/portcheck'),{method:'
 $('viewlog').onclick=()=>{window.open(api('/log'),'_blank');};
 const post=(p,b)=>fetch(api(p),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 const needPw=(r,d)=>{if(!r.ok||!d.ok)alert(d.error||('Set a Web password to use this (HTTP '+r.status+')'));};
-let kickUser='',kickBtn=null;
-$('rows').addEventListener('click',(ev)=>{const b=ev.target.closest('button.kick');if(!b)return;kickUser=b.dataset.u;kickBtn=b;
- setT($('kdtitle'),'Remove '+kickUser+' from the stage?');document.querySelector('input[name=kkeep][value=hour]').checked=true;$('kdlg').style.display='flex';});
+let kickUser='',kickBtn=null,kickPath='/api/kick';
+function openRemove(u,b,path){kickUser=u;kickBtn=b;kickPath=path;
+ setT($('kdtitle'),path==='/api/kick'?'Remove '+u+' from the stage?':'Keep '+u+' out of the stage?');document.querySelector('input[name=kkeep][value=hour]').checked=true;$('kdlg').style.display='flex';}
+$('rows').addEventListener('click',(ev)=>{const b=ev.target.closest('button.kick');if(!b)return;openRemove(b.dataset.u,b,'/api/kick');});
 $('kdcancel').onclick=()=>{$('kdlg').style.display='none';};
 $('kdlg').onclick=(ev)=>{if(ev.target===$('kdlg'))$('kdcancel').click();};
 document.addEventListener('keydown',(ev)=>{if(ev.key==='Escape'&&$('kdlg').style.display!=='none')$('kdcancel').click();});
-$('kdok').onclick=async()=>{const keep=document.querySelector('input[name=kkeep]:checked').value,u=kickUser,b=kickBtn;$('kdlg').style.display='none';
- b.disabled=true;try{const r=await post('/api/kick',{user:u,keep});const d=await r.json().catch(()=>({}));
- if(!r.ok||!d.ok){alert(d.error||('Kick failed (HTTP '+r.status+')'));b.disabled=false;return;}b.textContent='Kicked';loadRemoved();}
- catch(e){alert('kick failed: '+e);b.disabled=false;}};
-// Removed players: every removal in force, each with Allow back. Fetched when the count changes and every 10 s.
-let xList=[],xCount=-1,xTick=0;
-const xLeft=(x)=>x.kind==='permanent'?'permanent':x.kind==='restart'?'until restart':Math.max(1,Math.ceil(x.leftSec/60))+' min';
-async function loadRemoved(){try{const r=await fetch(api('/api/removed'),{cache:'no-store'});if(!r.ok)return;xList=(await r.json()).removed||[];
- setH($('removed'),xList.length?xList.map((x,i)=>`<tr><td class="user">${esc(x.user)}</td><td>${x.addr?esc(x.addr):'<span class="d">–</span>'}</td><td>${ft(x.removedAtMs)}</td><td>${xLeft(x)}</td><td><button class="slink allow" data-i="${i}" title="Let this player join again now">Allow back</button></td></tr>`).join(''):'<tr><td colspan="5" class="d">no removed players</td></tr>');}catch(e){}}
-$('removed').addEventListener('click',async(ev)=>{const b=ev.target.closest('button.allow');if(!b)return;const x=xList[Number(b.dataset.i)];if(!x)return;b.disabled=true;
- try{const r=await post('/api/unkick',{user:x.user,addr:x.addr});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Allow back failed (HTTP '+r.status+')'));}catch(e){alert('allow back failed: '+e);}
- $('removed').dataset.h='';loadRemoved();});
-function drawRemoved(h){const n=h.removedCount|0;$('xwrap').style.display=n>0?'':'none';
- if(n>0){$('xtwrap').style.display=h.settingsEnabled?'':'none';$('xnote').style.display=h.settingsEnabled?'none':'';
-  if(h.settingsEnabled&&(n!==xCount||(xTick++%10)===0))loadRemoved();}
- xCount=n;}
+$('kdok').onclick=async()=>{const keep=document.querySelector('input[name=kkeep]:checked').value,u=kickUser,b=kickBtn,path=kickPath;$('kdlg').style.display='none';
+ b.disabled=true;try{const r=await post(path,{user:u,keep});const d=await r.json().catch(()=>({}));
+ if(!r.ok||!d.ok){alert(d.error||('Remove failed (HTTP '+r.status+')'));b.disabled=false;return;}b.textContent=path==='/api/kick'?'Kicked':'Removed';loadPrev();}
+ catch(e){alert('remove failed: '+e);b.disabled=false;}};
+)HTML" R"HTML(// Other stages on this computer (main hub only): New stage, Start / Stop, Delete (a stage this hub made) or Forget (one added by its path).
+let osManage=null,osTick=0,osList=[],osInfo={},osPre=false;
+const osRate=(b)=>b<0?'–':(b*8<1e6?Math.round(b*8/1000)+' kb/s':(b*8/1e6).toFixed(1)+' Mb/s');
+async function loadStages(){try{const r=await fetch(api('/api/stages'),{cache:'no-store'});if(r.status==403){osManage=false;return;}if(!r.ok)return;const d=await r.json();osManage=!!d.manage;osList=d.stages||[];osInfo=d;
+ $('stagestab').style.display=osManage?'':'none';if(!osManage&&curTab==='stages')showTab('status');
+ $('osnew').style.display=d.control?'':'none';const n=$('osnote');n.style.display=d.control?'none':'';if(!d.control)setT(n,'Only the main hub makes and starts other stages.');
+ setT($('osfwd'),d.forward||'');
+ if(!osPre){osPre=true;$('oscity').value=d.city||'';$('osregion').value=d.region||'';$('osrgl').innerHTML=(d.regionCodes||'').split(',').filter(c=>c).map(c=>'<option value="'+c+'">').join('');}
+ const w=$('oswarn');w.style.display=d.warning?'':'none';setT(w,d.warning||'');
+ setH($('osrows'),osList.length?osList.map((x,i)=>`<tr><td class="user">${x.group?esc(x.group):'<span class="d">–</span>'}</td><td class="pl"><span class="link" title="${esc(x.file)}">${esc(x.file.replace(/[\\/]hub_settings\.json$/,''))}</span>${x.managed?'':' <span class="d" title="This stage was added by its path. This hub starts and stops it; its folder is not this hub\'s to move.">(added by path)</span>'}${x.problem?' <span class="r">'+esc(x.problem)+'</span>':''}</td><td>${x.serverPort} / ${x.udpPort} / ${x.webPort>0?`<a href="http://${location.hostname}:${x.webPort}/" target="_blank" style="color:var(--teal)" title="Open that stage's web page">${x.webPort}</a>`:'<span class="d">off</span>'}</td><td>${x.stopping?'<span class="y">stopping…</span>':x.running?'<span class="g">running</span>':'<span class="d">stopped</span>'}${x.running&&!x.stopping&&x.portState>=0?`<div style="font-size:12px" class="${x.portState===1?'g':x.portState===2?'r':'d'}" title="${esc(x.portText||'')}">${x.portState===1?'ports open':x.portState===2?'ports closed':'ports: no verdict yet'}</div>`:''}</td><td>${x.running&&x.players>=0?x.players+' · '+osRate(x.inBps)+' / '+osRate(x.outBps):'<span class="d">–</span>'}</td><td>${d.control?(x.running?`<button class="osb warn" data-a="stop" data-i="${i}" title="Quit that stage cleanly. Its players drop.">Stop</button> <button class="osb" data-a="checkports" data-i="${i}" title="Test now whether players outside this network can reach this stage.">Check ports</button>`:`<button class="osb" data-a="start" data-i="${i}" title="Start that stage">Start</button>`)+' '+(x.webPort>0?`<button class="osb" data-a="settings" data-i="${i}" title="Open this stage's own page at its settings (name, password, listing, limits) in a new tab.">Settings</button>`:`<button class="osb" disabled title="This stage has no web page (no web page password). Set one in its hub_settings.json, or use its window.">Settings</button>`)+' '+(x.managed?`<button class="osb srm" data-a="delete" data-i="${i}" title="Stop this stage, take it out of the Stages Directory and move its folder to stages-deleted.">Delete</button>`:(x.running?'':`<button class="osb srm" data-a="forget" data-i="${i}" title="Take it off this list. Its folder and files stay.">Forget</button>`))+(x.moveTo>0&&!x.stopping?` <button class="osb" data-a="moveports" data-i="${i}" title="Move this stage to the next free ports of the row, ${x.moveTo} / ${x.moveTo+1}, so one range is forwarded for all stages. Its name, players and directory identity stay.">Move ports</button>`:''):''}</td></tr>`).join(''):'<tr><td colspan="6" class="d">no other stages yet</td></tr>');osCheck();}catch(e){}}
+$('osrows').addEventListener('click',async(ev)=>{const b=ev.target.closest('button.osb');if(!b)return;const x=osList[Number(b.dataset.i)],a=b.dataset.a;if(!x)return;const nm=x.group||x.file;
+ if(a==='settings'){window.open('http://'+location.hostname+':'+x.webPort+'/#settings','_blank');return;}
+ if(a==='stop'&&!confirm('Stop the stage "'+nm+'"? Its players drop.'))return;
+ if(a==='start'&&osInfo.warningOneMore&&!confirm(osInfo.warningOneMore+'\n\nStart "'+nm+'" anyway?'))return;
+ if(a==='moveports'&&!confirm('Move "'+nm+'" from ports '+x.serverPort+' / '+x.udpPort+' to '+x.moveTo+' / '+(x.moveTo+1)+'?\n\n'+(x.running?'The stage restarts: its players drop and must join again with the new stage link. ':'Its stage link changes. ')+'Forward the new ports before players join.'))return;
+ if(a==='forget'&&!confirm('Take "'+nm+'" off this list? Its folder and files stay.'))return;
+ if(a==='delete'&&!confirm('Delete the stage "'+nm+'"?\n\n'+(x.running?'It stops now and its players drop. ':'')+'It leaves the Stages Directory and this list. Its folder is kept in "stages-deleted" in this hub\'s data folder; moving it back to "stages" brings the stage back.'))return;
+ b.disabled=true;let d={},okr=false;try{const r=await post('/api/stages/'+a,{file:x.file});d=await r.json().catch(()=>({}));okr=r.ok&&d.ok;if(!okr&&!d.error)d.error='HTTP '+r.status;}catch(e){d={error:String(e)};}
+ osPend=null;
+ if(!okr)osSay(({start:'Could not start ',stop:'Could not stop ',delete:'Could not delete ',moveports:'Could not move the ports of ',checkports:'Could not check the ports of ',forget:'Could not take off the list: '})[a]+nm+': '+d.error,2);
+ else if(a==='forget')osSay(nm+' taken off the list',1);
+ else{osPend={file:x.file,a,nm,at:Date.now(),target:x.moveTo,runs:x.portRuns};osSay(({start:'Starting ',stop:'Stopping ',delete:'Deleting ',moveports:'Moving the ports of ',checkports:'Checking the ports of '})[a]+nm+'…',0);}
+ $('osrows').dataset.h='';setTimeout(loadStages,a==='forget'?0:1000);});
+// The status text under the list: "Starting X…" while an action runs, then its result for 5 s; a failure stays until
+// the next action; no result after 15 s = "No answer from X".
+document.addEventListener('click',(ev)=>{const b=ev.target.closest('button.eye');if(!b)return;const i=$(b.dataset.for);if(!i)return;const shown=i.classList.toggle('mask')===false;b.textContent=shown?'hide':'show';});
+let osPend=null,osClr=0;
+function osSay(t,k){const e=$('osact');e.textContent=t;e.className='msg'+(k===2?' err':k===1?' ok':'');clearTimeout(osClr);if(k===1)osClr=setTimeout(()=>{e.textContent='';},5000);}
+function osCheck(){if(!osPend)return;const p=osPend,st=osList.find(x=>x.file===p.file);let done='';
+ if(p.a==='start'&&st&&st.running&&!st.stopping)done=p.nm+' started';
+ else if(p.a==='stop'&&st&&!st.running)done=p.nm+' stopped';
+ else if(p.a==='delete'&&!st)done=p.nm+' deleted: its folder is kept in stages-deleted';
+ else if(p.a==='moveports'&&st&&st.serverPort===p.target&&!st.stopping&&(st.running||Date.now()-p.at>1500))done=p.nm+' moved to ports '+st.serverPort+' / '+st.udpPort;
+ if(p.a==='checkports'&&st&&st.portRuns!==p.runs){osPend=null;if(st.portState===1)osSay(p.nm+': ports open',1);else osSay(p.nm+': '+(st.portText||'ports closed'),st.portState===2?2:1);return;}
+ if(done){osPend=null;osSay(done,1);return;}
+ if(Date.now()-p.at>(p.a==='checkports'?30000:15000)){osPend=null;osSay('No answer from '+p.nm,2);return;}
+ setTimeout(loadStages,1000);}
+$('osnewbtn').onclick=async()=>{const m=$('osmsg'),name=$('osname').value.trim(),listed=$('oslist').checked,city=$('oscity').value.trim(),region=$('osregion').value.trim();
+ if(!name){m.textContent='Enter the stage name.';m.className='msg err';return;}
+ if(!city){m.textContent='Enter the city.';m.className='msg err';return;}
+ if(!region){m.textContent='Enter the state, province or region.';m.className='msg err';return;}
+ if(osInfo.warningOneMore&&!confirm(osInfo.warningOneMore+'\n\nCreate and start "'+name+'" anyway?'))return;
+ $('osnewbtn').disabled=true;
+ try{const r=await post('/api/stages/new',{name,password:$('ospw').value.trim(),listed,city,region,webPassword:$('oswpw').value});const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok){m.textContent=d.error||('HTTP '+r.status);m.className='msg err';}
+  else{const st=d.stage;['osname','ospw','oswpw'].forEach(i=>$(i).value='');$('oslist').checked=false;$('oswpw').classList.add('mask');
+   m.textContent='"'+st.group+'" is made'+(st.problem?' ('+st.problem+')':' and starting')+'. Ports '+st.serverPort+' / '+st.udpPort+(st.webPort>0?', web page on port '+st.webPort+'. Web page password: '+(d.webPasswordOwn?'the one you typed':"same as this hub's"):', no web page (this hub has no web page password)')+'.\n'+(d.forward||'')+(listed?'\nIt shows in the Stages Directory once its port check passes.':'');m.className='msg ok';setTimeout(()=>{if(m.className==='msg ok')m.textContent='';},30000);}
+ }catch(e){m.textContent='create failed: '+e;m.className='msg err';}
+ $('osnewbtn').disabled=false;$('osrows').dataset.h='';loadStages();setTimeout(loadStages,2500);};
+$('osname').onkeydown=(e)=>{if(e.key==='Enter')$('osnewbtn').click();};
+// Previous players, the one list: removed players first (how long, the address, Allow back; no X until allowed back),
+// then everyone else with Remove (the Kick choices, for someone who is gone or still here) and X (off this list only).
+let pvList=[],pvEnabled=false,pvRem=-1;
+const lastSeen=(p)=>p.lastLeftMs<p.lastJoinMs?'<span class="g">connected</span>':ft(p.lastLeftMs);
+const rmText=(p)=>p.kind==='permanent'?'Removed for good':p.kind==='restart'?'Removed until the hub restarts':'Removed · '+Math.max(1,Math.ceil(p.leftSec/60))+' min left';
+const pvName=(p)=>`<td class="user">${p.user?esc(p.user):'<span class="d">–</span>'}${p.aka?`<span class="aka" title="The same player joined under these names too">also seen as ${esc(p.aka)}</span>`:''}</td>`;
+function pvRow(p,i){const seen=p.joins>0,gone=p.lastLeftMs>=p.lastJoinMs;
+ const head=`${pvName(p)}<td>${p.location?esc(p.location):'<span class="d">–</span>'}</td><td>${seen?lastSeen(p):'<span class="d">–</span>'}</td><td class="num">${seen?p.joins:'<span class="d">–</span>'}</td><td>${seen?(p.lan?'LAN':'WAN'):'<span class="d">–</span>'}</td>`;
+ if(p.removed){const full=rmText(p)+(p.addr?' · address '+p.addr:'')+' · removed '+ft(p.removedAtMs)+(p.removedUser&&p.removedUser!==p.user?' as '+p.removedUser:'');
+  return `<tr class="rm">${head}<td class="rmst" title="${esc(full)}">${rmText(p)}</td><td>${pvEnabled?`<button class="slink allow" data-i="${i}" title="Let this player join again now">Allow back</button>`:''}</td><td title="Allow back first">${pvEnabled?'<button class="srm pvx" disabled title="Allow back first">✕</button>':''}</td></tr>`;}
+ return `<tr>${head}<td></td><td>${pvEnabled?`<button class="kick prv" data-i="${i}" title="Keep this player out of the stage. You choose how long.">Remove</button>`:''}</td><td>${pvEnabled&&gone?`<button class="srm pvx" data-i="${i}" title="Take this player off the list">✕</button>`:''}</td></tr>`;}
+async function loadPrev(){try{const r=await fetch(api('/api/previous'),{cache:'no-store'});if(!r.ok)return;pvList=(await r.json()).players||[];
+ setT($('pvcount'),pvList.length?String(pvList.length):'');$('pvclear').style.display=pvEnabled&&pvList.some(p=>!p.removed&&p.lastLeftMs>=p.lastJoinMs)?'':'none';
+ setH($('prevrows'),pvList.length?pvList.map(pvRow).join(''):'<tr><td colspan="8" class="d">nobody has joined yet</td></tr>');}catch(e){}}
+$('prevrows').addEventListener('click',async(ev)=>{const a=ev.target.closest('button.allow');if(a){const p=pvList[Number(a.dataset.i)];if(!p)return;a.disabled=true;
+  try{const r=await post('/api/unkick',{user:p.removedUser,addr:p.addr||''});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Allow back failed (HTTP '+r.status+')'));}catch(e){alert('allow back failed: '+e);}
+  $('prevrows').dataset.h='';loadPrev();return;}
+ const x=ev.target.closest('button.pvx');if(x){const p=pvList[Number(x.dataset.i)];if(!p||!confirm('Take "'+p.user+'" off the previous players list?'))return;
+  try{const r=await post('/api/previous/forget',{user:p.user});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('HTTP '+r.status));}catch(e){}loadPrev();return;}
+ const b=ev.target.closest('button.prv');if(!b)return;const p=pvList[Number(b.dataset.i)];if(p)openRemove(p.user,b,'/api/remove');});
+$('pvclear').onclick=async()=>{if(!confirm('Clear the previous players list? Everyone who is not connected leaves it. Removed players stay removed.'))return;
+ try{const r=await post('/api/previous/clear',{});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('HTTP '+r.status));}catch(e){}loadPrev();};
 $('restartbtn').onclick=async()=>{if(!confirm('Restart the hub? Every player drops and rejoins.'))return;try{const r=await post('/api/settings',{values:{},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('grpbtn').onclick=async()=>{const g=$('grp').value.trim();if(!g)return;if(!confirm('Switch the hub to stage "'+g+'"? The hub restarts and players must rejoin.'))return;try{const r=await post('/api/settings',{values:{group:g},restart:true});needPw(r,await r.json().catch(()=>({})));}catch(e){}};
 $('gmsgbtn').onclick=async()=>{const t=$('gmsg').value.trim();if(!t)return;try{const r=await post('/api/chat',{message:t});const d=await r.json().catch(()=>({}));needPw(r,d);if(d.ok){$('gmsg').value='';$('gmsgnote').textContent='sent to '+d.sent;setTimeout(()=>$('gmsgnote').textContent='',3000);}}catch(e){}};
@@ -452,14 +530,16 @@ function drawUpdate(h){const bar=$('updbar');updUrl=h.updateUrl||'';updReady=!!h
 $('updgo').onclick=async()=>{if(!updReady){if(updUrl)window.open(updUrl,'_blank');return;}
  if(!confirm('Install the update? The hub restarts, so every player drops and rejoins.'))return;
  try{const r=await fetch(api('/api/update/install'),{method:'POST'});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)alert(d.error||('Set a Web password to install updates (HTTP '+r.status+')'));}catch(e){alert('update failed: '+e);}};
-)HTML" R"HTML(let fields=[],detected='',updUrl='',updReady=false,npeers=0;
+)HTML" R"HTML(let fields=[],detected='',updUrl='',updReady=false,npeers=0,regions={};
+function rglFill(){const c=$('f_stage_country'),l=$('rgl');if(!c||!l)return;l.innerHTML=(regions[c.value.trim().toUpperCase()]||'').split(',').filter(x=>x).map(x=>'<option value="'+x+'">').join('');}
 function fieldHtml(f){
  const id='f_'+f.key,tip=esc(f.tip||'');let inp;
  if(f.kind==1) inp=`<input type="checkbox" id="${id}" ${f.value=='1'?'checked':''} title="${tip}">`;
  else if(f.kind==2) inp=`<select id="${id}" title="${tip}">${f.choices.split(',').map(c=>`<option value="${esc(c)}" ${c==f.value?'selected':''}>${esc(c)}</option>`).join('')}</select>`;
  else if(f.kind==3&&f.key=='group_password') return pwBlock(f);
- else if(f.kind==3) inp=`<input type="password" id="${id}" value="" placeholder="${f.set?'Type a new password to change it':'(no password)'}" autocomplete="new-password" title="${tip}">`;
- else{const ph=f.key=='public_address'?(detected?detected+' (auto-detected)':'Not detected, enter your address'):'';inp=`<input type="text" id="${id}" value="${esc(f.value)}" placeholder="${esc(ph)}" title="${tip}">`;}
+ else if(f.kind==3) inp=`<span style="display:flex;gap:8px;align-items:center"><input type="text" class="mask" id="${id}" value="" placeholder="${f.set?'Type a new password to change it':'(no password)'}" autocomplete="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" style="flex:1 1 auto" title="${tip} To change it: type the new one, then Save &amp; Restart."><button type="button" class="eye" style="margin-left:0" data-for="${id}" title="Show or hide what you typed">show</button></span>`;
+ else if(f.key=='location_region'||f.key=='location_city'){const miss=!f.value;inp=`<input type="text" id="${id}" value="${esc(f.value)}" ${f.key=='location_region'?'list="rgl" ':''}placeholder="${miss?'needed':''}" style="${miss?'border-color:#ff5e5e':''}" title="${tip}">`+(f.key=='location_region'?'<datalist id="rgl"></datalist>':'');}
+ else{const ph=f.key=='public_address'?(detected?detected+' (auto-detected)':'Not detected, enter your address'):'';inp=`<input type="text" id="${id}" value="${esc(f.value)}" placeholder="${esc(ph)}" title="${tip}"${f.key=='stage_country'?' oninput="rglFill()"':''}>`;}
  const when=f.tier=='live'?'Takes effect as soon as you save.':'Takes effect after Save & Restart.';
  return `<div class="row"><label for="${id}" title="${tip}">${esc(f.label)}</label>${inp}<span class="tag ${f.tier}" title="${esc(when)}">${f.tier=='relaunch'?'restart':f.tier}</span></div>`;
 }
@@ -485,7 +565,7 @@ async function loadSettings(){
  if(!d.enabled){$('settingsNote').textContent=d.reason||'settings disabled';$('form').style.display='none';$('settingsTools').style.display='none';return;}
  fields=d.fields;detected=d.detected||'';$('settingsNote').textContent='Settings file: '+d.file+(d.haveFile?'':'. Not saved yet. Click Save to keep these settings.');
  const cols=['',''];for(const f of d.fields){cols[f.col]+=f.key?fieldHtml(f):`<div class="sec">${esc(f.label)}</div>`+(f.hint?`<div class="hint">${esc(f.hint)}</div>`:'');}
- $('col0').innerHTML=cols[0];$('col1').innerHTML=cols[1];hookPw();$('form').style.display='grid';$('settingsTools').style.display='flex';$('smsg').textContent='';
+ regions={US:d.regionsUS||'',CA:d.regionsCA||''};$('col0').innerHTML=cols[0];$('col1').innerHTML=cols[1];rglFill();hookPw();$('form').style.display='grid';$('settingsTools').style.display='flex';$('smsg').textContent='';
  }catch(e){$('settingsNote').textContent='settings unavailable: '+e;}
 }
 async function save(restart){
@@ -627,6 +707,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
       << "\"portVerifiedAtMs\":" << s.portCheckVerifiedAtMs << ","
       << "\"playersSinceStart\":" << mHub.playersSinceStart() << ",\"removedCount\":" << mHub.removedPlayerCount() << ","
       << "\"stageMaxPlayers\":" << s.stageMaxPlayers << ",\"stageMaxChannels\":" << s.stageMaxChannels << ","
+      << "\"isStage\":" << (sb_hub_gui::hub_settings::isStage() ? "true" : "false") << ",\"mainWebPort\":" << sb_hub_gui::hub_settings::mainHubWebPort() << ","
       << "\"stageListingState\":" << s.stageListingState << ",\"stageListingText\":\"" << jsonEscape(s.stageListingText) << "\","
       << "\"joinLink\":\"" << jsonEscape(SonobusHubWeb::joinLink(s)) << "\"},\"peers\":[";
     bool first = true;
@@ -697,6 +778,16 @@ void SonobusHubWeb::handleClient(int fd) {
         if (path == "/api/settings") { bool ok = false; const std::string reply = applySettings(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/stagepassword") { bool ok = false; const std::string reply = stagePasswordRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/kick") { bool ok = false; const std::string reply = kickRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
+        if (path.rfind("/api/stages/", 0) == 0) { bool ok = false; const std::string reply = stagesRequest(path.substr(12), body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
+        if (path == "/api/previous/forget" || path == "/api/previous/clear") {   // the X on a previous player, and Clear list
+            const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+            std::string err, reply = "{\"ok\":true}";
+            bool ok = true;
+            if (path == "/api/previous/clear") reply = "{\"ok\":true,\"forgotten\":" + std::to_string(mHub.clearPreviousPlayers()) + "}";
+            else if (!mHub.forgetPreviousPlayer(root.getProperty("user", juce::var()).toString().toStdString(), err)) { ok = false; reply = "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}"; }
+            sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return;
+        }
+        if (path == "/api/remove") { bool ok = false; const std::string reply = removeRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/unkick") { bool ok = false; const std::string reply = unkickRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/chat") { bool ok = false; const std::string reply = chatRequest(body, ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
         if (path == "/api/update/install") { bool ok = false; const std::string reply = startUpdate(ok); sendAll(fd, httpResponse(ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json", reply)); return; }
@@ -719,6 +810,11 @@ void SonobusHubWeb::handleClient(int fd) {
     else if (path == "/api/settings") sendAll(fd, httpResponse(200, "OK", "application/json", settingsJson()));
     else if (path == "/" || path == "/index.html") sendAll(fd, httpResponse(200, "OK", "text/html; charset=utf-8", pageWithConstants()));
     else if (path == "/healthz") sendAll(fd, httpResponse(200, "OK", "text/plain", "ok\n"));
+    else if (path == "/api/stages") {   // file paths: gated like /api/removed
+        if (mPassword.empty() || !mArgs || mSettingsFile == juce::File()) sendAll(fd, httpResponse(403, "Forbidden", "application/json", "{\"ok\":false,\"error\":\"set web_password (and a settings file) to see other stages from the web page\"}"));
+        else sendAll(fd, httpResponse(200, "OK", "application/json", stagesJson()));
+    }
+    else if (path == "/api/previous") sendAll(fd, httpResponse(200, "OK", "application/json", previousJson()));   // Previous players (a removal's address only with the web password set)
     else if (path == "/api/recent") sendAll(fd, httpResponse(200, "OK", "application/json", recentJson()));   // Recent players (not password gated)
     else if (path == "/api/sessions") sendAll(fd, httpResponse(200, "OK", "application/json", sessionsJson()));   // Recent sessions (not password gated; passwords never included)
     else sendAll(fd, httpResponse(404, "Not Found", "text/plain", "not found\n"));
@@ -903,6 +999,134 @@ std::string SonobusHubWeb::kickRequest(const std::string& body, bool& ok) {
     return "{\"ok\":true}";
 }
 
+// POST /api/remove, body {"user":"...","keep":"hour"|"restart"|"permanent"}, gated like the other POSTs. A previous
+// player, here or gone: the hub keeps the name and the last address it saw out, as Kick does.
+std::string SonobusHubWeb::removeRequest(const std::string& body, bool& ok) {
+    ok = false;
+    const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
+    const std::string user = obj->getProperty("user").toString().toStdString();
+    if (user.empty()) return "{\"ok\":false,\"error\":\"no player given\"}";
+    bool known = false;
+    for (const auto& r : mHub.previousPlayers()) if (r.user == user) { known = true; break; }
+    if (!known) return "{\"ok\":false,\"error\":\"that player is not in the previous players list\"}";
+    const std::string keep = obj->hasProperty("keep") ? obj->getProperty("keep").toString().toStdString() : std::string("hour");
+    constexpr int kBlockMinutes = 60;
+    SonobusHubServer::RemovalKind kind = SonobusHubServer::RemovalKind::Timed;
+    if (keep == "restart") kind = SonobusHubServer::RemovalKind::UntilRestart;
+    else if (keep == "permanent") kind = SonobusHubServer::RemovalKind::Permanent;
+    else if (keep != "hour") return "{\"ok\":false,\"error\":\"keep must be hour, restart or permanent\"}";
+    const bool here = mHub.kickPlayer(user, kBlockMinutes, kind);
+    std::cout << "[HUB-WEB] remove previous player '" << user << "' (kept out: " << (keep == "hour" ? "60 min" : keep == "restart" ? "until the hub restarts" : "permanently") << (here ? ", was connected" : "") << ")\n";
+    ok = true;
+    return std::string("{\"ok\":true,\"connected\":") + (here ? "true" : "false") + "}";
+}
+
+// GET /api/stages: {"manage":bool,"control":bool,"cores":n,"running":n,"warning":"","stages":[{"file","group",
+// "serverPort","udpPort","webPort","running","stopping","managed","players","inBps","outBps","moveTo","problem"}],
+// "forward":"..."}. manage = this is the main hub (a stage with its own folder lists nothing). running counts this hub
+// too. players and the two rates (bytes per second) are -1 when not known. moveTo = the first port of a lower free pair
+// (0 = none). forward = what to open for players, all stages in one line (router ranges, or the firewall command).
+static std::string stageJson(const sb_hub_gui::hub_settings::OtherStage& st) {
+    std::ostringstream o;
+    o << "{\"file\":\"" << jsonEscape(st.file.getFullPathName().toStdString()) << "\",\"group\":\"" << jsonEscape(st.group) << "\""
+      << ",\"serverPort\":" << st.serverPort << ",\"udpPort\":" << st.udpPort << ",\"webPort\":" << st.webPort
+      << ",\"running\":" << (st.running ? "true" : "false") << ",\"stopping\":" << (st.stopping ? "true" : "false")
+      << ",\"managed\":" << (st.managed ? "true" : "false") << ",\"players\":" << st.players
+      << ",\"inBps\":" << (long long) st.inBytesPerSec << ",\"outBps\":" << (long long) st.outBytesPerSec
+      << ",\"moveTo\":" << st.moveServerPort
+      << ",\"portState\":" << st.portState << ",\"portRuns\":" << st.portRuns << ",\"portText\":\"" << jsonEscape(st.portText) << "\""
+      << ",\"problem\":\"" << jsonEscape(st.problem) << "\"}";
+    return o.str();
+}
+std::string SonobusHubWeb::stagesJson() const {
+    std::ostringstream o;
+    std::string city, region;   // this hub's own place: what New stage starts from
+    if (mArgs) { std::lock_guard<std::mutex> g(mSettingsLock); hs::splitLocation(mArgs->location, city, region); }
+    o << "{\"manage\":" << (hs::canManageOtherStages() ? "true" : "false") << ",\"control\":" << (hs::canStartOtherStages() ? "true" : "false")
+      << ",\"cores\":" << hs::stageCores() << ",\"running\":" << hs::stagesRunning()
+      << ",\"forward\":\"" << jsonEscape(hs::stagesForwardHelp()) << "\""
+      << ",\"city\":\"" << jsonEscape(city) << "\",\"region\":\"" << jsonEscape(region) << "\",\"regionCodes\":\"" << hs::regionCodes(mArgs ? mArgs->stageCountry : std::string()) << "\""
+      << ",\"warning\":\"" << jsonEscape(hs::stageLoadWarning(0)) << "\",\"warningOneMore\":\"" << jsonEscape(hs::stageLoadWarning(1)) << "\",\"stages\":[";
+    bool first = true;
+    for (const auto& st : hs::otherStages()) {
+        if (!first) o << ","; first = false;
+        o << stageJson(st);
+    }
+    o << "]}";
+    return o.str();
+}
+
+// POST /api/stages/new, body {"name","password","listed":bool,"city","webPassword"}: answers {"ok":true,"stage":{...}}.
+// POST /api/stages/start|stop|delete|forget|add|moveports|checkports, body {"file":"<path of its hub_settings.json>"}. Gated like the other POSTs.
+std::string SonobusHubWeb::stagesRequest(const std::string& action, const std::string& body, bool& ok) {
+    ok = false;
+    const juce::var root = juce::JSON::parse(juce::String::fromUTF8(body.c_str(), (int) body.size()));
+    auto* obj = root.getDynamicObject();
+    if (obj == nullptr) return "{\"ok\":false,\"error\":\"body is not a JSON object\"}";
+    std::string err;
+    if (action == "new") {
+        hs::NewStage in;
+        in.name = obj->getProperty("name").toString().toStdString();
+        in.password = obj->getProperty("password").toString().toStdString();
+        in.city = obj->getProperty("city").toString().toStdString();
+        in.region = obj->getProperty("region").toString().toStdString();
+        in.webPassword = obj->getProperty("webPassword").toString().toStdString();
+        in.listed = (bool) obj->getProperty("listed");
+        hs::OtherStage made;
+        if (!hs::createStage(in, made, err)) return "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}";
+        ok = true;
+        std::cout << "[HUB-STAGES] new stage request: web page password " << (in.webPassword.empty() ? "not given (this hub's is used)" : "given") << "\n";
+        return "{\"ok\":true,\"stage\":" + stageJson(made) + ",\"webPasswordOwn\":" + (in.webPassword.empty() ? "false" : "true") + ",\"forward\":\"" + jsonEscape(hs::stagesForwardHelp()) + "\"}";
+    }
+    const juce::String path = obj->getProperty("file").toString().trim();
+    if (path.isEmpty() || !juce::File::isAbsolutePath(path)) return "{\"ok\":false,\"error\":\"give the full path of the stage's hub_settings.json\"}";
+    const juce::File file(path);
+    bool done = false;
+    if (action == "add") done = hs::addOtherStage(file, err);
+    else if (action == "start") done = hs::startOtherStage(file, err);
+    else if (action == "stop") done = hs::stopOtherStage(file, err);
+    else if (action == "forget") done = hs::forgetOtherStage(file, err);
+    else if (action == "delete") done = hs::deleteStage(file, err);
+    else if (action == "moveports") done = hs::moveStagePorts(file, err);
+    else if (action == "checkports") done = hs::checkStagePorts(file, err);
+    else return "{\"ok\":false,\"error\":\"unknown action\"}";
+    if (!done) return "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}";
+    ok = true;
+    return "{\"ok\":true}";
+}
+
+// GET /api/previous: {"players":[{"user","location","lan","lastJoinMs","lastLeftMs","joins","removed","aka"}]}: removed
+// players first (newest removal first), then newest first. A removed row also has "kind" ("timed"|"restart"|
+// "permanent"), "leftSec" (timed only, else -1), "removedAtMs", "removedUser" (the name the removal is under) and, only
+// where /api/removed answers (web password set), "addr". No other addresses.
+std::string SonobusHubWeb::previousJson() const {
+    const auto list = mHub.previousRows();
+    const bool withAddr = !mPassword.empty() && mArgs && mSettingsFile != juce::File();
+    const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::ostringstream o; o << "{\"players\":[";
+    bool first = true;
+    for (const auto& row : list) {
+        const auto& r = row.player;
+        if (!first) o << ","; first = false;
+        o << "{\"user\":\"" << jsonEscape(r.user) << "\",\"location\":\"" << jsonEscape(r.joins > 0 ? locationFor(r.ip, r.lan) : std::string()) << "\",\"lan\":" << (r.lan ? "true" : "false")
+          << ",\"lastJoinMs\":" << r.lastJoinMs << ",\"lastLeftMs\":" << r.lastLeftMs << ",\"joins\":" << r.joins << ",\"removed\":" << (row.removed ? "true" : "false");
+        if (!row.alsoSeenAs.empty()) o << ",\"aka\":\"" << jsonEscape(row.alsoSeenAs) << "\"";
+        if (row.removed) {
+            const auto& b = row.removal;
+            const bool timed = b.kind == SonobusHubServer::RemovalKind::Timed;
+            o << ",\"kind\":\"" << (timed ? "timed" : b.kind == SonobusHubServer::RemovalKind::UntilRestart ? "restart" : "permanent") << "\""
+              << ",\"leftSec\":" << (timed ? std::max<long long>(0, (b.untilMs - nowMs + 999) / 1000) : -1LL)
+              << ",\"removedAtMs\":" << b.removedAtMs << ",\"removedUser\":\"" << jsonEscape(b.user) << "\"";
+            if (withAddr) o << ",\"addr\":\"" << jsonEscape(b.ip) << "\"";
+        }
+        o << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
 // POST /api/unkick, body {"user":"...","addr":"..."} as listed by /api/removed, gated like the other POSTs.
 // Lifts that removal at once, whatever its kind.
 std::string SonobusHubWeb::unkickRequest(const std::string& body, bool& ok) {
@@ -1047,7 +1271,7 @@ std::string SonobusHubWeb::settingsJson() const {
       << ",\"reason\":\"" << jsonEscape(!mArgs ? "settings not wired on this platform" : mSettingsFile == juce::File() ? "hub started with --no-settings" : mPassword.empty() ? "set web_password (hub_settings.json or --web-password) to enable Settings on the web page" : "") << "\""
       << ",\"file\":\"" << jsonEscape(mSettingsFile == juce::File() ? std::string() : mSettingsFile.getFullPathName().toStdString())
       << "\",\"haveFile\":" << (mSettingsFile.existsAsFile() ? "true" : "false")
-      << ",\"detected\":\"" << jsonEscape(snap.advertisedPublicHost) << "\",\"fields\":[";
+      << ",\"detected\":\"" << jsonEscape(snap.advertisedPublicHost) << "\",\"regionsUS\":\"" << hs::regionCodes("US") << "\",\"regionsCA\":\"" << hs::regionCodes("CA") << "\",\"fields\":[";
     sb_hub_gui::HubLaunchArgs defaults;
     hs::applyDefaults(defaults);
     bool first = true;
@@ -1081,9 +1305,11 @@ std::string SonobusHubWeb::applySettings(const std::string& body, bool& ok) {
     const juce::var values = obj->getProperty("values");
     const bool wantRestart = (bool) obj->getProperty("restart");
     sb_hub_gui::HubLaunchArgs n = *mArgs;
+    bool locationSent = false;
     if (auto* vo = values.getDynamicObject()) {
         for (const auto& prop : vo->getProperties()) {
             const std::string key = prop.name.toString().toStdString();
+            if (key == "location_city" || key == "location_region") locationSent = true;
             const auto* sp = specFor(key);
             if (!sp) return "{\"ok\":false,\"error\":\"unknown key: " + jsonEscape(key) + "\"}";
             const juce::String text = prop.value.toString();
@@ -1093,6 +1319,10 @@ std::string SonobusHubWeb::applySettings(const std::string& body, bool& ok) {
         }
     }
     if (const std::string problem = hs::validate(n); !problem.empty()) return "{\"ok\":false,\"error\":\"" + jsonEscape(problem) + "\"}";
+    if (locationSent) {   // a save of the settings form: the city and the state, province or region are both needed
+        hs::normaliseLocation(n);
+        if (const std::string problem = hs::locationProblem(n); !problem.empty()) return "{\"ok\":false,\"error\":\"" + jsonEscape(problem) + "\"}";
+    }
     if (const std::string problem = hs::publicAddressProblem(n.publicAddressHost); !problem.empty()) return "{\"ok\":false,\"error\":\"" + jsonEscape(problem) + "\"}";
     const auto changed = hs::diffKeys(*mArgs, n);
     std::string err;

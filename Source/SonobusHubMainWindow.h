@@ -136,27 +136,31 @@ private:
     std::vector<int> mColX;   // column left edges from the last paint (header hit testing)
 };
 
-// "Removed players": every removal in force (1 hour, until restart, permanent), newest first, each with an
-// "Allow back" button. The owner shows it under the live table only while there is a row.
-class RemovedTable : public juce::Component, public juce::SettableTooltipClient, private juce::ScrollBar::Listener {
+// "Previous players", the one list (SonobusHubServer::previousRows): removed players first, each with how long the
+// removal lasts, the address and an "Allow back" button; then everyone who joined (the last 1000), newest first, each
+// with a Remove button (the Kick choices) and an X that takes the name off the list. Shown in the strip's lower table
+// while no recent stage is selected.
+class PreviousTable : public juce::Component, public juce::SettableTooltipClient, private juce::ScrollBar::Listener {
 public:
-    RemovedTable();
-    void setRows(std::vector<SonobusHubServer::RemovedPlayer> rows);
+    PreviousTable();
+    void setRows(std::vector<SonobusHubServer::PreviousRow> rows);
     int numRows() const { return (int) mRows.size(); }
     void paint(juce::Graphics& g) override;
     void resized() override { layoutScroll(); }
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     juce::String getTooltip() override;
-    std::function<void(const std::string& user, const std::string& ip)> onAllowBack;
-    static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12, kMaxVisibleRows = 4;
+    std::function<void(const std::string& user)> onRemove, onForget;
+    std::function<void(const std::string& user, const std::string& ip)> onAllowBack;   // the removal's name and address
+    bool anyGone() const;   // a row that Clear list would take off
+    static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12, kButtonW = 92;
 private:
     CutCells mCut;
     void scrollBarMoved(juce::ScrollBar*, double newRangeStart) override { mFirstRow = (int) newRangeStart; repaint(); }
     void layoutScroll();
-    std::vector<SonobusHubServer::RemovedPlayer> mRows;
+    std::vector<SonobusHubServer::PreviousRow> mRows;
     juce::ScrollBar mScroll{true};
-    int mFirstRow = 0, mButtonX = 1 << 30;   // button column start (set in paint, used by mouseDown)
+    int mFirstRow = 0, mButtonX = 1 << 30, mForgetX = 1 << 30;
 };
 
 // "Recent sessions" — one row per group this hub has served (SonobusHubServer::sessions,
@@ -221,8 +225,6 @@ public:
     juce::Label peerLabel;
     PeerTable peerTable;
     juce::Viewport peerView;   // sideways scroll when the window is narrower than the table
-    juce::Label removedLabel;
-    RemovedTable removedTable;
     // Bottom strip — recent sessions (left) | the selected session's personnel + password
     // override + "Apply & Restart" (right). onApplySession(group, passwordOverride) — empty override = keep the
     // password that session had.
@@ -230,10 +232,46 @@ public:
     SessionTable sessionTable;
     juce::Label recentLabel;
     RecentTable recentTable;
+    PreviousTable previousTable;   // in the recent table's place while no stage is selected
+    juce::TextButton clearPrevious{"Clear list"};
     juce::Label sessionPwLabel;
     juce::TextEditor sessionPwEditor;
     juce::TextButton sessionApply{"Apply & Restart"};
     std::function<void(const std::string& group, const std::string& passwordOverride)> onApplySession;
+};
+
+// ─── Other stages tab (the main hub only) ─────────────
+// The extra stages this computer hosts, each its own copy of this app with its own settings folder
+// (hub_settings::otherStages): name, settings file, ports, running or stopped, Start / Stop / Forget, and
+// "Add existing stage..." (a hub_settings.json). Reads small files every 2 s while shown; never the server.
+class OtherStagesPage : public juce::Component, private juce::Timer {
+public:
+    OtherStagesPage();
+    ~OtherStagesPage() override;
+    void resized() override;
+    void paint(juce::Graphics& g) override;
+    void visibilityChanged() override { if (isVisible()) refresh(); }
+    void refresh();
+    void askNewStage();
+    juce::Label& heading() { return mTitle; }
+    std::function<void(const juce::String&)> onMessage;   // test aid: every change of the status text
+    void testAct(const juce::String& action);              // test aid: that action on the first stage it fits
+private:
+    struct Row;
+    void timerCallback() override;
+    void act(juce::File file, juce::String action);
+    // The status text beside New stage...: "Starting X..." while an action runs, then its result for 5 s; a
+    // failure stays until the next action; no result after 15 s = "No answer from X".
+    void say(const juce::String& text, int kind);   // 0 working, 1 result (clears after 5 s), 2 failure (stays)
+    void checkPending(const std::vector<hub_settings::OtherStage>& list);
+    struct Pending { juce::File file; juce::String action, name; juce::int64 at = 0; int target = 0; } mPending;
+    juce::int64 mMsgClearAt = 0;
+    int mTicks = 0;
+    void layoutRows();
+    juce::Label mTitle, mHint, mMsg, mEmpty, mWarn, mForward;
+    juce::TextButton mNew{"New stage..."};
+    std::vector<std::unique_ptr<Row>> mRows;
+    juce::String mLast;   // what the rows show (rebuilt only when it changes)
 };
 
 // ─── Log tab ─────────────────────────────────────────
@@ -326,6 +364,7 @@ private:
 class HubContent : public juce::Component, public juce::SettableTooltipClient, private juce::Timer {
 public:
     HubUpdateCheck* updateCheck() { return mUpdateCheck.get(); }
+    void showSettingsTab() { for (int t = 0; t < mTabs.getNumTabs(); ++t) if (mTabs.getTabNames()[t] == "Settings") mTabs.setCurrentTabIndex(t); }
     HubGeoResolver& geoResolver() { return mGeo; }   // Shared with the web page so locations never differ
     // restartFn: called when the operator clicks the Restart button. The
     // owning JuceApp wires this to a stop()/start() cycle of the SonobusHub.
@@ -347,7 +386,6 @@ private:
     std::unique_ptr<HubUpdateCheck> mUpdateCheck;   
     void timerCallback() override;
     void refreshSessionDetail();
-    void refreshRemoved();
     void startInstallUpdate();
     std::string mPwPrefillGroup;   // The session whose password was last prefilled, so refreshes do not overwrite typing; refreshSessionDetail: personnel table + Apply button follow the selected session
 
@@ -373,6 +411,7 @@ private:
     // Locations + log for the native pages.
     HubGeoResolver mGeo;
     bool mGeoEnabled = true;
+    bool mSnapHeadingsLogged = false;   // test aid
     juce::TooltipWindow mTooltips { nullptr, 500 };   // Hover tooltips on the players table
     juce::File mLogFile;
     std::unique_ptr<LogWindow> mLogWindow;
@@ -381,9 +420,17 @@ private:
     StatusPage mStatusPage;
     SettingsPanel mSettings;
     std::unique_ptr<LogView> mLogPage;
+    std::unique_ptr<OtherStagesPage> mStagesPage;   // main hub only
     juce::TabbedComponent mTabs{juce::TabbedButtonBar::TabsAtTop};
     juce::TextButton mRestartButton{"Restart Hub"};
     int mLogCheckTicks = 0;
+    // Test aid, off unless SB_HUB_SNAPSHOT=<folder> (environment or the hub taps file): every 10 s the window draws
+    // itself into PNG files there, the Status and Other stages tabs at each width in SB_HUB_SNAPSHOT_WIDTHS (default:
+    // the current width).
+    juce::File mSnapDir;
+    std::vector<int> mSnapWidths;
+    int mSnapTicks = 0;
+    void saveSnapshots(const juce::String& tag = {});
     juce::TextButton mQuitButton{"Quit"};
 };
 
@@ -450,7 +497,7 @@ private:
     void startWeb();
     std::unique_ptr<juce::MenuBarModel> mMenuModel;
     void attachWindowMenu();                  // Windows: the menu sits in the window (no app menu bar)
-    std::unique_ptr<juce::Timer> mQuitWatch;  // Windows: a QUIT file in the data folder stops the hub (the Stop file)
+    std::unique_ptr<juce::Timer> mQuitWatch;  // a QUIT file in the data folder stops the hub (Windows Stop file; Stop of another stage)
     bool mStopAsked = false;
 
     HubLaunchArgs mArgs;

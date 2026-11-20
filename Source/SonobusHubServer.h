@@ -487,6 +487,7 @@ struct HubPeer {
     std::string clientVersion, clientOs;  // Player's version and system (/sb/hxver); empty for players that do not report it
     std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
     std::string clientPlugin;             // Plugin format and host ("AU in Logic Pro", fourth string); empty for the app
+    std::string clientId;                 // The install's anonymous id (fifth string, 32 hex); empty for older players
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
     std::atomic<float> clientIfaceMs { -1.0f };   // Player's audio interface latency, input + output (ms, /sb/hxbuf arg 12); -1 = not reported
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
@@ -703,12 +704,22 @@ public:
     // recentPlayers() returns the CURRENT session's players.
     struct RecentPlayer {
         std::string user, ip;
+        std::string id;                       // the install's anonymous id as last reported; empty for older players
         std::string location;                 // filled by the viewer, never stored
         bool lan = false;
         int64_t firstSeenMs = 0, lastJoinMs = 0, lastLeftMs = 0;   // epoch ms; lastLeftMs < lastJoinMs = still connected
         int joins = 0;
     };
     std::vector<RecentPlayer> recentPlayers(int max = 30) const;   // current session's players, newest first
+    // "Previous players": everyone who joined this hub, whatever the stage name, one entry per name (last address,
+    // joins, last join/leave). Newest first (connected players first). Kept in its own file next to
+    // hub_sessions.json: the last 1000 names, and, when the operator sets it, only those seen in the last N days.
+    // Forgetting a player never lifts a removal.
+    std::vector<RecentPlayer> previousPlayers(int max = 0) const;
+    void setPlayerHistoryFile(const std::string& path);              // before start(); loads the file if present
+    void setPreviousPlayersForgetDays(int days);                     // 0 = never; live
+    bool forgetPreviousPlayer(const std::string& user, std::string& err);   // never a connected player
+    int clearPreviousPlayers();                                      // all but the connected ones; returns how many went
     int playersSinceStart() const;   // distinct player names that joined since the hub started serving
     // "Recent sessions" — one record per GROUP name the hub has served: when it was first/last
     // used, the group password, a snapshot of EVERY hub setting in force (key -> text, as hub_settings.json stores
@@ -902,13 +913,24 @@ public:
     enum class RemovalKind { Timed = 0, UntilRestart = 1, Permanent = 2 };
     struct RemovedPlayer {
         std::string user, ip;
+        std::string id;                 // the install's anonymous id, when the player reported one
+        std::vector<std::string> aka;   // other names the same install tried to join with while removed
         int64_t removedAtMs = 0;   // epoch ms
         int64_t untilMs = 0;       // Timed only
         RemovalKind kind = RemovalKind::Timed;
     };
-    // Removes a player now and keeps that name and address out (blockMinutes counts for Timed only).
-    // False = no such player.
+    // Removes a player now and keeps that name, address and install id out (blockMinutes counts for Timed only). A
+    // player who is gone is kept out by what the previous players list last knew. False = not connected now.
     bool kickPlayer(const std::string& userName, int blockMinutes = 60, RemovalKind kind = RemovalKind::Timed);
+    // The one list the host sees: every removed player first (newest removal first; shown even when the name has left
+    // the previous players list), then previousPlayers().
+    struct PreviousRow {
+        RecentPlayer player;
+        bool removed = false;
+        RemovedPlayer removal;      // the removal that keeps this player out (removed only)
+        std::string alsoSeenAs;     // other names the same install joined with, comma separated
+    };
+    std::vector<PreviousRow> previousRows() const;
     std::vector<RemovedPlayer> removedPlayers() const;                    // removals in force, newest first
     int removedPlayerCount() const;
     bool allowBack(const std::string& userName, const std::string& ip);   // lifts that removal at once; false = not in the list
@@ -943,6 +965,7 @@ private:
     int mPortCheckState = 0;
     std::atomic<int64_t> mPortCheckToken{0};
     std::atomic<bool> mPortCheckRequested{false};
+    std::atomic<int> mPortCheckRuns{0};   // finished checks since the start (the main hub sees a requested check end)
     std::atomic<uint32_t> mPortProbeAudioHits{0};
     // Player-assisted external check: a connected WAN player probes us back (same /sb/fwprobe protocol the helper hub
     // speaks). The configured checker is asked FIRST; a connected WAN player is the fallback when it cannot be reached.
@@ -966,6 +989,12 @@ private:
     void sessionsSaveLocked() const;              // under mRecentMutex
     mutable std::mutex mRecentMutex;
     std::deque<SessionRecord> mSessions;          // least recently used first, current/newest last
+    std::vector<RecentPlayer> mHistory;           // previous players, least recently joined first (under mRecentMutex)
+    std::string mHistoryFile;                     // empty = in memory only
+    bool mHistorySeeded = false;                  // the list took the recent sessions' players once (file mark "seeded")
+    void historySaveLocked();                     // prunes, then writes; under mRecentMutex
+    std::atomic<bool> mHistoryDirty{false};       // set on join/leave; the client thread writes the file
+    std::atomic<int> mHistoryForgetDays{0};       // 0 = keep until the cap
     std::string mSessionsFile;                    // empty = in memory only
     std::string mSessionGroup;                    // group of the current session ("" before start())
     std::set<std::string> mPlayersSinceStart;     // under mRecentMutex; names that joined since start()
@@ -1594,6 +1623,13 @@ private:
     std::string mRemovedFile;
     std::mutex mRemovedFileMutex;              // one writer at a time; taken before mStageMutex, never the other way
     void removedPlayersSave();                 // permanent removals to the file; control threads only
+    std::string mGatewayIp;                    // this computer's default gateway, found at start; under mStageMutex
+    // Install ids as players report them: queued by the receive thread, handled on the client thread.
+    struct PlayerIdNote { std::string user, id; struct sockaddr_storage addr; socklen_t addrlen; };
+    std::mutex mIdNoteMutex;
+    std::vector<PlayerIdNote> mIdNotes;
+    std::atomic<bool> mIdNotesPending{false};
+    void handlePlayerIdNotes();
     int mStageListingState = 0;
     std::string mStageListingText;
     std::atomic<uint64_t> mStageGen{0};

@@ -120,7 +120,8 @@ publicGroupsListModel(this)
     mStagesView->stageUserName = [this] { return processor.getCurrentUsername(); };
     mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
     mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
-    mStagesView->setWantTestStages(SonobusPlusVersion::get().version.containsIgnoreCase("dev"));
+    // Real stages only; the directory's made-up test stages only with the run-scoped switch SB_TEST_STAGES=1
+    mStagesView->setWantTestStages(SonobusAudioProcessor::sbTapOn("SB_TEST_STAGES"));
     mStagesView->savedPassword = [this](const StagesView::JoinRequest& req) { return processor.getSavedStagePassword(req.host, req.port, req.name); };
     mStagesView->forgetPassword = [this](const StagesView::JoinRequest& req) { processor.setSavedStagePassword(req.host, req.port, req.name, {}); };
     mStagesView->showMe = [this] { showStagesTab(); };
