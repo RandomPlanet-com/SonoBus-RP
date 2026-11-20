@@ -69,6 +69,11 @@ static juce::String hubCutTextAt(const CutCells& cut, juce::Point<int> p) {
 // receive thread contend with the GUI reader on every LOG_WARNING and drop /sb/hxfeedreq dispatch.
 
 // ─── StatusHeader ─────────────────────────────────────────────────────────────
+// The player's system field is a bare system ("Mac", "Windows", "Linux"): the app, or an older plugin.
+// Newer plugins send platform + format there ("Mac AU").
+static bool sbBareSystem(const std::string& os) {
+    return os == "Mac" || os == "Windows" || os == "Linux" || os == "other";
+}
 // 12-hour clock text, e.g. "1:43:56 pm".
 static juce::String hubClock12h(const juce::Time& t) {
     int h = t.getHours();
@@ -432,6 +437,7 @@ void PeerTable::layoutColumns() {
         juce::String v = full.upToFirstOccurrenceOf(" (", false, false);
         if (full.contains("-dev")) v << " dev";
         if (v.isNotEmpty() && ! p.clientOs.empty()) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientOs.c_str());
+        if (v.isNotEmpty() && ! p.clientPlugin.empty() && sbBareSystem(p.clientOs)) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientPlugin.c_str());
         cell[15] = std::max(cell[15], textW(v));
     }
     mColW.assign(kNumCols, 0);
@@ -573,6 +579,9 @@ void PeerTable::paint(juce::Graphics& g) {
             juce::String v = full.upToFirstOccurrenceOf(" (", false, false);   // marketing version; the build id stays in the log
             if (full.contains("-dev")) v << " dev";
             if (v.isNotEmpty() && ! p.clientOs.empty()) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientOs.c_str());
+            // "AU in Logic Pro" only from a plugin that sent a bare system ("Mac"); newer ones send "Mac AU" there
+            // and keep the host in the version (hover)
+            if (v.isNotEmpty() && ! p.clientPlugin.empty() && sbBareSystem(p.clientOs)) v << juce::String::fromUTF8(" \xc2\xb7 ") << juce::String::fromUTF8(p.clientPlugin.c_str());
             cell(v.isNotEmpty() ? v : dash, pal::textDim);
         }
 

@@ -2384,7 +2384,7 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
             up.clientRxUnderruns10s = p->clientRxUnderruns10s.load(std::memory_order_relaxed);   
             up.isRecording = p->isRecording.load(std::memory_order_relaxed) != 0;                   
             up.isSendMuted = p->isSendMuted.load(std::memory_order_relaxed) != 0;                   
-            { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; up.clientInstrument = p->clientInstrument; }
+            { std::lock_guard<std::mutex> vl(p->verLock); up.clientVersion = p->clientVersion; up.clientOs = p->clientOs; up.clientInstrument = p->clientInstrument; up.clientPlugin = p->clientPlugin; }
             up.clientDevBuf = p->clientDevBuf.load(std::memory_order_relaxed);
             up.clientDevSr = p->clientDevSr.load(std::memory_order_relaxed);
             up.clientIfaceMs = p->clientIfaceMs.load(std::memory_order_relaxed);
@@ -3695,15 +3695,17 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             auto it = rm.ArgumentsBegin();
             std::string ver = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
             std::string os  = (it != rm.ArgumentsEnd()) ? std::string((it++)->AsString()) : std::string();
-            std::string inst = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string(it->AsString()) : std::string();
+            std::string inst = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string((it++)->AsString()) : std::string();
+            std::string plug = (it != rm.ArgumentsEnd() && it->IsString()) ? std::string(it->AsString()) : std::string();
             if (ver.size() > 60) ver.resize(60);
             if (os.size() > 16) os.resize(16);
             if (inst.size() > 24) inst.resize(24);
+            if (plug.size() > 40) plug.resize(40);
             auto clean = [](std::string& t){ for (auto& c : t) if ((unsigned char) c < 32 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&') c = ' '; };
-            clean(ver); clean(os); clean(inst);
+            clean(ver); clean(os); clean(inst); clean(plug);
             bool changed = false, instChanged = false;
             { std::lock_guard<std::mutex> vl(who->verLock); changed = (who->clientVersion != ver || who->clientOs != os); who->clientVersion = ver; who->clientOs = os;
-              instChanged = who->clientInstrument != inst; who->clientInstrument = inst; }
+              instChanged = who->clientInstrument != inst; who->clientInstrument = inst; who->clientPlugin = plug; }
             if (instChanged) mStageGen.fetch_add(1, std::memory_order_relaxed);   // the listing shows it: check in again
             if (changed) std::cout << "[HUB-VER] '" << who->userName << "' runs " << ver << " on " << os << "\n";
         } catch (const osc::Exception&) {}

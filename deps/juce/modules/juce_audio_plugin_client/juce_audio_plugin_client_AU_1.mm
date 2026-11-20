@@ -1640,6 +1640,9 @@ public:
 
             [view setHidden: NO];
             [view setPostsFrameChangedNotifications: YES];
+            // A resizable editor follows the host's window (setFrameSize: below)
+            if (editor->isResizable())
+                [view setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
             [[NSNotificationCenter defaultCenter] addObserver: view
                                                      selector: @selector (applicationWillTerminate:)
@@ -1649,8 +1652,43 @@ public:
 
             editorCompHolder->addToDesktop (detail::PluginUtilities::getDesktopFlags (editor), view);
             editorCompHolder->setVisible (true);
+            editorCompHolder->pinLayerContents();
 
             return view;
+        }
+
+        // A host may show our view at a new size before that size is drawn (Logic runs the AU out of process and
+        // resizes from its own window). Stale content then stays at its size, top-left, and is never stretched.
+        static NSString* pinLayerContentsOf (NSView* v)
+        {
+            if (v == nil)
+                return @"-";
+
+            [v setLayerContentsPlacement: NSViewLayerContentsPlacementTopLeft];
+
+            CALayer* l = [v layer];
+
+            if (l == nil)
+                return @"no layer";
+
+            NSString* g = l.contentsGravity;
+
+            if ([g isEqualToString: kCAGravityResize] || [g isEqualToString: kCAGravityResizeAspect]
+                 || [g isEqualToString: kCAGravityResizeAspectFill])
+                l.contentsGravity = l.geometryFlipped ? kCAGravityBottomLeft : kCAGravityTopLeft;   // "bottom" = minimum y
+
+            return [NSString stringWithFormat: @"%@ %@ geomFlipped %d", NSStringFromClass ([l class]), l.contentsGravity, (int) l.geometryFlipped];
+        }
+
+        void pinLayerContents()
+        {
+            if (auto* peer = getPeer())
+            {
+                auto* pv = (NSView*) peer->getNativeHandle();
+                [pv setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize];
+                NSString* info = [NSString stringWithFormat: @"view %@, holder %@", pinLayerContentsOf (pv), pinLayerContentsOf ([pv superview])];
+                getProperties().set ("juce_layerInfo", nsStringToJuce (info));
+            }
         }
 
         void parentSizeChanged() override
@@ -1670,7 +1708,56 @@ public:
                 lastBounds = b;
                 setSize (jmax (32, b.getWidth()), jmax (32, b.getHeight()));
 
-                resizeHostWindow();
+                // During a host resize the host owns the frame: only answer when the editor's limits gave another size
+                if (! inHostResize || b.getWidth() != hostResizeTarget.getWidth() || b.getHeight() != hostResizeTarget.getHeight())
+                    resizeHostWindow();
+            }
+        }
+
+        // The host changed our view's size (window edge drag): the editor takes that size within its limits,
+        // and never answers with a size of its own unless the limits require it.
+        void hostResized (NSSize hostSize)
+        {
+            if (inHostResize)
+                return;
+
+            auto* ed = dynamic_cast<AudioProcessorEditor*> (getChildComponent (0));
+
+            if (ed == nullptr || ! ed->isResizable())
+                return;
+
+            const auto r = convertFromHostBounds (NSMakeRect (0, 0, hostSize.width, hostSize.height));
+            const auto w = roundToInt (r.size.width), h = roundToInt (r.size.height);
+
+            if (w == lastBounds.getWidth() && h == lastBounds.getHeight())
+                return;
+
+            {
+                const ScopedValueSetter<bool> svs (inHostResize, true);
+                hostResizeTarget = { 0, 0, w, h };
+
+                if (auto* c = ed->getConstrainer())
+                    c->setBoundsForComponent (ed, ed->getBounds().withSize (w, h), false, false, true, true);
+                else
+                    ed->setSize (w, h);
+            }
+
+            pinLayerContents();   // AppKit may set the layers up again once the view is in its window
+
+            // A host that runs the plugin out of process (Logic) resizes from its own window: our view is never in a
+            // live resize, so the new size would be drawn on the next display frame and presented from a Metal thread,
+            // behind the host's window. Draw it now, presented with the host's resize transaction.
+            if (auto* peer = getPeer())
+            {
+                auto* pv = (NSView*) peer->getNativeHandle();
+
+                if (pv != nil && ! [pv inLiveResize])
+                {
+                    getProperties().set ("juce_renderSyncNow", true);
+                    [pv setNeedsDisplay: YES];
+                    [pv displayIfNeeded];
+                    getProperties().set ("juce_renderSyncNow", false);
+                }
             }
         }
 
@@ -1724,6 +1811,8 @@ public:
 
     private:
         Rectangle<int> lastBounds;
+        Rectangle<int> hostResizeTarget;
+        bool inHostResize = false;
 
         JUCE_DECLARE_NON_COPYABLE (EditorCompHolder)
     };
@@ -1775,6 +1864,14 @@ public:
             addMethod (@selector (mouseDownCanMoveWindow), [] (id, SEL)
             {
                 return NO;
+            });
+
+            addMethod (@selector (setFrameSize:), [] (id self, SEL, NSSize newSize)
+            {
+                sendSuperclassMessage<void> (self, @selector (setFrameSize:), newSize);
+
+                if (EditorCompHolder* const editorComp = getEditor (self))
+                    editorComp->hostResized (newSize);
             });
 
             JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")

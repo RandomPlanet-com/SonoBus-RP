@@ -4,6 +4,12 @@ What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the 
 
 ## 2026-11-19
 
+### SonoBus RP Plugins 1.3.5
+
+- SonoBus RP inside your DAW: AU and VST3 (beta)
+- Same stages, hubs and low-latency engine as the app.
+- Use 48 kHz and a 32 or 64 sample buffer
+
 ### SonoBus RP 1.3.5
 
 - No audio artifacts when switching an effect on or off.

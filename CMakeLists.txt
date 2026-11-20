@@ -222,17 +222,16 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
         VST3_CATEGORIES "${vst3cats}"
         AAX_CATEGORY "AAX_ePlugInCategory_None"
 
-	LV2URI "https://sonobus.net/lv2/sonobus"
+        LV2URI "https://randomplanet.com/lv2/sonobusrp"
 	
         # mac settings
         HARDENED_RUNTIME_ENABLED TRUE
         HARDENED_RUNTIME_OPTIONS "com.apple.security.device.audio-input"
         PLIST_TO_MERGE "${MacPList}"
-        AU_MAIN_TYPE "kAudioUnitType_MusicEffect"
-        
-        
-        # other settings...
-        PLUGIN_MANUFACTURER_CODE Sono
+        AU_MAIN_TYPE "kAudioUnitType_Effect"   # an insert on any channel strip
+
+        # Random Planet's own codes: the plugins install next to stock SonoBus
+        PLUGIN_MANUFACTURER_CODE Rnpl
         PLUGIN_CODE ${plugincode}
         FORMATS ${formats}
         DESCRIPTION "${product_name} - Network Audio"
@@ -674,16 +673,34 @@ endfunction()
 # Local Network / microphone once more on every machine. Settings migrate from the Beta file on first launch.
 set(SONOBUS_MAIN_PRODUCT_NAME "SonoBus RP")
 set(SONOBUS_MAIN_BUNDLE_ID "com.randomplanet.SonoBusRP")
-set(SONOBUS_INST_BUNDLE_ID "com.Sonosaurus.SonoBusInstrument")
+set(SONOBUS_INST_BUNDLE_ID "com.randomplanet.SonoBusRP.instrument.vst3")
 
 # most of the targets
-sono_add_custom_plugin_target(SonoBus "${SONOBUS_MAIN_PRODUCT_NAME}" "${SONOBUS_MAIN_BUNDLE_ID}" "${FormatsToBuild}" FALSE  "NBus")
+sono_add_custom_plugin_target(SonoBus "${SONOBUS_MAIN_PRODUCT_NAME}" "${SONOBUS_MAIN_BUNDLE_ID}" "${FormatsToBuild}" FALSE  "Sbrp")
 
 # Mobile targets
 #sono_add_custom_plugin_target(SonoBusMobile "AUv3 Standalone" FALSE "NBus")
 
 # add VSTi target
-sono_add_custom_plugin_target(SonoBusInst "SonoBusInstrument" "${SONOBUS_INST_BUNDLE_ID}" "VST3" TRUE  "IBus")
+sono_add_custom_plugin_target(SonoBusInst "SonoBus RP Instrument" "${SONOBUS_INST_BUNDLE_ID}" "VST3" TRUE  "Sbri")
+
+# The plugin bundles get ids of their own under the app's id and do not claim the app's link scheme.
+if (APPLE)
+    foreach (fmt AU VST3)
+        if (TARGET SonoBus_${fmt})
+            string(TOLOWER "${fmt}" fmt_lower)
+            add_custom_command(TARGET SonoBus_${fmt} POST_BUILD
+                COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${SONOBUS_MAIN_BUNDLE_ID}.${fmt_lower}" "$<TARGET_BUNDLE_CONTENT_DIR:SonoBus_${fmt}>/Info.plist"
+                COMMAND sh -c "/usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' \"$1\" || true" sh "$<TARGET_BUNDLE_CONTENT_DIR:SonoBus_${fmt}>/Info.plist"
+                VERBATIM)
+        endif()
+    endforeach()
+    if (TARGET SonoBusInst_VST3)
+        add_custom_command(TARGET SonoBusInst_VST3 POST_BUILD
+            COMMAND sh -c "/usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' \"$1\" || true" sh "$<TARGET_BUNDLE_CONTENT_DIR:SonoBusInst_VST3>/Info.plist"
+            VERBATIM)
+    endif()
+endif()
 
 # Hosted-path unit tests
 if (BUILD_TESTING)

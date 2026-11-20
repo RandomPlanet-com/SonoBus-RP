@@ -66,6 +66,7 @@ public:
 
     //==============================================================================
     void paint (Graphics&) override;
+    void paintOverChildren (Graphics&) override;
     void resized() override;
 
     void mouseDown (const MouseEvent& event)  override;
@@ -534,6 +535,10 @@ private:
 
     std::unique_ptr<ChatView> mChatView;
     std::unique_ptr<ComponentBoundsConstrainer> mChatSizeConstrainer;
+    uint32 mUiLogMs = 0; juce::Rectangle<int> mUiLogSize;   // ui.log (in a host): last editor size written
+    // ui.log (in a host): one line per resize drag: sizes, layout and full-paint time per step
+    struct ResizeStats { int sizes = 0, paints = 0, unpainted = 0; double firstMs = 0, lastMs = 0, layoutMs = 0, layoutMax = 0, paintMs = 0, paintMax = 0, paintStart = 0, waitMs = 0, waitMax = 0; int syncPaints = 0; bool pending = false; } mRs;
+    void sbResizeStatsFlush(bool force);
     std::unique_ptr<ResizableEdgeComponent> mChatEdgeResizer;
     std::unique_ptr<SonoDrawableButton> mChatButton;
     bool mAboutToShowChat = false;

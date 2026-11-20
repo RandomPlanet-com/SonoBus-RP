@@ -8,6 +8,8 @@ held at the hub so one lossy link does not degrade everyone else.
 This repository holds both halves:
 
 - **SonoBus RP**, the player (`Source/`, the `SonoBus` targets). Runs on macOS and Linux; Windows is in beta.
+- **SonoBus RP plugins**, the player as an Audio Unit and VST3 (macOS) and VST3 (Windows, beta) for a DAW (the
+  `SonoBus_AU` and `SonoBus_VST3` targets).
 - **SonoBus RP Hub**, the server (`Source/SonobusHub*`, the `SonoBusHub` target). Runs on macOS (window) and
   Linux (headless, with a built-in web page for status and settings). Setup and hosting guide:
   [SonoBus-RP-Hub](https://github.com/RandomPlanet-com/SonoBus-RP-Hub).
@@ -46,7 +48,8 @@ Media Technologies GmbH.
 
 The player is built as `SonoBus_artefacts/Release/Standalone/`, the hub as `SonoBusHub_artefacts/Release/`.
 To build only one of them, name only that target: `--target SonoBusHub` for the hub, `--target SonoBus_Standalone`
-for the player.
+for the player. The plugins: `--target SonoBus_AU SonoBus_VST3` on macOS (built in `SonoBus_artefacts/Release/AU/`
+and `VST3/`), `--target SonoBus_VST3` on Windows.
 
 Memory: a few source files need more than 1 GB each to compile, and Ninja runs several jobs at once. On a machine
 with less than about 4 GB free, build one job at a time by running `export CMAKE_BUILD_PARALLEL_LEVEL=1` before the

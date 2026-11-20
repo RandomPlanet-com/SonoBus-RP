@@ -1184,9 +1184,11 @@ void ConnectView::publicGroupLogin()
 
         if (!processor.isConnectedToServer()) {
 
-            Timer::callAfterDelay(100, [this,info] {
-                connectWithInfo(info, true);
-                updatePublicGroups();
+            Component::SafePointer<ConnectView> safe(this);
+            Timer::callAfterDelay(100, [safe, info] {
+                if (safe == nullptr) return;
+                safe->connectWithInfo(info, true);
+                safe->updatePublicGroups();
             });
         }
     }
@@ -2328,7 +2330,9 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
             processor.hostedControlSetParticipantMix(currConnectionInfo.userName, 1.0f, 0.0f, false);
         }
 
-        Timer::callAfterDelay(100, [this] {
+        Component::SafePointer<ConnectView> safe(this);
+        Timer::callAfterDelay(100, [this, safe] {
+            if (safe == nullptr) return;
             processor.connectToServerUser(currConnectionInfo.serverHost, currConnectionInfo.serverPort, currConnectionInfo.userName, currConnectionInfo.userPassword);   // Retries while the library is busy
            // updateState();
             listeners.call(&ConnectView::Listener::connectionsChanged, this);

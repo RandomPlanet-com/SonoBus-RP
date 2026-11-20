@@ -1994,7 +1994,7 @@ private:
                                                              scale,
                                                              [this] (auto&&... args) { drawRectWithContext (args...); },
                                                              std::move (deferredRepaints),
-                                                             [view inLiveResize]);
+                                                             [view inLiveResize] || (bool) component.getProperties().getWithDefault ("juce_renderSyncNow", false));
        #endif
     }
 

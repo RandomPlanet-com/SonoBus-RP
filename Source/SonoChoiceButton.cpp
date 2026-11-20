@@ -104,8 +104,9 @@ void SonoChoiceButton::genericItemChooserSelected(GenericItemChooser *comp, int 
 
     setWantsKeyboardFocus(true);
 
-    Timer::callAfterDelay(200, [this](){
-        if (isShowing()) grabKeyboardFocus();
+    Component::SafePointer<SonoChoiceButton> safe(this);
+    Timer::callAfterDelay(200, [safe](){
+        if (safe != nullptr && safe->isShowing()) safe->grabKeyboardFocus();
     });
 }
 

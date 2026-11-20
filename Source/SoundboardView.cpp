@@ -37,10 +37,11 @@ SoundboardView::SoundboardView(SonobusAudioProcessor& audioproc, SoundboardChann
     mDragDrawable->setAlwaysOnTop(true);
     addChildComponent(mDragDrawable.get());
 
-    processor->onPlaybackStateChange = [this] {
+    Component::SafePointer<SoundboardView> safe(this);
+    processor->onPlaybackStateChange = [safe] {
         // could be called from a non-UI thread
-        MessageManager::callAsync([this]() {
-            refreshButtons();
+        MessageManager::callAsync([safe]() {
+            if (safe != nullptr) safe->refreshButtons();
         });
     };
 }

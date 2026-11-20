@@ -389,7 +389,9 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
     const auto displayedVersion = ProjectInfo::versionString;
    #endif
 
-    mVersionLabel = std::make_unique<Label>("", TRANS("Version: ") + displayedVersion);
+    const String plugHost = processor.getPluginHostText();   // "AU in Logic Pro" in a plugin
+    mVersionLabel = std::make_unique<Label>("", TRANS("Version: ") + displayedVersion
+                                                + (plugHost.isNotEmpty() ? String::fromUTF8(" \u00b7 ") + plugHost : String()));
     configLabel(mVersionLabel.get(), true);
     mVersionLabel->setJustificationType(Justification::centredRight);
 

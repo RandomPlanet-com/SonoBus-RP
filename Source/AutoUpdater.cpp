@@ -61,6 +61,7 @@ LatestVersionCheckerAndUpdater::~LatestVersionCheckerAndUpdater()
 void LatestVersionCheckerAndUpdater::checkForNewVersion (bool showAlerts)
 {
     // SonoBus RP the check goes to the project's update server (see VersionInfo::fetch), never to upstream.
+    if (! JUCEApplicationBase::isStandaloneApp()) return;   // a plugin is updated by its installer, never from inside a host
     if (! isThreadRunning())
     {
         showAlertWindows = showAlerts;

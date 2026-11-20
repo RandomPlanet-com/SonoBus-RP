@@ -326,6 +326,14 @@ public:
     bool disconnectFromServer(bool userRequested = true);
     // Whether the next launch should rejoin the last room: yes after a quit, crash or lost connection while in a
     // room, no after the user disconnected. Kept in a small file so it survives a crash.
+    // Deferred work must not outlive the processor: a plugin host can remove it at any moment.
+    struct SbLife { std::atomic<bool> alive { true }; std::atomic<int> busy { 0 }; };
+    void sbAfter(int delayMs, std::function<void()> fn) {
+        Timer::callAfterDelay(delayMs, [life = mSbLife, f = std::move(fn)]() { if (life->alive.load()) f(); });
+    }
+    void sbAsync(std::function<void()> fn) {
+        MessageManager::callAsync([life = mSbLife, f = std::move(fn)]() { if (life->alive.load()) f(); });
+    }
     void sbMarkLaunchRejoin(bool inRoom);
     bool sbLaunchRejoinWanted() const;
     double getElapsedConnectedTime() const { return mSessionConnectionStamp > 0 ? (Time::getMillisecondCounterHiRes() - mSessionConnectionStamp) * 1e-3 : 0.0; }
@@ -579,6 +587,11 @@ public:
     float getRemotePeerHubInterfaceMs(int index) const;   // That player's audio interface in + out (ms, relayed by the hub); -1 = not known
     // Audio interface latency, input and output, each with its buffer (ms). Message thread only.
     static bool getAudioInterfaceMs(AudioIODevice * ad, float & inMs, float & outMs);
+    // In a plugin: the host's audio interface, cached (message thread). exact = false: only the host buffer is known.
+    bool getHostInterfaceMs(float & inMs, float & outMs, bool & exact) const;
+    // In a plugin: "AU in Logic Pro", "VST3 in Ableton Live 12 Suite"; empty in the app. Message thread.
+    String getPluginHostText() const;
+    static String sbPluginOsText(const String& fmt);   // "Mac AU", "Win VST3"
     bool getRemotePeerHubSendMuted(int index) const;   // That player muted their send (relayed by the hub)
     int64_t getRemotePeerHubUplinkLost(int index) const;   // Per-player uplink loss as seen by the hub (-1 unknown)
     bool getSelfHubLatency(float & toHubMs, float & fromHubMs, float & rttMs, int64_t & uplinkLost) const;
@@ -1684,6 +1697,33 @@ private:
 
     ServerReconnectTimer mReconnectTimer;
 
+    // In a host there is no audio device and the editor may be closed: the processor drives its own health report.
+    struct HostHealthTimer : public Timer
+    {
+        HostHealthTimer(SonobusAudioProcessor & proc) : processor(proc) {}
+        void timerCallback() override {
+            processor.refreshHostInterfaceMs();
+            float in = 0.0f, out = 0.0f; bool exact = false;
+            const float iface = processor.getHostInterfaceMs(in, out, exact) ? in + out : -1.0f;
+            processor.sbAudioHealthTick(0, processor.getSampleRate(), processor.getHostCallbackBlock(), iface);
+        }
+        SonobusAudioProcessor & processor;
+    };
+    HostHealthTimer mHostHealthTimer { *this };
+
+    // The host's audio interface (plugin only). Looked up again when the host's rate or block size changes, else every 30 s.
+    void refreshHostInterfaceMs();
+    mutable String mPluginHostText; mutable bool mPluginHostTextDone = false;
+    mutable String mPluginOsText;   // "Mac AU": the /sb/hxver system field in a plugin (platform + format)
+    int getHostCallbackBlock() const;   // The host's real callback size: stable (30 equal callbacks), else the last one
+    std::atomic<int> mSbStableBlock{0}, mSbLastBlock{0};   // Written on the audio thread, relaxed
+    float mHostIfaceInMs = -1.0f, mHostIfaceOutMs = -1.0f;
+    int mHostIfaceMethod = 0;   // 0 none, 1 the devices of this process, 2 the one matching running device, 3 host buffer only
+    String mHostIfaceDevice;
+    double mHostIfaceRate = 0.0;
+    int mHostIfaceBlock = 0;
+    uint32 mHostIfaceStampMs = 0;
+
     // SB_DUMP_NETBUF telemetry: conf-gated (sb_taps.conf) low-rate logger. Every 2 s appends each remote peer's
     // netbuf ms + receive-buffer fill ratio/stddev to a file. Own thread, GUI-grade getters only; audio thread
     // untouched.
@@ -1852,6 +1892,7 @@ private:
     VideoLinkInfo mVideoLinkInfo;
     
     File mSupportDir;
+    std::shared_ptr<SbLife> mSbLife { std::make_shared<SbLife>() };
     
     // global config
     ValueTree   mGlobalState;

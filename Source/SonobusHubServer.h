@@ -486,6 +486,7 @@ struct HubPeer {
     std::mutex verLock;                   // guards the two strings below (receive thread writes, UI snapshot reads)
     std::string clientVersion, clientOs;  // Player's version and system (/sb/hxver); empty for players that do not report it
     std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
+    std::string clientPlugin;             // Plugin format and host ("AU in Logic Pro", fourth string); empty for the app
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
     std::atomic<float> clientIfaceMs { -1.0f };   // Player's audio interface latency, input + output (ms, /sb/hxbuf arg 12); -1 = not reported
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
@@ -831,6 +832,7 @@ public:
         bool isSendMuted = false;   // Send muted (relayed to everyone)
         std::string clientVersion, clientOs;   // Player's version and system; empty when the player does not report it
         std::string clientInstrument;          // Player's instrument; empty when not given
+        std::string clientPlugin;              // Plugin format and host; empty for the app
         int clientDevBuf = -1, clientDevSr = -1;   // Player's audio buffer + sample rate
         float clientIfaceMs = -1.0f;               // Player's audio interface latency, input + output (ms); -1 = not reported
         bool  isLan = false;

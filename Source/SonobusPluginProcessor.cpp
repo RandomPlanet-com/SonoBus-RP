@@ -7,6 +7,9 @@
 #include "SonobusPluginProcessor.h"
 #include "SonobusPlusVersion.h"
 #include "SbDataPaths.h"
+#if JUCE_MAC
+#include "CrossPlatformUtils.h"   // sbProcessInterfaceLatency: the host's audio interface in a plugin
+#endif
 #include "SbTxHold.h"
 #include "SonobusPluginEditor.h"
 #include "SonobusHubMixControl.h"
@@ -1433,10 +1436,12 @@ mState (*this, &mUndoManager, "SonoBusAoO",
 
     const bool isplugin = !JUCEApplicationBase::isStandaloneApp();
     if (isplugin) {
+        mHostHealthTimer.startTimer(1000);   // the 10-s report to the hub (receive buffer, dropouts, block size and rate)
         // default dry to 1.0 if plugin
         mDry = 1.0;
         mSendChannels = 0; // match inputs default for plugin
         mSyncMetToHost = true;
+        mSendAllDefaultsMigrated = true;   // a new plugin has no older saved state: its saved switches are the user's own
     } else {
         mDry = 0.0;
         mSyncMetToHost = false;
@@ -1551,13 +1556,13 @@ void SonobusAudioProcessor::maybeStartNetbufLogger()
         }
         if (!fg.empty()) {
             String target(fg);
-            Timer::callAfterDelay(12000, [this, target]() {
+            sbAfter(12000, [this, target]() {
                 if (!isConnectedToServer()) return;   // rejoin machinery will retry conf on next launch
                 if (mCurrentJoinedGroup == target) return;
                 if (mCurrentJoinedGroup.isNotEmpty()) {
                     leaveServerGroup(mCurrentJoinedGroup);
                 }
-                Timer::callAfterDelay(1500, [this, target]() {
+                sbAfter(1500, [this, target]() {
                     joinServerGroup(target, String(), false);
                     DBG("SB_FORCE_GROUP joined " << target);
                 });
@@ -1569,7 +1574,7 @@ void SonobusAudioProcessor::maybeStartNetbufLogger()
     // joined and peers exist, so the parameterChanged listener applies it to every sink/source.
     if (forceDynResamp >= 0) {
         const bool want = forceDynResamp != 0;
-        Timer::callAfterDelay(8000, [this, want]() {
+        sbAfter(8000, [this, want]() {
             mState.getParameter(paramDynamicResampling)
                  ->setValueNotifyingHost(want ? 1.0f : 0.0f);
             DBG("SB_DYNRESAMP forced to " << (int)want);
@@ -1603,6 +1608,10 @@ void SonobusAudioProcessor::maybeStartNetbufLogger()
 
 SonobusAudioProcessor::~SonobusAudioProcessor()
 {
+    mHostHealthTimer.stopTimer();
+    mSbLife->alive.store(false);
+    for (int i = 0; i < 1000 && mSbLife->busy.load() > 0; ++i) Thread::sleep(5);
+
     mNetbufLogStop.store(true, std::memory_order_relaxed);
     if (mNetbufLogThread.joinable()) mNetbufLogThread.join();
 
@@ -1872,7 +1881,7 @@ void SonobusAudioProcessor::initializeAoo(int udpPort)
         // The launch auto-connect chain may have run before this client existed — try now.
         if (!sbLaunchRejoinWanted()) mInitialAutoReconnectDone = true;   // the user left the room before quitting
         if (getAutoReconnectToLast() && !mInitialAutoReconnectDone.load()) {
-            Timer::callAfterDelay(500, [this]() {
+            sbAfter(500, [this]() {
                 if (mAooClient && !isConnectedToServer() && !mInitialAutoReconnectDone.load() && mServerConnectInFlight.get() == 0 && !mPendingReconnect) {
                     if (mLaunchConnectRequested.load()) {   // Command-line connect owns the launch
                         if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] aoo client ready: launch connect requested -> skip auto-reconnect\n");
@@ -2146,7 +2155,7 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
             --mUserConnectRetriesLeft;
             const String h = host, u = username, pw = passwd; const int p = port;
             if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] connect() refused (library busy) -> retry in 300 ms (%d left)\n", mUserConnectRetriesLeft);
-            Timer::callAfterDelay(300, [this, h, p, u, pw]() { if (!mIsConnectedToServer) connectToServer(h, p, u, pw); });
+            sbAfter(300, [this, h, p, u, pw]() { if (!mIsConnectedToServer) connectToServer(h, p, u, pw); });
         }
     }
     if (retval >= 0) mUserConnectRetriesLeft = 0;
@@ -2179,11 +2188,14 @@ bool SonobusAudioProcessor::isConnectedToServer() const
 void SonobusAudioProcessor::sbMarkLaunchRejoin(bool inRoom)
 {
     if (mSupportDir == File()) return;
+    if (!JUCEApplicationBase::isStandaloneApp()) return;   // the mark belongs to the app
     mSupportDir.getChildFile("launch-rejoin.txt").replaceWithText(inRoom ? "1" : "0");
 }
 
 bool SonobusAudioProcessor::sbLaunchRejoinWanted() const
 {
+    // A plugin never joins a stage by itself when a project loads: the user connects.
+    if (!JUCEApplicationBase::isStandaloneApp()) return false;
     // No file yet: rejoin.
     const File f = mSupportDir.getChildFile("launch-rejoin.txt");
     return !(f.existsAsFile() && f.loadFileAsString().startsWithChar('0'));
@@ -2424,7 +2436,7 @@ void SonobusAudioProcessor::setNetworkTopologyMode(NetworkTopologyMode mode)
 // stay, because the app builds its relayed rows from PEER_JOIN.
 void SonobusAudioProcessor::sbScheduleLaunchRetry()
 {
-    Timer::callAfterDelay(10000, [this]() {
+    sbAfter(10000, [this]() {
         if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] launch retry tick: done=%d connected=%d client=%d\n", mInitialAutoReconnectDone.load() ? 1 : 0, isConnectedToServer() ? 1 : 0, mAooClient ? 1 : 0);
         if (mInitialAutoReconnectDone.load() || isConnectedToServer() || !getAutoReconnectToLast()) {
             mLaunchRetryArmed = false;
@@ -11196,7 +11208,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                 String hubIp     = endpoint->ipaddr;
                 int    hubEpPort = endpoint->port;
                 String hubUserCopy = hubUser;
-                MessageManager::callAsync(
+                sbAsync(
                     [this, hubUserCopy, hubIp, hubEpPort]() {
                         {
                             const ScopedReadLock sl(mCoreLock);
@@ -11220,7 +11232,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                         // MUTED in the UI.
                         juce::String hubNameCap = hubUserCopy;
                         for (int delayMs : {500, 1500, 3000, 6000}) {
-                            juce::Timer::callAfterDelay(delayMs,
+                            sbAfter(delayMs,
                                 [this, hubNameCap]() {
                                     const juce::ScopedReadLock sl(mCoreLock);
                                     for (int i = 0; i < mRemotePeers.size(); ++i) {
@@ -11872,25 +11884,75 @@ void SonobusAudioProcessor::sbSendMuteStateToHub()
 
 // Our version, system and instrument, so the hub can show who runs what and what they play.
 // Sent with every 10-s report and at once when the instrument changes. Control path only.
+String SonobusAudioProcessor::getPluginHostText() const
+{
+    if (mPluginHostTextDone) return mPluginHostText;
+    mPluginHostTextDone = true;
+    String fmt;
+    switch (wrapperType) {
+        case wrapperType_Standalone: case wrapperType_Undefined: return {};
+        case wrapperType_AudioUnit:   fmt = "AU"; break;
+        case wrapperType_AudioUnitv3: fmt = "AUv3"; break;
+        case wrapperType_VST3:        fmt = "VST3"; break;
+        case wrapperType_VST:         fmt = "VST"; break;
+        case wrapperType_LV2:         fmt = "LV2"; break;
+        case wrapperType_AAX:         fmt = "AAX"; break;
+        default:                      fmt = "plugin"; break;
+    }
+    String host;
+   #if JUCE_MAC
+    host = String::fromUTF8(sbHostAppName().c_str());   // The app's own name, also for a plugin hosted out of process
+   #endif
+    if (host.isEmpty()) {
+        host = PluginHostType().getHostDescription();
+        if (host.isEmpty() || host == "Unknown") host = File(PluginHostType::getHostPath()).getFileNameWithoutExtension();
+    }
+    host = host.removeCharacters("\"<>&\\").trim().substring(0, 32);
+    mPluginHostText = host.isNotEmpty() ? fmt + " in " + host : fmt;
+    mPluginOsText = sbPluginOsText(fmt);
+    return mPluginHostText;
+}
+
+// The system field of /sb/hxver in a plugin: platform and format only ("Mac AU", "Win VST3"), short enough for the
+// VERSION column of every hub. The host name stays in the version text. Nothing decides on this field.
+String SonobusAudioProcessor::sbPluginOsText(const String& fmt)
+{
+   #if JUCE_MAC
+    const String plat = "Mac";
+   #elif JUCE_WINDOWS
+    const String plat = "Win";
+   #else
+    const String plat = "Linux";
+   #endif
+    return fmt.isNotEmpty() ? plat + " " + fmt : plat;
+}
+
 void SonobusAudioProcessor::sbSendHxver(RemotePeer * hubPeer)
 {
     if (!hubPeer) return;
-    static const String ver = [](){ const auto i = SonobusPlusVersion::get();
-        return i.version.isNotEmpty() ? i.marketing + " (" + i.version + ")" : i.marketing + " (dev)"; }();
+    // A plugin appends "AU in Logic Pro" after the build: older hubs show it in their log and the version hover,
+    // newer hubs read it from the fourth field.
+    const String plug = getPluginHostText();
+    const String ver = [&plug](){ const auto i = SonobusPlusVersion::get();
+        const String v = i.version.isNotEmpty() ? i.marketing + " (" + i.version + ")" : i.marketing + " (dev)";
+        return plug.isNotEmpty() ? v + " " + plug : v; }();
    #if JUCE_MAC
-    static const char* const os = "Mac";
+    const char* os = "Mac";
    #elif JUCE_WINDOWS
-    static const char* const os = "Windows";
+    const char* os = "Windows";
    #elif JUCE_LINUX
-    static const char* const os = "Linux";
+    const char* os = "Linux";
    #else
-    static const char* const os = "other";
+    const char* os = "other";
    #endif
+    // A plugin names platform and format here ("Mac AU"): the field every hub shows after the version
+    if (plug.isNotEmpty() && mPluginOsText.isNotEmpty()) os = mPluginOsText.toRawUTF8();
     const String instrument = getCurrentInstrument();
-    char vb[224];
+    char vb[288];
     osc::OutboundPacketStream vm(vb, sizeof(vb));
     try {
-        vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.toRawUTF8() << osc::EndMessage;
+        vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.substring(0, 48).toRawUTF8()
+           << plug.substring(0, 40).toRawUTF8() << osc::EndMessage;   // Fourth: plugin format and host, empty in the app
         sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
     } catch (const osc::Exception&) {}
 }
@@ -11913,7 +11975,9 @@ void SonobusAudioProcessor::sbServePortProbe(const String& hubIp, int64 token, i
     int64_t last = lastMs.load(std::memory_order_relaxed);
     if (now - last < 2000 || !lastMs.compare_exchange_strong(last, now)) return;
     const String ip = hubIp;
-    std::thread([this, ip, token, udpPort, serverPort]() {   // JUCE sockets: portable (macOS / Linux / Windows players)
+    mSbLife->busy.fetch_add(1);   // the destructor waits for this thread
+    std::thread([this, life = mSbLife, ip, token, udpPort, serverPort]() {   // JUCE sockets: portable (macOS / Linux / Windows players)
+        struct Done { std::shared_ptr<SbLife> l; ~Done() { l->busy.fetch_sub(1); } } done { life };
         auto ping = [&](int port, const char* what) {
             DatagramSocket sk(false);
             if (!sk.bindToPort(0)) return;
@@ -11925,6 +11989,7 @@ void SonobusAudioProcessor::sbServePortProbe(const String& hubIp, int64 token, i
         ping(serverPort, "udp-server");
         int tcpOk = 0;
         { StreamingSocket t; tcpOk = t.connect(ip, serverPort, 2000) ? 1 : 0; t.close(); }
+        if (!life->alive.load()) return;
         const ScopedReadLock sl (mCoreLock);
         if (auto * hubPeer = sb_findHubPeer(mRemotePeers, mHubPeerUsername)) {
             char b[96]; osc::OutboundPacketStream m(b, sizeof(b));
@@ -12406,7 +12471,7 @@ int32_t SonobusAudioProcessor::handleSourceEvents(const aoo_event ** events, int
                                 int    hubPort     = es->port;
                                 int32_t inviteId   = e->id;
                                 int32_t inviteFlags = e->flags;
-                                MessageManager::callAsync(
+                                sbAsync(
                                     [this, hubUserCopy, hubIp, hubPort, inviteId, inviteFlags]() {
                                         {
                                             const ScopedReadLock sl(mCoreLock);
@@ -13191,7 +13256,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 if (mPendingReconnect && getAutoReconnectToLast()
                     && !mInitialAutoReconnectDone.load()) {
                     for (int delayMs : {5000, 10000, 20000, 40000}) {
-                        Timer::callAfterDelay(delayMs, [this]() {
+                        sbAfter(delayMs, [this]() {
                             if (mInitialAutoReconnectDone.load()) return;
                             if (isConnectedToServer()) return;
                             if (!getAutoReconnectToLast()) return;
@@ -13453,7 +13518,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                 relayedPeer->oursink->invite_source(
                                     hubPeer->endpoint, feedSrcId, endpoint_send);
                             }
-                            Timer::callAfterDelay(200, [this, senderName, newOurId]() {
+                            sbAfter(200, [this, senderName, newOurId]() {
                                 sendHubFeedReqForPeer(senderName, newOurId);
                             });
                             scheduleHostedFeedRebind(senderName, newOurId);
@@ -13470,7 +13535,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                         String senderName = peerUser;
                         String senderGroup = peerGroup;
                         for (int delayMs : {200, 500, 1000, 2000, 4000}) {
-                            Timer::callAfterDelay(delayMs, [this, senderName, senderGroup]() {
+                            sbAfter(delayMs, [this, senderName, senderGroup]() {
                                 // removeRemotePeer and doAddRemotePeerIfNecessary are write-first,
                                 // so never hold the read lock across them (a read->write upgrade
                                 // can deadlock). Short read for the find, release, then the
@@ -13547,7 +13612,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                         clientListeners.call(&SonobusAudioProcessor::ClientListener::aooClientPeerJoinBlocked, this, CharPointer_UTF8 (e->group), CharPointer_UTF8 (e->user), endpoint->ipaddr, endpoint->port);
 
                         // after a short delay
-                        Timer::callAfterDelay(400, [this, endpoint] {
+                        sbAfter(400, [this, endpoint] {
                             sendBlockedInfoMessage(endpoint, true);
                         });
                     }
@@ -13578,7 +13643,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                         // idempotent.
                                         juce::String hubNameCap = peerUser;
                                         for (int delayMs : {500, 1500, 3000, 6000}) {
-                                            juce::Timer::callAfterDelay(delayMs, [this, hubNameCap]() {
+                                            sbAfter(delayMs, [this, hubNameCap]() {
                                                 const juce::ScopedReadLock sl(mCoreLock);
                                                 for (int i = 0; i < mRemotePeers.size(); ++i) {
                                                     auto* p = mRemotePeers.getUnchecked(i);
@@ -13634,7 +13699,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                     // with AOONET_SINK_ADDED_EVENT carrying a real source id, after
                                     // which a later tick can do the real setRemotePeerRecvActive.
                                     for (int delayMs : {500, 1000, 1800, 3000, 4500}) {
-                                        juce::Timer::callAfterDelay(delayMs, [this, hubName]() {
+                                        sbAfter(delayMs, [this, hubName]() {
                                             const juce::ScopedReadLock sl (mCoreLock);
                                             for (int i = 0; i < mRemotePeers.size(); ++i) {
                                                 auto* p = mRemotePeers.getUnchecked(i);
@@ -13682,7 +13747,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                                 relayedPeer->oursink->invite_source(
                                                     hubPeer->endpoint, feedSrcId, endpoint_send);
                                             }
-                                            Timer::callAfterDelay(200, [this, senderName, newOurId]() {
+                                            sbAfter(200, [this, senderName, newOurId]() {
                                                 sendHubFeedReqForPeer(senderName, newOurId);
                                             });
                                             scheduleHostedFeedRebind(senderName, newOurId);
@@ -13696,7 +13761,7 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                                         String senderName = peerUser;
                                         String senderGroup = peerGroup;
                                         for (int delayMs : {200, 500, 1000, 2000, 4000}) {
-                                            Timer::callAfterDelay(delayMs, [this, senderName, senderGroup]() {
+                                            sbAfter(delayMs, [this, senderName, senderGroup]() {
                                                 // Same read->write upgrade rule as the PREJOIN chain (see
                                                 // comment there): short read for the find, release, then the
                                                 // write-first ops.
@@ -14410,6 +14475,65 @@ bool SonobusAudioProcessor::getAudioInterfaceMs(AudioIODevice * ad, float & inMs
     return true;
 }
 
+int SonobusAudioProcessor::getHostCallbackBlock() const
+{
+    // getBlockSize() is only the host's maximum (a DAW passes 512 or 1024 while its I/O buffer is 32)
+    const int stable = mSbStableBlock.load(std::memory_order_relaxed);
+    if (stable > 0) return stable;
+    const int last = mSbLastBlock.load(std::memory_order_relaxed);
+    return last > 0 ? last : getBlockSize();
+}
+
+bool SonobusAudioProcessor::getHostInterfaceMs(float & inMs, float & outMs, bool & exact) const
+{
+    if (mHostIfaceMethod == 0 || mHostIfaceInMs < 0.0f || mHostIfaceOutMs < 0.0f) return false;
+    inMs = mHostIfaceInMs; outMs = mHostIfaceOutMs; exact = mHostIfaceMethod != 3;
+    return true;
+}
+
+void SonobusAudioProcessor::refreshHostInterfaceMs()
+{
+    const double sr = getSampleRate();
+    const int bs = getHostCallbackBlock();
+    if (sr <= 0.0 || bs <= 0) return;
+    const uint32 now = Time::getMillisecondCounter();
+    if (sr == mHostIfaceRate && bs == mHostIfaceBlock && mHostIfaceStampMs != 0 && now - mHostIfaceStampMs < 30000) return;
+    mHostIfaceRate = sr; mHostIfaceBlock = bs; mHostIfaceStampMs = now;
+    float in = -1.0f, out = -1.0f; int method = 0; String dev;
+    std::string trace;
+#if JUCE_MAC
+    std::string name;
+    method = sbProcessInterfaceLatency(sr, bs, in, out, name, trace);
+    dev = String::fromUTF8(name.c_str());
+#endif
+    {   // Every lookup, what was asked and found (iface.log, 256 kB, rotated once)
+        const std::string lp = sbLogDir() + "/iface.log";
+        struct stat st; if (stat(lp.c_str(), &st) == 0 && st.st_size > 256 * 1024) { std::rename(lp.c_str(), (lp + ".1").c_str()); }
+        if (FILE* f = fopen(lp.c_str(), "a")) {
+            fprintf(f, "%s [SB-IFACE-LOOKUP] host block %d (max %d) @ %.0f: %s\n", Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S").toRawUTF8(),
+                    bs, getBlockSize(), sr, trace.empty() ? "no lookup on this system" : trace.c_str());
+            fclose(f);
+        }
+    }
+    if (method == 0) {   // Only the host buffer is known, once each way
+        in = out = (float) (1000.0 * bs / sr);
+        method = 3; dev = "host buffer";
+    }
+    const bool changed = method != mHostIfaceMethod || dev != mHostIfaceDevice
+                      || std::abs(in - mHostIfaceInMs) > 0.05f || std::abs(out - mHostIfaceOutMs) > 0.05f;
+    mHostIfaceInMs = in; mHostIfaceOutMs = out; mHostIfaceMethod = method; mHostIfaceDevice = dev;
+    if (!changed) return;
+    static const char* const how[] = { "-", "process devices", "matching running device", "host buffer only" };
+    char line[400];
+    snprintf(line, sizeof(line), "%s [SB-IFACE] device='%s' in=%.2fms out=%.2fms (%s) host=%d@%.0f\n",
+             Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S").toRawUTF8(), dev.toRawUTF8(), (double) in, (double) out,
+             how[method], bs, sr);
+    if (sbDiagOn()) fputs(line, stderr);
+    const std::string lp = sbLogDir() + "/auto.log";   // Same small file as the buffer decisions (1 MB cap)
+    struct stat st; if (stat(lp.c_str(), &st) == 0 && st.st_size > 1024 * 1024) { std::rename(lp.c_str(), (lp + ".1").c_str()); }
+    if (FILE* f = fopen(lp.c_str(), "a")) { fputs(line, f); fclose(f); }
+}
+
 // That player's ping (hub<->them RTT) and uplink rate, from the hub's 1-Hz line
 bool SonobusAudioProcessor::getRemotePeerHubStats(int index, float & rttMs, float & upKbps) const
 {
@@ -14657,7 +14781,7 @@ void SonobusAudioProcessor::scheduleHostedFeedRebind(const String& senderUserNam
     static constexpr int kAttempts = (int)(sizeof(kDelaysMs) / sizeof(kDelaysMs[0]));
     if (attempt < 0 || attempt >= kAttempts) return;
 
-    Timer::callAfterDelay(kDelaysMs[attempt], [this, senderUserName, ourIdForSender, attempt]() {
+    sbAfter(kDelaysMs[attempt], [this, senderUserName, ourIdForSender, attempt]() {
         if (!isHostedMixModeEnabled()) return;
 
         EndpointState* hubEp = nullptr;
@@ -18309,6 +18433,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
     }
     mSbAudioCallbacks.fetch_add(1, std::memory_order_relaxed);   // Audio-health callback count
     mSbAudioFrames.fetch_add((uint64_t) buffer.getNumSamples(), std::memory_order_relaxed);   
+    mSbLastBlock.store(buffer.getNumSamples(), std::memory_order_relaxed);   // The host's real callback size (not its maximum)
 
     // Diagnostic taps init + capture tap.
     if (!sbtap::gTapsInit) {
@@ -18401,6 +18526,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         if (blocksizeCounter > 30) { // change currblocksize if stable
             DBG("sample frames stabilized at: " << numSamples);
             currSamplesPerBlock = numSamples;
+            mSbStableBlock.store(numSamples, std::memory_order_relaxed);
             blocksizeCounter = -1;
             mNeedsSampleSetup = true;
 
@@ -20339,7 +20465,7 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
                 // failure event ever arms the retry, so arm it here.
                 if (!mLaunchRetryArmed) { mLaunchRetryArmed = true; sbScheduleLaunchRetry(); }
                 for (int delayMs : {300, 1000, 3000, 6000, 12000}) {
-                    Timer::callAfterDelay(delayMs, [this]() {
+                    sbAfter(delayMs, [this]() {
                         // Once the chain has hit its first successful connect, bail. Calling
                         // reconnectToMostRecent again would re-open a TCP session, triggering the
                         // hub's same-username eviction logic to drop the just-established session.
@@ -20375,14 +20501,14 @@ bool SonobusAudioProcessor::saveCurrentAsDefaultPluginSettings()
     MemoryBlock data;
     // as xml, with no cache, and no channel group stuff
     getStateInformationWithOptions(data, false, false, true);
-    File defFile = getSupportDir().getChildFile("PluginDefault.xml");
+    File defFile = getSupportDir().getChildFile("RPPluginDefault.xml");
     
     return defFile.replaceWithData (data.getData(), data.getSize());
 }
 
 bool SonobusAudioProcessor::loadDefaultPluginSettings()
 {
-    File defFile = getSupportDir().getChildFile("PluginDefault.xml");
+    File defFile = getSupportDir().getChildFile("RPPluginDefault.xml");
     MemoryBlock data;
     if (defFile.loadFileAsData (data)) {
         // no cache, no channel group, xml
@@ -20395,7 +20521,7 @@ bool SonobusAudioProcessor::loadDefaultPluginSettings()
 void SonobusAudioProcessor::resetDefaultPluginSettings()
 {
     // remove the default file
-    File defFile = getSupportDir().getChildFile("PluginDefault.xml");
+    File defFile = getSupportDir().getChildFile("RPPluginDefault.xml");
     defFile.deleteFile();
 }
 

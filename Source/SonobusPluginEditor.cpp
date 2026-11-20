@@ -24,7 +24,28 @@
 #include "SonoCallOutBox.h"
 #include "StagesView.h"
 #include "SbTextFit.h"
+#include "SbDataPaths.h"
 #include <sstream>
+#include <sys/stat.h>
+
+// In a host: one line per editor size (ui.log, 256 kB, rotated once), so a resize report can be read back.
+static void sbUiLog(const String& msg)
+{
+    if (JUCEApplicationBase::isStandaloneApp()) return;
+    const std::string lp = sbLogDir() + "/ui.log";
+    struct stat st; if (stat(lp.c_str(), &st) == 0 && st.st_size > 256 * 1024) { std::rename(lp.c_str(), (lp + ".1").c_str()); }
+    if (FILE* f = fopen(lp.c_str(), "a")) {
+        fprintf(f, "%s %s\n", Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S").toRawUTF8(), msg.toRawUTF8());
+        fclose(f);
+    }
+}
+
+// The editor asks for a size of its own (side panels): logged in a host, where it should not happen.
+static void sbOwnSize(Component& ed, int w, int h, const char* why)
+{
+    sbUiLog("editor ASKS for " + String(w) + " x " + String(h) + " (" + why + ")");
+    ed.setSize(w, h);
+}
 
 #if JUCE_ANDROID
 #include "juce_core/native/juce_BasicNativeHeaders.h"
@@ -2080,6 +2101,11 @@ String SonobusAudioProcessorEditor::inputMeterChannelName(int ch, int n)
 void SonobusAudioProcessorEditor::timerCallback(int timerid)
 {
     if (timerid == PeriodicUpdateTimerId) {
+        if (!JUCEApplicationBase::isStandaloneApp()) sbResizeStatsFlush(false);
+        if (!JUCEApplicationBase::isStandaloneApp() && getLocalBounds() != mUiLogSize) {   // The size a resize ended at
+            mUiLogMs = Time::getMillisecondCounter(); mUiLogSize = getLocalBounds();
+            sbUiLog("editor size " + String(getWidth()) + " x " + String(getHeight()) + " (settled)");
+        }
         if (mUiCmdDir != File()) runUiCommand();
 
         // Audio health (callbacks vs expected, CoreAudio overloads) every 10 s
@@ -3628,7 +3654,7 @@ void SonobusAudioProcessorEditor::componentVisibilityChanged (Component& compone
             if (!mChatOverlay && mChatShowDidResize) {
                 // reduce size
                 int newwidth = getWidth() - mChatView->getWidth();
-                setSize(newwidth, getHeight());
+                sbOwnSize(*this, newwidth, getHeight(), "side panel closed");
                 //mChatShowDidResize = false;
             } else {
                 resized();
@@ -3646,7 +3672,7 @@ void SonobusAudioProcessorEditor::componentVisibilityChanged (Component& compone
             if (mSoundboardShowDidResize) {
                 // reduce size
                 int newwidth = getWidth() - mSoundboardView->getWidth();
-                setSize(newwidth, getHeight());
+                sbOwnSize(*this, newwidth, getHeight(), "side panel closed");
             } else {
                 resized();
             }
@@ -4486,9 +4512,11 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             }
 
             // delay update
-            Timer::callAfterDelay(200, [this] {
-                updatePeerState(true);
-                updateState(false);
+            Component::SafePointer<SonobusAudioProcessorEditor> safe(this);
+            Timer::callAfterDelay(200, [safe] {
+                if (safe == nullptr) return;
+                safe->updatePeerState(true);
+                safe->updateState(false);
             });
         }
         else if (ev.type == ClientEvent::PeerLeaveEvent) {
@@ -4810,6 +4838,7 @@ void SonobusAudioProcessorEditor::showSuggestedGroupPrompt(const String &name, c
 
 void SonobusAudioProcessorEditor::showChatPanel(bool show, bool allowresize)
 {
+    if (!JUCEApplicationBase::isStandaloneApp()) allowresize = false;   // In a host the window size is the user's
 
 #if !(JUCE_IOS || JUCE_ANDROID)
     // attempt resize
@@ -4824,7 +4853,7 @@ void SonobusAudioProcessorEditor::showChatPanel(bool show, bool allowresize)
             } else {
                 mChatShowDidResize = true;
             }
-            setSize(newwidth, getHeight());
+            sbOwnSize(*this, newwidth, getHeight(), "side panel opened");
         }
         else {
             mChatShowDidResize = false;
@@ -4848,6 +4877,7 @@ void SonobusAudioProcessorEditor::showChatPanel(bool show, bool allowresize)
 
 void SonobusAudioProcessorEditor::showSoundboardPanel(bool show, bool allowresize)
 {
+    if (!JUCEApplicationBase::isStandaloneApp()) allowresize = false;   // In a host the window size is the user's
 #if !(JUCE_IOS || JUCE_ANDROID)
     // attempt resize
     if (allowresize && show && !isNarrow) {
@@ -4861,7 +4891,7 @@ void SonobusAudioProcessorEditor::showSoundboardPanel(bool show, bool allowresiz
             } else {
                mSoundboardShowDidResize = true;
             }
-            setSize(newwidth, getHeight());
+            sbOwnSize(*this, newwidth, getHeight(), "side panel opened");
         }
         else {
            mSoundboardShowDidResize = false;
@@ -4896,13 +4926,51 @@ void SonobusAudioProcessorEditor::paint (Graphics& g)
 {
     // (Our component is opaque, so we must completely fill the background with a solid colour)
     g.fillAll (getLookAndFeel().findColour (ResizableWindow::backgroundColourId));
+    mRs.paintStart = (mRs.pending && g.getClipBounds() == getLocalBounds()) ? Time::getMillisecondCounterHiRes() : 0.0;
+}
 
+void SonobusAudioProcessorEditor::paintOverChildren (Graphics&)
+{
+    if (mRs.paintStart <= 0.0) return;   // A full paint after a size change (in a host): its time, with all children
+    const double ms = Time::getMillisecondCounterHiRes() - mRs.paintStart;
+    const double wait = jmax(0.0, mRs.paintStart - mRs.lastMs);   // from the size to the start of its paint
+    mRs.paintStart = 0.0; mRs.pending = false;
+    ++mRs.paints; mRs.paintMs += ms; mRs.paintMax = jmax(mRs.paintMax, ms);
+    mRs.waitMs += wait; mRs.waitMax = jmax(mRs.waitMax, wait);
+    if (auto* holder = getParentComponent())   // drawn at once, presented with the host's resize (AU out of process)
+        if ((bool) holder->getProperties().getWithDefault("juce_renderSyncNow", false)) ++mRs.syncPaints;
+}
+
+// One ui.log line per resize drag (in a host): how many sizes arrived, over what time, layout and full-paint cost per
+// step, and how many sizes were replaced by the next one before they were painted.
+void SonobusAudioProcessorEditor::sbResizeStatsFlush(bool force)
+{
+    if (mRs.sizes == 0 || (!force && Time::getMillisecondCounterHiRes() - mRs.lastMs < 500.0)) return;
+    String line;
+    line << "resize: " << mRs.sizes << " sizes in " << roundToInt(mRs.lastMs - mRs.firstMs) << " ms; layout avg "
+         << String(mRs.layoutMs / mRs.sizes, 2) << " max " << String(mRs.layoutMax, 2) << " ms; full paints " << mRs.paints;
+    if (mRs.paints > 0) line << " avg " << String(mRs.paintMs / mRs.paints, 2) << " max " << String(mRs.paintMax, 2) << " ms"
+                             << ", size to paint avg " << String(mRs.waitMs / mRs.paints, 2) << " max " << String(mRs.waitMax, 2) << " ms"
+                             << ", drawn with the host's resize " << mRs.syncPaints;
+    line << "; sizes never painted " << mRs.unpainted << "; end " << getWidth() << " x " << getHeight();
+    if (auto* holder = getParentComponent())   // AU: how the layers place content the host shows before it is drawn
+        if (holder->getProperties().contains("juce_layerInfo")) line << "; layers " << holder->getProperties()["juce_layerInfo"].toString();
+    sbUiLog(line);
+    mRs = ResizeStats();
 }
 
 void SonobusAudioProcessorEditor::resized()
 {
     // This is generally where you'll want to lay out the positions of any
     // subcomponents in your editor..
+
+    const bool rsTiming = !JUCEApplicationBase::isStandaloneApp();
+    const double rsStart = rsTiming ? Time::getMillisecondCounterHiRes() : 0.0;
+    if (rsTiming) {
+        if (mRs.sizes == 0) mRs.firstMs = rsStart;
+        if (mRs.pending) ++mRs.unpainted;
+        ++mRs.sizes; mRs.lastMs = rsStart;
+    }
 
     Component::resized();
  
@@ -4951,6 +5019,10 @@ void SonobusAudioProcessorEditor::resized()
    
     
     DBG("RESIZED to " << getWidth() << " " << getHeight());
+    if (!JUCEApplicationBase::isStandaloneApp() && getLocalBounds() != mUiLogSize && Time::getMillisecondCounter() - mUiLogMs >= 200) {
+        mUiLogMs = Time::getMillisecondCounter(); mUiLogSize = getLocalBounds();
+        sbUiLog("editor size " + String(getWidth()) + " x " + String(getHeight()));
+    }
     
     auto mainBounds = getLocalBounds();
     const auto menuHeight = getLookAndFeel().getDefaultMenuBarHeight();
@@ -5124,6 +5196,10 @@ void SonobusAudioProcessorEditor::resized()
 
     updateSliderSnap();
 
+    if (rsTiming) {
+        const double ms = Time::getMillisecondCounterHiRes() - rsStart;
+        mRs.layoutMs += ms; mRs.layoutMax = jmax(mRs.layoutMax, ms); mRs.pending = true;
+    }
 }
 
 
@@ -5990,7 +6066,7 @@ namespace {
 class SonobusPlusAboutComponent : public Component
 {
 public:
-    SonobusPlusAboutComponent()
+    explicit SonobusPlusAboutComponent(const String & pluginHost) : plugHost(pluginHost)
     {
         info = SonobusPlusVersion::get();
         logo = ImageCache::getFromMemory(BinaryData::sonobus_logo_96_png, BinaryData::sonobus_logo_96_pngSize);
@@ -6025,7 +6101,8 @@ public:
         if (info.commit.isNotEmpty())
             g.drawText("Build " + info.commit + String::fromUTF8("  \u00b7  compiled ") + info.buildDate, r.removeFromTop(20), Justification::centredLeft);
         g.drawText("Developed by Jason Buecker (Random Planet)", r.removeFromTop(20), Justification::centredLeft);
-        g.drawText(String::fromUTF8("Hub mode  \u00b7  PCM 16-bit"), r.removeFromTop(20), Justification::centredLeft);
+        g.drawText(String::fromUTF8("Hub mode  \u00b7  PCM 16-bit") + (plugHost.isNotEmpty() ? String::fromUTF8("  \u00b7  ") + plugHost : String()),
+                   r.removeFromTop(20), Justification::centredLeft);
 
         r.removeFromTop(18);
         g.setColour(Colour(0xff8a8a8a));
@@ -6037,6 +6114,7 @@ public:
 
 private:
     SonobusPlusVersion::Info info;
+    String plugHost;   // "AU in Logic Pro"; empty in the app
     Image logo;
 };
 }
@@ -6044,7 +6122,7 @@ private:
 void SonobusAudioProcessorEditor::showSonobusPlusAbout()
 {
     DialogWindow::LaunchOptions o;
-    o.content.setOwned(new SonobusPlusAboutComponent());
+    o.content.setOwned(new SonobusPlusAboutComponent(processor.getPluginHostText()));
     o.dialogTitle = TRANS("About SonoBus RP");
     o.dialogBackgroundColour = Colour(0xff262626);
     o.escapeKeyTriggersCloseButton = true;

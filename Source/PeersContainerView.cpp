@@ -2313,9 +2313,16 @@ static String sbFormatMs(float ms)
     return v + " ms";
 }
 
-bool PeersContainerView::ownInterfaceMs(float & inMs, float & outMs) const
+bool PeersContainerView::ownInterfaceMs(float & inMs, float & outMs, bool * exact) const
 {
-    if (!JUCEApplicationBase::isStandaloneApp() || !getAudioDeviceManager || !getAudioDeviceManager()) return false;
+    if (exact) *exact = true;
+    if (!JUCEApplicationBase::isStandaloneApp()) {   // In a host: the host's interface, found by the processor
+        bool ex = false;
+        if (!processor.getHostInterfaceMs(inMs, outMs, ex)) return false;
+        if (exact) *exact = ex;
+        return true;
+    }
+    if (!getAudioDeviceManager || !getAudioDeviceManager()) return false;
     return SonobusAudioProcessor::getAudioInterfaceMs(getAudioDeviceManager()->getCurrentAudioDevice(), inMs, outMs);
 }
 
@@ -2475,6 +2482,7 @@ void PeersContainerView::updatePeerViews(int specific)
             // feels: that round trip, the buffering on the way (the hub's buffer for this player, this player's
             // receive buffer, one packet) and the audio interface in and out. Link = drops on the way from the hub.
             float netMs = -1.0f, bufMs = -1.0f, ifaceMs = -1.0f, delayMs = -1.0f;
+            bool ifaceExact = true;
             {
                 float sTo = -1, sFrom = -1, sRtt = -1; int64_t sLost = -1;
                 const bool self = processor.getSelfHubLatency(sTo, sFrom, sRtt, sLost);
@@ -2485,7 +2493,7 @@ void PeersContainerView::updatePeerViews(int specific)
                     const float packetMs = 1000.0f * 32.0f / 48000.0f;   // one audio block on the wire
                     bufMs = jmax(0.0f, to + from - netMs) + packetMs;
                     float inMs = 0.0f, outMs = 0.0f;   // input + output latency, each with its buffer
-                    if (ownInterfaceMs(inMs, outMs)) ifaceMs = inMs + outMs;
+                    if (ownInterfaceMs(inMs, outMs, &ifaceExact)) ifaceMs = inMs + outMs;
                     delayMs = netMs + bufMs + jmax(0.0f, ifaceMs);
                 }
             }
@@ -2536,7 +2544,9 @@ void PeersContainerView::updatePeerViews(int specific)
                                 << "One packet " << String(packetMs, 1) << " ms\n";
                         else
                             tip << "Buffering " << String(bufMs, 1) << " ms\n";
-                        tip << (ifaceMs >= 0.0f ? "Audio interface " + String(ifaceMs, 1) + " ms" : String("Audio interface: not known"));
+                        tip << (ifaceMs < 0.0f ? String("Audio interface: not known")
+                                : ifaceExact ? "Audio interface " + String(ifaceMs, 1) + " ms"
+                                             : "Audio interface: about " + String(ifaceMs, 1) + " ms (buffer only)");
                     } else {
                         tip << "Latency = network + buffering + audio interface, round trip";
                     }
@@ -2890,8 +2900,8 @@ void PeersContainerView::updatePeerViews(int specific)
             const bool havePeer = processor.getRemotePeerHubLatency(i, toHub, fromHub);
             const bool haveSelf = processor.getSelfHubLatency(sTo, sFrom, sRtt, sLost);
             const String peerName = processor.getRemotePeerUserName(i);
-            float myIn = 0.0f, myOut = 0.0f;
-            const bool haveMine = ownInterfaceMs(myIn, myOut);
+            float myIn = 0.0f, myOut = 0.0f; bool myExact = true;
+            const bool haveMine = ownInterfaceMs(myIn, myOut, &myExact);
             const float theirIface = processor.getRemotePeerHubInterfaceMs(i);
             const bool haveTheirs = theirIface >= 0.0f;
             float prtt = -1.0f, pup = -1.0f; processor.getRemotePeerHubStats(i, prtt, pup);
@@ -2913,7 +2923,9 @@ void PeersContainerView::updatePeerViews(int specific)
                     tip << "Network " << String(netMs, 1) << " ms\nHub and receive buffers " << String(e2eUp + e2eDn - netMs, 1) << " ms\n";
                 else
                     tip << "Network and buffers " << String(e2eUp + e2eDn, 1) << " ms\n";
-                tip << (haveMine ? "Your audio interface " + String(myIn + myOut, 1) + " ms" : String("Your audio interface not known")) << "\n"
+                tip << (!haveMine ? String("Your audio interface not known")
+                        : myExact ? "Your audio interface " + String(myIn + myOut, 1) + " ms"
+                                  : "Your audio interface about " + String(myIn + myOut, 1) + " ms (buffer only)") << "\n"
                     << (haveTheirs ? "Their audio interface " + String(theirIface, 1) + " ms" : String("Their audio interface not known")) << "\n";
             } else {
                 tip << TRANS("Waiting for the hub's latency report") << "\n";

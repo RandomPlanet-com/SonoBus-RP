@@ -389,7 +389,7 @@ async function tick(){
    // Columns are fixed, so a value that gains a digit moves nothing outside its own cell.
    const pair=(x,y)=>`${x}<span class="d sl">/</span>${y}`;
    const mb=(v)=> v<0?'–':(v*8/1e6).toFixed(1);
-   const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}`:'<span class="d">–</span>';
+   const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}${p.plug&&/^(Mac|Windows|Linux|other)$/.test(p.os||'')?' · '+esc(p.plug):''}`:'<span class="d">–</span>';
    const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,esc(p.inst||''),loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
 
    rowKeys.set(p.id,[p.user.toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
@@ -655,7 +655,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
           << ",\"location\":\"" << jsonEscape(locationFor(p.ipAddr, p.isLan)) << "\""   
           << ",\"recording\":" << (p.isRecording ? "true" : "false") << ",\"muted\":" << (p.isSendMuted ? "true" : "false") << ",\"devBuf\":" << p.clientDevBuf << ",\"devSr\":" << p.clientDevSr
           << ",\"ver\":\"" << jsonEscape(p.clientVersion) << "\",\"os\":\"" << jsonEscape(p.clientOs) << "\""
-          << ",\"inst\":\"" << jsonEscape(p.clientInstrument) << "\""
+          << ",\"inst\":\"" << jsonEscape(p.clientInstrument) << "\",\"plug\":\"" << jsonEscape(p.clientPlugin) << "\""
           << ",\"joinedAtMs\":" << p.joinedAtMs << "}";
     }
     o << "]}";
