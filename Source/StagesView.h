@@ -75,6 +75,9 @@ private:
     void rebuild();
     void updateStatus();
     void flash(const juce::String& note);
+    // The stage whose invite link was copied last, and until when its button says so
+    juce::String mCopiedKey;
+    juce::uint32 mCopiedUntil = 0;
     void fillChoice(juce::ComboBox& box, const juce::String& allText, const juce::StringArray& items);
     void updateChoiceTips();   // full choice in the hover when its box is too narrow
     juce::Rectangle<int> columnRect(int columnId) const;

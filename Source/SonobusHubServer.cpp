@@ -2117,10 +2117,22 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         aoo_sb_set_group_policy(groupName.c_str(), groupPassword.c_str());
         std::cout << "[HUB] Group policy: only '" << groupName << "' on this server, "
                   << (groupPassword.empty() ? "no password" : "password required") << "\n";
-        mAooServer.reset(aoo::net::iserver::create(mLocalServerPort, &err));
+        // A port still held by the copy that is just quitting (a restart) is free again within a few seconds
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            err = 0;
+            mAooServer.reset(aoo::net::iserver::create(mLocalServerPort, &err));
+            if (mAooServer && err == 0) break;
+            mAooServer.reset();
+            if (err != 48 && err != 98 && err != 10048) break;   // EADDRINUSE on Mac, Linux, Windows
+            if (attempt == 0) std::cout << "[HUB] port " << mLocalServerPort << " is busy, trying again for up to 5 s\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
         if (!mAooServer || err != 0) {
             std::cerr << "[HUB] Failed to create local AOO server on port " << mLocalServerPort << " (err=" << err << ")\n";
-            mStartError = "Port " + std::to_string(mLocalServerPort) + " (connection, TCP and UDP) is in use by another program.";
+            mStartError = (err == 48 || err == 98 || err == 10048)
+                ? "Port " + std::to_string(mLocalServerPort) + " is already in use on this computer (connection, TCP and UDP), so the hub could not start."
+                : "Port " + std::to_string(mLocalServerPort) + " could not be opened (error " + std::to_string(err) + "), so the hub could not start.";
+            std::cerr << "[HUB] " << mStartError << "\n";
             mAooServer.reset();
             hub_close(mSocket);
             mSocket = -1;
@@ -2361,6 +2373,15 @@ bool SonobusHubServer::start(const std::string& aooServerHost, int aooServerPort
         const std::string testGw = hub_tap_str("SB_HUB_TEST_GATEWAY", "");
         const std::string gw = testGw.empty() ? hub_default_gateway() : testGw;
         { std::lock_guard<std::mutex> l(mStageMutex); mGatewayIp = gw; }
+        {
+            std::string pub = mAdvertisedPublicHost;
+            struct in_addr pubIp {};
+            char numeric[INET_ADDRSTRLEN] = {};
+            if (!mPublicAddressHost.empty() && hub_resolve_ipv4(mPublicAddressHost, pubIp) && inet_ntop(AF_INET, &pubIp, numeric, sizeof(numeric))) pub = numeric;
+            std::lock_guard<std::mutex> hl(mHairpinMutex);
+            mHairpinGatewayIp = gw;
+            mHairpinPublicIp = pub;
+        }
         std::cout << "[HUB-REMOVED] default gateway " << (gw.empty() ? std::string("not found") : gw) << (testGw.empty() ? "" : " (SB_HUB_TEST_GATEWAY)")
                   << ": a removal's address is not used for players who arrive from it\n";
     }
@@ -2662,6 +2683,36 @@ SonobusHubServer::UiSnapshot SonobusHubServer::snapshotForUI() const {
     return s;
 }
 
+// The welcome message goes out this long after a join, when the player's chat is ready for it.
+static constexpr int64_t kWelcomeDelayMs = 2000;
+static int64_t hub_welcome_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The stage's welcome message, once to each player about 2 s after the join, as a chat line from "Hub" with the
+// tag "welcome". Control path only: the stats thread, one datagram on the hub socket.
+void SonobusHubServer::welcomeTick(const std::vector<std::shared_ptr<HubPeer>>& peers) {
+    if (mSocket < 0) return;
+    const int64_t nowMs = hub_welcome_now_ms();
+    for (auto& p : peers) {
+        const int64_t due = p->welcomeDueMs.load(std::memory_order_relaxed);
+        if (due == 0 || nowMs < due) continue;
+        if (!p->active || p->addrlen <= 0) continue;   // waits for the player's address
+        p->welcomeDueMs.store(0, std::memory_order_relaxed);
+        std::string text;
+        { std::lock_guard<std::mutex> l(mStageMutex); text = mStage.welcome; }
+        if (text.empty()) continue;
+        char buf[4096];
+        osc::OutboundPacketStream msg(buf, sizeof(buf));
+        try {
+            msg << osc::BeginMessage(SB_HXMSG_DOMAIN SB_HXMSG_CHAT) << mGroupName.c_str() << "Hub" << "" << "welcome" << text.c_str() << osc::EndMessage;
+        } catch (const osc::Exception&) { continue; }
+        ::sendto(mSocket, msg.Data(), msg.Size(), 0, (const struct sockaddr*)&p->addr, p->addrlen);
+        p->welcomeSentMs.store(nowMs, std::memory_order_relaxed);
+        std::cout << "[HUB-CHAT] welcome sent to '" << p->userName << "' (" << text.size() << " bytes)\n";
+    }
+}
+
 // Called from statsWriterThread every 200 ms (10-s cadence inside), independent of any viewer: clients
 // blank their latency display after 35 s without /sb/hxlat, so this must not depend on a snapshot poll.
 void SonobusHubServer::latencyBroadcastTick() {
@@ -2671,6 +2722,7 @@ void SonobusHubServer::latencyBroadcastTick() {
         peers.reserve(mPeers.size());
         for (auto& p : mPeers) if (p) peers.push_back(p);
     }
+    welcomeTick(peers);
     // Broadcast each player's to/from-hub latency to every other hosted client, at the SB_HUB_LAT_BCAST_S
     // interval, so relayed rows can show "->hub X | hub-> Y ms" instead of "via hub". Control path only
     // (small datagrams on the hub UDP socket, same as [HUB-HELLO]); nothing here touches the audio thread.
@@ -2726,6 +2778,8 @@ void SonobusHubServer::latencyBroadcastTick() {
                         if (q->latSnapMs != 0 && nowMsU > q->latSnapMs) q->latUpKbps = (float)((double)(bi - q->latBytesInSnap) * 8.0 / (double)(nowMsU - q->latSnapMs));
                         q->latBytesInSnap = bi; q->latSnapMs = nowMsU;
                     }
+                    std::string inst;   // That player's instrument, as it reported it (/sb/hxver)
+                    { std::lock_guard<std::mutex> vl(q->verLock); inst = q->clientInstrument; }
                     omsg << osc::BeginMessage(SB_HXFULLMSG_LAT)
                          << q->userName.c_str() << toHub << fromHub << uplinkLost   // + blocks the hub lost on THEIR uplink (per player, same for every viewer)
                          << rttForDisplay                                             // Raw round trip, so a player's own header can show the SAME model as everyone's rows
@@ -2733,6 +2787,7 @@ void SonobusHubServer::latencyBroadcastTick() {
                          << q->latUpKbps                                              // Their uplink rate, kbit/s (older clients ignore it)
                          << (int32_t) q->isSendMuted.load(std::memory_order_relaxed) // That player muted its send (older clients ignore it)
                          << q->clientIfaceMs.load(std::memory_order_relaxed)         // Their audio interface in + out, ms, -1 = not known (older clients ignore it)
+                         << inst.c_str()                                              // Their instrument, empty = none (older clients ignore it)
                          << osc::EndMessage;
                     for (auto& l : peers) {
                         if (!l || l->addrlen == 0) continue;   // A player gets its OWN entry too (header "you")
@@ -3242,6 +3297,12 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
                 }
             }
             existing->active = true;
+            {   // a join of a player whose record stayed: welcome again, unless one just went out
+                const int64_t nowMs = hub_welcome_now_ms();
+                const int64_t sent = existing->welcomeSentMs.load(std::memory_order_relaxed);
+                if (existing->welcomeDueMs.load(std::memory_order_relaxed) == 0 && (sent == 0 || nowMs - sent > 10000))
+                    existing->welcomeDueMs.store(nowMs + kWelcomeDelayMs, std::memory_order_relaxed);
+            }
             rebindPeerEndpointLocked(existing, "addPeer dedupe");   // Endpoint (feeds + connected fd) follows
             rebuildPeerSnapshotLocked();  // Addr may have changed — REQUIRED right after the rebind
             std::cout << "[HUB] addPeer dedupe: '" << userName
@@ -3254,6 +3315,7 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     auto peer = std::make_shared<HubPeer>();
     peer->id = peerId;
     peer->userName = userName;
+    peer->welcomeDueMs.store(hub_welcome_now_ms() + kWelcomeDelayMs, std::memory_order_relaxed);
     mStageMembersGen.fetch_add(1, std::memory_order_relaxed);
     peer->recvChannels = mChannels;
     peer->uiRecvChannels.store(mChannels, std::memory_order_relaxed);
@@ -3283,6 +3345,12 @@ HubPeer* SonobusHubServer::addPeer(int32_t peerId, const std::string& userName, 
     peer->isLan = addrMatchesLanSubnet(peer->addr) || (hub_loopback_fix() && hub_addr_is_loopback(peer->addr));
     connLog("peer-audio", std::string(peerAddrStr) + ":" + std::to_string(peerPort), userName, mGroupName, peer->isLan ? "LAN" : "WAN");   
     recentNoteJoin(userName, peerAddrStr, peer->isLan);   // Recent-players list
+    peer->hairpinVia = hairpinViaFor(userName, peerAddrStr);
+    if (!peer->hairpinVia.empty()) {
+        peer->hairpinHintsLeft.store(1, std::memory_order_relaxed);
+        std::cout << "[HUB-HAIRPIN] '" << userName << "' arrives through the router (" << peer->hairpinVia << "): chat tells it to use "
+                  << mAdvertisedLanHost << ":" << mLocalServerPort << "\n";
+    }
     std::cout << "[HUB] Peer '" << userName << "' address: " << peerAddrStr << ":" << peerPort
               << (peer->isLan ? " [LAN" : " [WAN")
               << ", sinkBuf " << ((peer->isLan || hub_hold_floor_setting()) ? sinkBufferMsFor(peer.get()) : hub_hold_floor_ms(kHoldFloorMs)) << "ms, evlog s=" << sinkIdForPeer(peerId) << "]\n";   // Maps hub_sinkev.log entries to this player
@@ -3948,6 +4016,11 @@ void SonobusHubServer::handleSonobusControlMessage(const char* msg, int32_t n,
             if (instChanged) mStageGen.fetch_add(1, std::memory_order_relaxed);   // the listing shows it: check in again
             if (changed) std::cout << "[HUB-VER] '" << who->userName << "' runs " << ver << " on " << os << "\n";
         } catch (const osc::Exception&) {}
+        // The report shows the player is listening on this address: the local-address hint rides on it (a few per join).
+        if (!who->hairpinVia.empty() && who->hairpinHintsLeft.load(std::memory_order_relaxed) > 0) {
+            who->hairpinHintsLeft.fetch_sub(1, std::memory_order_relaxed);
+            sendLanHint((const struct sockaddr*) srcAddr, (socklen_t) sizeof(struct sockaddr_in));
+        }
         return;
     }
     if (isHxbuf) {
@@ -6084,6 +6157,12 @@ std::vector<HostEvent> hub_host_events(const std::vector<HostStream>& streams) {
 }
 }
 
+static const char* const kHubStatsHeader =
+    "ts,peers,feeds,blocks,misses,miss_pct,"
+    "p50_us,p95_us,p99_us,max_us,"
+    "snap_max_us,sinkloop_max_us,feedpump_max_us,"
+    "worstpeer_sink_us,worstfeed_src_us\n";
+
 void SonobusHubServer::statsWriterThread() {
     std::cout << "[HUB-STATS] writer thread started.\n";
 
@@ -6107,12 +6186,7 @@ void SonobusHubServer::statsWriterThread() {
             std::cerr << "[HUB-STATS] failed to open " << outPath << " — writer exiting.\n";
             return;
         }
-        if (needHeader) {
-            f << "ts,peers,feeds,blocks,misses,miss_pct,"
-                 "p50_us,p95_us,p99_us,max_us,"
-                 "snap_max_us,sinkloop_max_us,feedpump_max_us,"
-                 "worstpeer_sink_us,worstfeed_src_us\n";
-        }
+        if (needHeader) f << kHubStatsHeader;
     }
     std::cout << "[HUB-STATS] writing to " << outPath << "\n";
 
@@ -6427,11 +6501,17 @@ void SonobusHubServer::statsWriterThread() {
             { std::lock_guard<std::mutex> lk(mPortCheckMutex); portsBlocked = mPortCheckBlocked; }
             const auto at = clock::now();
             const double secs = std::chrono::duration<double>(at - stageStatusAt).count();
+            std::vector<sb_hub_gui::hub_settings::StagePlayer> who;
+            for (const auto& p : us.peers) {
+                sb_hub_gui::hub_settings::StagePlayer w;
+                w.user = p.userName; w.instrument = p.clientInstrument; w.joinedMs = (long long) p.joinedAtMs; w.lan = p.isLan;
+                who.push_back(std::move(w));
+            }
             if (stageStatusHave && secs > 0.5)
                 sb_hub_gui::hub_settings::writeStageStatus((int) us.peers.size(), us.bytesInTotal >= stageStatusIn ? (double) (us.bytesInTotal - stageStatusIn) / secs : 0.0,
                                                            us.bytesOutTotal >= stageStatusOut ? (double) (us.bytesOutTotal - stageStatusOut) / secs : 0.0,   // the out total falls when a player leaves
                                                            us.portCheckState == 2 && !portsBlocked ? 0 : us.portCheckState,   // "closed" only on a verdict from outside
-                                                           mPortCheckRuns.load(std::memory_order_relaxed), us.portCheckText);
+                                                           mPortCheckRuns.load(std::memory_order_relaxed), us.portCheckText, who);
             stageStatusIn = us.bytesInTotal; stageStatusOut = us.bytesOutTotal; stageStatusAt = at; stageStatusHave = true;
         }
 
@@ -6858,6 +6938,16 @@ void SonobusHubServer::statsWriterThread() {
 
         double missPct = (blocks > 0) ? (100.0 * (double)misses / (double)blocks) : 0.0;
 
+        {   // 8 MB, then one old copy (stats.csv.1); the new file starts with the header
+            struct stat st;
+            if (::stat(outPath.c_str(), &st) == 0 && st.st_size > 8L * 1024 * 1024) {
+                const std::string old = outPath + ".1";
+                std::remove(old.c_str());
+                std::rename(outPath.c_str(), old.c_str());
+                std::ofstream h(outPath, std::ios::app);
+                if (h.is_open()) h << kHubStatsHeader;
+            }
+        }
         std::ofstream f(outPath, std::ios::app);
         if (f.is_open()) {
             f << epochMs << ','
@@ -7750,6 +7840,34 @@ void SonobusHubServer::handlePlayerIdNotes() {
     }
 }
 
+// Empty unless this member's server connection came from the router (the default gateway, or the hub's own public
+// address) while its audio address is another one: a player on this network who used the public address.
+std::string SonobusHubServer::hairpinViaFor(const std::string& user, const std::string& peerIp) {
+    if (!mRunLocalServer || mAdvertisedLanHost.empty() || user == mHubUserName) return {};
+    std::lock_guard<std::mutex> hl(mHairpinMutex);
+    const auto it = mJoinIpByUser.find(user);
+    if (it == mJoinIpByUser.end() || it->second.empty()) return {};
+    const std::string& via = it->second;
+    if (!mHairpinPublicIp.empty() && via == mHairpinPublicIp) return via;
+    if (!mHairpinGatewayIp.empty() && via == mHairpinGatewayIp && !peerIp.empty() && peerIp != via) return via;
+    return {};
+}
+
+void SonobusHubServer::sendLanHint(const struct sockaddr* to, socklen_t tolen) {
+    // A chat line from the stage admin, so every player version shows it: the local address is the steady way in
+    const std::string group = snapshotForUI().groupName;
+    const std::string text = "You are joining from this hub's own network, through your router, which can drop the connection. "
+                             "For a steady connection, join with the hub's local address " + mAdvertisedLanHost + ":" + std::to_string(mLocalServerPort)
+                             + " instead of the stage link (Connect, Private Stage: Hub Server " + mAdvertisedLanHost + ":" + std::to_string(mLocalServerPort)
+                             + ", stage \"" + group + "\").";
+    char buf[2048];
+    try {
+        osc::OutboundPacketStream m(buf, sizeof(buf));
+        m << osc::BeginMessage(SB_HXMSG_DOMAIN SB_HXMSG_CHAT) << group.c_str() << "Hub" << "" << "" << text.c_str() << osc::EndMessage;
+        ::sendto(mSocket, m.Data(), m.Size(), 0, to, tolen);
+    } catch (const osc::Exception&) {}
+}
+
 // This computer's default gateway (IPv4 text), empty when not found. Asked once at start.
 static std::string hub_default_gateway() {
     std::string gw;
@@ -7975,6 +8093,11 @@ std::string SonobusHubServer::stageJoinRefusal(const std::string& ipRaw, const s
             if (!inside) return "This stage's hub does not know its public address yet, so players outside its network cannot connect. "
                                 "The host should check the hub's internet connection and restart the hub.";
         }
+    }
+    {
+        std::lock_guard<std::mutex> hl(mHairpinMutex);
+        if (mJoinIpByUser.size() > 512) mJoinIpByUser.clear();
+        mJoinIpByUser[user] = hub_plain_ip(ip);
     }
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> l(mStageMutex);

@@ -88,6 +88,8 @@ protected:
     void updateTabTips();  // a tab too narrow for its name shows it in the hover
     
     bool parseStringForUrl(const String & str, Array<Range<int> > & retranges);
+    // Message text with *bold*, _italic_ and __underline__ in the given base font (markers at word edges, one line)
+    void insertMarkedText(const String & text, const Font & base, int styleFlags = Font::plain);
 
     bool findUrlAtPos(juce::Point<int>, String & retstr);
 
@@ -152,6 +154,7 @@ protected:
 
     Font mChatNameFont;
     Font mChatMesgFont;
+    Font mChatRosterFont;   // the players-on-stage list: between the name and message sizes
     Font mChatMesgFixedFont;
     Font mChatEditFont;
     Font mChatEditFixedFont;

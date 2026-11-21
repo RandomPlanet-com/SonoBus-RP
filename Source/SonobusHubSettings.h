@@ -121,6 +121,7 @@ struct HubLaunchArgs {
     bool listStage = false;    // the operator opts in
     std::string stageGenre = "Any";
     std::string stageDescription;
+    std::string welcomeMessage;   // sent to the chat of each player who joins; several lines, up to kWelcomeMaxBytes; empty = none
     std::string stageCountry;  // two-letter country code for the listing, for example US; empty = not given
     std::string stageNames = "Automatic";   // player names in the listing: Automatic (shown when open, hidden when locked) / Show / Hide
     int forgetPlayersDays = 0; // previous players not seen for this many days are forgotten; 0 = never
@@ -157,10 +158,15 @@ Tier tierForKey(const std::string& key);
 // ONE form layout shared by the Mac GUI Settings tab and the
 // web page's Settings section (so a new parameter is added in exactly one place).
 // key == nullptr → section header. col 0 = left, 1 = right.
-// kind: 0 Text, 1 Bool, 2 Choice (choices comma-separated, canonical values), 3 Password (text, masked).
-// hint: one line shown under a section header (headers only).
+// kind: 0 Text, 1 Bool, 2 Choice (choices comma-separated, canonical values), 3 Password (text, masked),
+//       4 Text of several lines.
+// hint: one line shown under a section header or under a text of several lines.
 struct FormSpec { int col; const char* key; const char* label; int kind; const char* choices; const char* hint = nullptr; };
 const std::vector<FormSpec>& formSpecs();
+
+// The welcome message as it is kept: line ends as "\n", no blank ends, at most kWelcomeMaxBytes of whole characters.
+constexpr size_t kWelcomeMaxBytes = 2000;
+std::string tidyWelcome(const std::string& text);
 
 juce::File dataDir();                    // settings, taps, stats and session history
 // A settings file outside the default folder makes its folder this instance's data folder (log, taps,
@@ -228,9 +234,15 @@ void resolveServerEndpoint(const HubLaunchArgs& a, std::string& host, int& port)
 // by the operator; before an update replaces the program it stops them all, so they come back on the new one.
 // Each stage writes hub_status.json (players, bytes per second) every few seconds for the list.
 // Control path only.
+struct StagePlayer {                 // a player on another stage, as that stage reports it
+    std::string user, instrument;
+    long long joinedMs = 0;          // wall clock, ms
+    bool lan = false;
+};
 struct OtherStage {
     juce::File file;                 // its hub_settings.json
     std::string group;               // stage name from that file
+    bool locked = false;             // it has a stage password
     int serverPort = 0, udpPort = 0, webPort = 0;
     bool running = false;
     bool stopping = false;           // QUIT written, not gone yet
@@ -242,6 +254,7 @@ struct OtherStage {
     int portRuns = 0;                // port checks it has finished since its start
     std::string portText;            // the check's own line
     std::string problem;             // the file cannot be read, or the like
+    std::vector<StagePlayer> who;    // its players, from its status file while it runs
 };
 struct NewStage {
     std::string name, password, city, region;   // city + state / province / region, both needed
@@ -255,7 +268,8 @@ bool addOtherStage(const juce::File& settingsFile, std::string& err);
 bool forgetOtherStage(const juce::File& settingsFile, std::string& err);   // a stopped stage added by path leaves the list; its files stay
 bool startOtherStage(const juce::File& settingsFile, std::string& err);
 bool stopOtherStage(const juce::File& settingsFile, std::string& err);
-bool showOtherStage(const juce::File& settingsFile, std::string& err, bool settings = false);   // Mac: SHOW file, the background stage opens its window (at its Settings tab)
+bool showOtherStage(const juce::File& settingsFile, std::string& err, bool settings = false);   // Mac and Windows: SHOW file, the stage brings its window forward (at its Status, or its Settings tab)
+bool showMainHub(std::string& err);   // a stage: SHOW file in the main hub's folder, its window comes forward at Other stages
 int mainHubWebPort();                // a stage: the web page port of its main hub, 0 = none
 // Makes the folder and settings of a new stage, puts it on the list and starts it. `made` = what it got.
 bool createStage(const NewStage& in, OtherStage& made, std::string& err);
@@ -273,13 +287,21 @@ std::string stageLoadWarning(int extra);
 void writeInstancePid();             // a stage with its own folder: hub.pid there, once it holds the folder lock
 void registerWithMainHub();          // a stage with its own folder: onto the main hub's Other stages list (once, at start)
 void writeStageStatus(int players, double inBytesPerSec, double outBytesPerSec,
-                      int portState, int portRuns, const std::string& portText);   // a stage: hub_status.json
+                      int portState, int portRuns, const std::string& portText,
+                      const std::vector<StagePlayer>& who);   // a stage: hub_status.json
 // Asks a running stage to check its ports now (a CHECK file in its folder; the result comes with its status file).
 bool checkStagePorts(const juce::File& settingsFile, std::string& err);
 void stageQuitByOperator();          // a stage with its own folder, quit in its own window: not started again by the main hub
 void restartStartedStages();         // main hub, at start: the stages that were started and not stopped run again
 void stopChildStages();              // Linux main hub, at exit: its stages stop with it (they stay marked as started)
 int stopStagesForUpdate();           // main hub, before the program is replaced: every stage stops, marked as started
+// Crash watchdog of the main hub: a started stage that is gone without having stopped in order (no STOPPED file in
+// its folder) is started again after 5 s, the second time within 10 minutes after 30 s; the third crash within 10
+// minutes is left stopped ("crashed 3 times, not restarted") until Start is pressed. Control path, own thread.
+void startStageWatchdog();
+void stopStageWatchdog();
+void pauseStageWatchdog(bool paused);
+void noteStageStoppedInOrder();      // a stage, at every end in order: the file STOPPED in its folder
 
 // Build the argv for a "Save & Restart hub" relaunch: keeps argv[0] and the
 // pass-through options (--nogui, --settings-file, --no-settings, --dump-peer,

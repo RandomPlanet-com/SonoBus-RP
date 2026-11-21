@@ -2,6 +2,38 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-21
+
+### SonoBus RP 1.3.7
+
+- Chat opens with the app.
+- Chat: bold, italic and underline in messages.
+- Chat: each player has one color for name and text, different from everyone else on the stage.
+- Chat: the stage's welcome message comes first when you join, then the players on the stage.
+- Chat: player joins and leaves are quiet grey lines.
+- Player rows show each player's instrument: "Name (Instrument)".
+- At home, the app connects to your own hub through your local network instead of looping out through the router.
+- Stages list: Copy invite link is a button, and "Link copied" shows right beside it.
+- Clicking a player's name no longer hides that player's details; clicks next to the "SonoBus RP" title no longer open Settings.
+
+### SonoBus RP Plugins 1.3.7
+
+- The changes of SonoBus RP 1.3.7.
+
+### SonoBus RP Hub 1.3.6
+
+- *New* Welcome message: set one per stage in Settings; each player who joins sees it in the chat when they first connect.
+- Save Logs for Support (window) and Download Logs (web page): one zip to send for help, with no passwords inside.
+- The main hub's Status shows everyone on its other stages and the total on the server.
+- A padlock marks stages with a password.
+- The web pages are now mobile optimized to fit better on a phone.
+- Other stages: Open takes you to the stage's own page; each stage page has a Main hub page button.
+- A stage that crashes is started again by the main hub.
+- Players who run their own Stage/HUB Server at home are told the hub's local address, so they do not loop through the router.
+- "Port 12XXX is already in use" is said plainly when the hub cannot start.
+- Listing a stage needs city, state or province and country; "California" is saved as "CA".
+- Log files that grew without end now stop at 8 MB and keep one old copy.
+
 ## 2026-11-20
 
 ### SonoBus RP 1.3.6

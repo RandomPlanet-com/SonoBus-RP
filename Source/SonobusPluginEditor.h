@@ -71,6 +71,7 @@ public:
 
     void mouseDown (const MouseEvent& event)  override;
     void mouseUp (const MouseEvent& event)  override;
+    bool titleClickHit (const MouseEvent& event);
 
     void timerCallback(int timerid) override;
 
@@ -532,6 +533,11 @@ private:
     CriticalSection    chatStateLock;
     Array<SBChatEvent> newChatEvents;
     Atomic<bool>  haveNewChatEvents  { false };
+    Atomic<bool>  mWelcomeArrived  { false };
+    // The join lines wait a few seconds for the stage's welcome, which then goes first and replaces "Joined Stage"
+    Array<SBChatEvent> mJoinHold;
+    uint32 mJoinHoldGen = 0;
+    void flushJoinHold(bool welcomeCame);
 
     std::unique_ptr<ChatView> mChatView;
     std::unique_ptr<ComponentBoundsConstrainer> mChatSizeConstrainer;

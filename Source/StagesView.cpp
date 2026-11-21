@@ -651,17 +651,41 @@ public:
         const juce::String listed = TRANS("Listed for") + " " + listedFor(stage.since);
         g.setColour(kDim);
         g.drawText(listed, c.name - ox, 0, juce::jmax(60, full - c.name - 12), height - 8, left, true);
-        const juce::String linkText = stage.test ? TRANS("Made-up test stage: it cannot be joined.") : TRANS("Copy invite link");
-        link = juce::Rectangle<int>(c.name - ox + mf.getStringWidth(listed) + 16, 0, mf.getStringWidth(linkText) + 6, height - 8);
-        g.setColour(stage.test ? kWarn.withMultipliedAlpha(0.8f) : kAccent);
-        g.drawText(linkText, link, left, true);
+        const int x0 = c.name - ox + mf.getStringWidth(listed) + 16;
+        if (stage.test) {
+            const juce::String note = TRANS("Made-up test stage: it cannot be joined.");
+            link = {};
+            g.setColour(kWarn.withMultipliedAlpha(0.8f));
+            g.drawText(note, x0, 0, mf.getStringWidth(note) + 6, height - 8, left, true);
+            return;
+        }
+        // A small button; right after a click "Link copied" shows beside it
+        const bool copied = owner.mCopiedKey == copyKey() && juce::Time::getMillisecondCounter() < owner.mCopiedUntil;
+        const juce::String idle = TRANS("Copy invite link");
+        const int bw = mf.getStringWidth(idle) + 22;
+        const int bh = juce::jmin(height - 8, juce::roundToInt(mf.getHeight() + 10));
+        link = juce::Rectangle<int>(x0, juce::jmax(0, (height - 8 - bh) / 2), bw, bh);
+        g.setColour(kAccent);
+        g.drawRoundedRectangle(link.toFloat().reduced(0.5f), 5.0f, 1.0f);
+        g.drawText(idle, link, juce::Justification::centred, true);
+        if (copied) {
+            const juce::String done = juce::String(juce::CharPointer_UTF8("\xe2\x9c\x93 ")) + TRANS("Link copied");
+            g.setColour(kHere);
+            g.drawText(done, link.getRight() + 10, link.getY(), mf.getStringWidth(done) + 8, link.getHeight(), left, true);
+        }
     }
+
+    juce::String copyKey() const { return stage.host + ":" + juce::String(stage.port) + "/" + stage.name; }
 
     void itemClicked(const juce::MouseEvent& e) override {
         if (kind != info || stage.test || ! link.contains(e.getPosition())) return;
         const juce::URL url = juce::URL("sonobusrp://" + stage.host + ":" + juce::String(stage.port) + "/").withParameter("g", stage.name);
         juce::SystemClipboard::copyTextToClipboard(url.toString(true));
-        owner.flash(TRANS("Invite link copied."));
+        owner.mCopiedKey = copyKey();
+        owner.mCopiedUntil = juce::Time::getMillisecondCounter() + 2500;
+        repaintItem();
+        juce::Component::SafePointer<StagesView> safe(&owner);
+        juce::Timer::callAfterDelay(2600, [safe] { if (safe != nullptr) safe->mTree.repaint(); });
     }
 
 private:

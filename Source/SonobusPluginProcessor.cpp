@@ -876,6 +876,8 @@ struct SonobusAudioProcessor::RemotePeer {
     uint32_t sbAdaptEvSeq = 0;    // Last adaptive-depth decision seq logged for this peer's sink (aoo_opt_adapt_events)
     float hubUpKbps = -1.0f;      // That player's uplink rate into the hub, kbit/s, from /sb/hxlat
     float hubIfaceMs = -1.0f;     // That player's audio interface in + out, ms, from /sb/hxlat; -1 = not known
+    String hubInstrument;         // That player's instrument from /sb/hxlat (empty = none); guarded by hubInstrumentLock
+    SpinLock hubInstrumentLock;
 
     // Set on every relayed
     // row when the hub connection drops (AOONET_CLIENT_DISCONNECT_EVENT),
@@ -11131,6 +11133,8 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             if (it != message.ArgumentsEnd()) sendMuted = (it++)->AsInt32();
             float ifaceMs = -1.0f;   // Their audio interface in + out (older hubs omit it; -1 = not known)
             if (it != message.ArgumentsEnd() && it->IsFloat()) ifaceMs = (it++)->AsFloat();
+            bool haveInst = false; String inst;   // Their instrument (older hubs omit it)
+            if (it != message.ArgumentsEnd() && it->IsString()) { inst = String(CharPointer_UTF8((it++)->AsString())).substring(0, 24).trim(); haveInst = true; }
             if (who == mCurrentUsername) {   // Our own legs, same model as everyone's rows → header
                 mSelfHubLatToMs = toHub; mSelfHubLatFromMs = fromHub; mSelfHubRttMs = rtt; mSelfHubUplinkLost = uplinkLost;
                 mSelfHubLatStampMs = Time::getMillisecondCounter();
@@ -11148,6 +11152,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                     if (sendMuted >= 0) p->remoteSendMutedViaHub = sendMuted != 0;   
                     p->hubRttMs = rtt; p->hubUpKbps = upKbps;
                     p->hubIfaceMs = (ifaceMs >= 0.0f && ifaceMs < 1000.0f) ? ifaceMs : -1.0f;
+                    if (haveInst) { const SpinLock::ScopedLockType il(p->hubInstrumentLock); if (p->hubInstrument != inst) p->hubInstrument = inst; }
                     p->hubLatStampMs = Time::getMillisecondCounter();
                     break;
                 }
@@ -12127,6 +12132,7 @@ void SonobusAudioProcessor::sbAudioHealthTick(int xrunsTotal, double sr, int buf
             for (int k = 0; k < 7; ++k) { line << " " << kSite[k] << "=" << String((int64) (ls[k] - mSbLostSiteLast[k])); mSbLostSiteLast[k] = ls[k]; }
             line << "\n";
             File f = File(String(sbLogDir())).getChildFile("drops.log");
+            if (f.getSize() > 8 * 1024 * 1024) f.moveFileTo(f.getSiblingFile("drops.log.1"));   // 8 MB, one old copy
             f.appendText(line, false, false, nullptr);
         }
         const uint32_t rx = mHxlatRx.load(std::memory_order_relaxed), sf = mHxlatSelf.load(std::memory_order_relaxed), pr = mHxlatPeer.load(std::memory_order_relaxed), un = mHxlatUnmatched.load(std::memory_order_relaxed);
@@ -14429,6 +14435,17 @@ void SonobusAudioProcessor::setRemotePeerUserName(int index, const String & name
         auto * remote = mRemotePeers.getUnchecked(index);
         remote->userName = name;
     }
+}
+
+String SonobusAudioProcessor::getRemotePeerHubInstrument(int index) const
+{
+    const ScopedReadLock sl (mCoreLock);
+    if (index < mRemotePeers.size()) {
+        auto * remote = mRemotePeers.getUnchecked(index);
+        const SpinLock::ScopedLockType il(remote->hubInstrumentLock);
+        return remote->hubInstrument;
+    }
+    return {};
 }
 
 String SonobusAudioProcessor::getRemotePeerUserName(int index) const

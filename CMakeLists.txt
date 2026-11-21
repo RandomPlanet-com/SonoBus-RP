@@ -47,8 +47,8 @@ set(DISPLAY_VERSION "${PROJECT_VERSION}${BETA_VERSION_SUFFIX}")
 # Shown on the web page / About as "Hub 1.0.0 (build <commit>, <date>)". Bump here on hub releases.
 # Apple-style versioning — marketing version (CFBundleShortVersionString) + date build id
 # (CFBundleVersion, stamped by the release scripts as YYYY.MM.DD.HHMM). The updater keeps comparing the DATE build.
-set(SONOBUS_PLUS_VERSION "1.3.6")
-set(SONOBUS_HUB_VERSION "1.3.5")
+set(SONOBUS_PLUS_VERSION "1.3.7")
+set(SONOBUS_HUB_VERSION "1.3.6")
 # the client's date build id + source commit as compile-time defines for platforms
 # without an Info.plist (Windows/Linux). Mac bundles still read CFBundleVersion/SBPlusCommit stamped at release.
 #   -DSONOBUS_PLUS_BUILD=YYYY.MM.DD.HHMM[-dev]   (a build script passes the configure time)
@@ -525,6 +525,9 @@ function(sono_add_custom_plugin_target target_name product_name bundle_id format
     juce_add_binary_data("${target_name}_SBData" SOURCES
         Source/GoNotoKurrent-Regular.ttf
 	Source/DejaVuSans.ttf
+	Source/DejaVuSans-Bold.ttf
+	Source/DejaVuSans-Oblique.ttf
+	Source/DejaVuSans-BoldOblique.ttf
         localization/localized_de.txt
         localization/localized_es.txt
         localization/localized_fr.txt
@@ -802,6 +805,8 @@ target_sources(SonoBusHub PRIVATE
     Source/SonobusHubMainWindow.h
     Source/SonobusHubSettings.cpp
     Source/SonobusHubSettings.h
+    Source/SonobusHubSupport.cpp
+    Source/SonobusHubSupport.h
     Source/SonobusHubWeb.cpp
     Source/SonobusHubWeb.h
     Source/SonobusHubGeo.cpp
@@ -903,6 +908,8 @@ target_sources(SonoBusHub PRIVATE
     Source/SonobusHubServer.h
     Source/SonobusHubSettings.cpp
     Source/SonobusHubSettings.h
+    Source/SonobusHubSupport.cpp
+    Source/SonobusHubSupport.h
     Source/SonobusHubWeb.cpp
     Source/SonobusHubWeb.h
     Source/SonobusHubGeo.cpp
@@ -955,6 +962,8 @@ target_sources(SonoBusHub PRIVATE
     Source/SonobusHubServer.h
     Source/SonobusHubSettings.cpp
     Source/SonobusHubSettings.h
+    Source/SonobusHubSupport.cpp
+    Source/SonobusHubSupport.h
     Source/SonobusHubWeb.cpp
     Source/SonobusHubWeb.h
     Source/SonobusHubGeo.cpp

@@ -48,6 +48,7 @@ private:
     void threadMain();
     std::string buildStatusJson() const;
     void handleClient(int fd);
+    void sendLogsZip(int fd);   // GET /api/logs.zip
     bool authorised(const std::string& headers) const;
     std::string applySettings(const std::string& body, bool& ok);   // returns the JSON reply
     // Per-player city/state via the shared HubGeoResolver (SonobusHubGeo.h).

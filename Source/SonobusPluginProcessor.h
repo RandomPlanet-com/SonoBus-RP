@@ -581,6 +581,7 @@ public:
     
     void setRemotePeerUserName(int index, const String & name);
     String getRemotePeerUserName(int index) const;
+    String getRemotePeerHubInstrument(int index) const;   // From the hub (empty = none or not on a hub)
 
     // Info-only peers (HostedMix: other musicians, present for UI but no direct audio)
     bool getRemotePeerInfoOnly(int index) const;

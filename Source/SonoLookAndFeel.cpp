@@ -362,6 +362,13 @@ Typeface::Ptr SonoLookAndFeel::getTypefaceForFont (const Font& font)
             {
                 DBG("Creating custom typeface!!");
 
+                // The face that matches the style, so bold and italic text (chat markup, headings) show as such
+                if (font.isBold() && font.isItalic())
+                    return Typeface::createSystemTypefaceFor (BinaryData::DejaVuSansBoldOblique_ttf, BinaryData::DejaVuSansBoldOblique_ttfSize);
+                if (font.isBold())
+                    return Typeface::createSystemTypefaceFor (BinaryData::DejaVuSansBold_ttf, BinaryData::DejaVuSansBold_ttfSize);
+                if (font.isItalic())
+                    return Typeface::createSystemTypefaceFor (BinaryData::DejaVuSansOblique_ttf, BinaryData::DejaVuSansOblique_ttfSize);
                 return Typeface::createSystemTypefaceFor (BinaryData::DejaVuSans_ttf, BinaryData::DejaVuSans_ttfSize);
                 //return Typeface::createSystemTypefaceFor (BinaryData::InterUnicode_ttf, BinaryData::InterUnicode_ttfSize);
                 //return Typeface::createSystemTypefaceFor (BinaryData::GoNotoKurrentRegular_ttf, BinaryData::GoNotoKurrentRegular_ttfSize);

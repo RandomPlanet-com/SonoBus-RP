@@ -199,11 +199,55 @@ private:
 };
 
 
+// A line of text parts; a part can carry the padlock of a stage that has a password, drawn right after it.
+class LockText : public juce::Component, public juce::SettableTooltipClient {
+public:
+    struct Part { juce::String text; juce::Colour colour; bool lock = false, bold = false; };
+    void setParts(std::vector<Part> parts, float fontHeight = 15.0f);
+    void paint(juce::Graphics& g) override;
+    juce::String getTooltip() override;   // the whole line when it is drawn cut
+private:
+    std::vector<Part> mParts;
+    float mFontH = 15.0f;
+};
+
+// "Players on other stages" (main hub): who is on the other stages, as each stage reports it.
+class OtherPlayersTable : public juce::Component, public juce::SettableTooltipClient, private juce::ScrollBar::Listener {
+public:
+    struct Row { juce::String user, stage, instrument; bool locked = false, lan = false; juce::int64 joinedMs = 0; };
+    OtherPlayersTable();
+    void setRows(std::vector<Row> rows);
+    int numRows() const { return (int) mRows.size(); }
+    void paint(juce::Graphics& g) override;
+    void resized() override { layoutScroll(); }
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    juce::String getTooltip() override;
+    static constexpr int kRowH = 22, kHeaderH = 24, kScrollW = 12;
+private:
+    void scrollBarMoved(juce::ScrollBar*, double newRangeStart) override { mFirstRow = (int) newRangeStart; repaint(); }
+    void layoutScroll();
+    std::vector<Row> mRows;
+    juce::ScrollBar mScroll{true};
+    int mFirstRow = 0;
+    CutCells mCut;
+};
+
+// "<- Main hub" in a stage's own window: the arrow is drawn.
+class BackButton : public juce::TextButton {
+public:
+    void paintButton(juce::Graphics& g, bool over, bool down) override;
+    int widthFor(int height);
+};
+
 // The Status content as one tab page.
 class StatusPage : public juce::Component {
 public:
     StatusPage();
     void resized() override;
+    // Main hub: the other stages as last read, and this stage's player count, for the server line and the table
+    void setOtherStages(const std::vector<hub_settings::OtherStage>& stages);
+    void setPlayersHere(int n);
+    void setStageLocked(bool locked);   // padlock after the Stage field
     StatusHeader header;
     // The web page's header tools in the native GUI.
     juce::TextButton copyLinkButton{"Copy Stage Link"};
@@ -214,6 +258,7 @@ public:
     // in-process hub restart (players rejoin the new group).
     juce::Label groupLabel;
     juce::TextEditor groupEditor;
+    LockText groupLock;
     juce::TextButton groupApply{"Apply (restarts hub)"};
     juce::TextEditor messageEditor;
     juce::TextButton messageSend{"Send"};
@@ -225,6 +270,9 @@ public:
     juce::Label peerLabel;
     PeerTable peerTable;
     juce::Viewport peerView;   // sideways scroll when the window is narrower than the table
+    LockText serverTotal;      // "On this server: N players ..." under the Players heading
+    juce::Label otherLabel;
+    OtherPlayersTable otherTable;
     // Bottom strip — recent sessions (left) | the selected session's personnel + password
     // override + "Apply & Restart" (right). onApplySession(group, passwordOverride) — empty override = keep the
     // password that session had.
@@ -238,6 +286,10 @@ public:
     juce::TextEditor sessionPwEditor;
     juce::TextButton sessionApply{"Apply & Restart"};
     std::function<void(const std::string& group, const std::string& passwordOverride)> onApplySession;
+private:
+    void rebuildOther();
+    std::vector<hub_settings::OtherStage> mStages;
+    int mPlayersHere = 0;
 };
 
 // ─── Other stages tab (the main hub only) ─────────────
@@ -364,7 +416,8 @@ private:
 class HubContent : public juce::Component, public juce::SettableTooltipClient, private juce::Timer {
 public:
     HubUpdateCheck* updateCheck() { return mUpdateCheck.get(); }
-    void showSettingsTab() { for (int t = 0; t < mTabs.getNumTabs(); ++t) if (mTabs.getTabNames()[t] == "Settings") mTabs.setCurrentTabIndex(t); }
+    void showSettingsTab() { showTab("Settings"); }
+    void showTab(const juce::String& name) { for (int t = 0; t < mTabs.getNumTabs(); ++t) if (mTabs.getTabNames()[t] == name) mTabs.setCurrentTabIndex(t); }
     HubGeoResolver& geoResolver() { return mGeo; }   // Shared with the web page so locations never differ
     // restartFn: called when the operator clicks the Restart button. The
     // owning JuceApp wires this to a stop()/start() cycle of the SonobusHub.
@@ -421,8 +474,16 @@ private:
     SettingsPanel mSettings;
     std::unique_ptr<LogView> mLogPage;
     std::unique_ptr<OtherStagesPage> mStagesPage;   // main hub only
+    // Main hub: the other stages' players for the Status tab, read on a worker (small files), shown on the message thread
+    std::unique_ptr<juce::ThreadPool> mStageRead;
+    bool mStageReadBusy = false;
+    BackButton mMainHubButton;   // a stage's window: brings the main hub's window forward
     juce::TabbedComponent mTabs{juce::TabbedButtonBar::TabsAtTop};
     juce::TextButton mRestartButton{"Restart Hub"};
+    juce::TextButton mSupportButton{"Save Logs for Support"};
+    std::unique_ptr<juce::Thread> mSupportRun;   // builds the support zip off the message thread
+    int mWebPort = 0;
+    void saveLogsForSupport();
     int mLogCheckTicks = 0;
     // Test aid, off unless SB_HUB_SNAPSHOT=<folder> (environment or the hub taps file): every 10 s the window draws
     // itself into PNG files there, the Status and Other stages tabs at each width in SB_HUB_SNAPSHOT_WIDTHS (default:

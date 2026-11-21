@@ -7,6 +7,7 @@
 #include "SonobusHubMainWindow.h"
 #include "SonobusPlusVersion.h"   // About window (version + commit from Info.plist)
 #include "SonobusHubGeo.h"        // HubBuildId
+#include "SonobusHubSupport.h"
 #include "HubBinaryData.h"        // hub icon for the About window (juce_add_binary_data SonoBusHubData)
 #include "SbTextFit.h"
 
@@ -63,6 +64,44 @@ static void hubCell(juce::Graphics& g, CutCells& cut, const juce::String& text, 
 static juce::String hubCutTextAt(const CutCells& cut, juce::Point<int> p) {
     for (const auto& c : cut) if (c.first.contains(p)) return c.second;
     return {};
+}
+
+// Padlock after the name of a stage that has a password. Drawn: the window's font has no such glyph.
+static int hubLockWidth(float fontH) { return juce::roundToInt(fontH * 0.62f) + 6; }   // the gap before it and the lock
+static void hubDrawPadlock(juce::Graphics& g, float x, float cy, float fontH) {
+    juce::Graphics::ScopedSaveState keep(g);
+    const float s = fontH * 0.82f, w = fontH * 0.62f, bodyH = s * 0.56f, t = std::max(1.2f, s * 0.13f);
+    const float left = x + 4.0f, bodyTop = cy + s * 0.5f - bodyH;
+    const float r = w * 0.27f, cx = left + w * 0.5f, arcY = cy - s * 0.5f + r + t * 0.5f;
+    juce::Path shackle;
+    shackle.startNewSubPath(cx - r, bodyTop + 1.0f);
+    shackle.lineTo(cx - r, arcY);
+    shackle.addCentredArc(cx, arcY, r, r, 0.0f, -juce::MathConstants<float>::halfPi, juce::MathConstants<float>::halfPi);
+    shackle.lineTo(cx + r, bodyTop + 1.0f);
+    g.setColour(juce::Colour::fromRGB(0xc9, 0xa9, 0x3a));
+    g.strokePath(shackle, juce::PathStrokeType(t));
+    g.fillRoundedRectangle(left, bodyTop, w, bodyH, 1.5f);
+    g.setColour(pal::bg);
+    const float k = std::max(0.8f, s * 0.08f);
+    g.fillEllipse(cx - k, bodyTop + bodyH * 0.5f - k, 2.0f * k, 2.0f * k);
+}
+// Width a text takes in a line, its leading and trailing spaces included (drawText leaves those out)
+static float hubTextAdvance(const juce::Font& f, const juce::String& s) {
+    return s.isEmpty() ? 0.0f : f.getStringWidthFloat("." + s + ".") - f.getStringWidthFloat("..");
+}
+static juce::String hubLeadingSpaces(const juce::String& s) { return s.substring(0, s.length() - s.trimStart().length()); }
+// A table cell "name, padlock, rest": the padlock stays joined to the name; a cut cell goes to the hover tooltip
+static void hubCellLock(juce::Graphics& g, CutCells& cut, const juce::String& name, bool locked, const juce::String& rest, int x, int y, int w, int h) {
+    const auto f = g.getCurrentFont();
+    const int lockW = locked ? hubLockWidth(f.getHeight()) : 0;
+    const int nameW = (int) std::ceil(f.getStringWidthFloat(name)) + 1, restW = (int) std::ceil(hubTextAdvance(f, rest));
+    const int nameDraw = std::max(0, std::min(nameW, w - lockW));
+    g.drawText(name, x, y, nameDraw, h, juce::Justification::centredLeft);
+    if (locked) hubDrawPadlock(g, (float) (x + nameDraw), (float) y + (float) h * 0.5f, f.getHeight());
+    const int lead = juce::roundToInt(hubTextAdvance(f, hubLeadingSpaces(rest)));
+    const int left = w - nameDraw - lockW - lead;
+    if (rest.isNotEmpty() && left > 0) g.drawText(rest, x + nameDraw + lockW + lead, y, left, h, juce::Justification::centredLeft);
+    if (nameW + lockW + restW > w) cut.push_back({ { x, y, w, h }, name + rest });
 }
 
 // Logging stays plain stdout/stderr (tail -f hub.log or Console.app). A mutex-guarded tee would make the AOO
@@ -149,7 +188,17 @@ void StatusHeader::paint(juce::Graphics& g) {
     auto titleArea = bounds.removeFromTop(iconSz).withTrimmedLeft(iconSz + 12);
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     g.setColour(pal::accent);
-    line(juce::String::fromUTF8("SonoBus RP Hub \xe2\x80\x94 ") + juce::String::fromUTF8(mSnap.groupName.c_str()), titleArea.removeFromTop(30));
+    {
+        const juce::String title = juce::String::fromUTF8("SonoBus RP Hub \xe2\x80\x94 ") + juce::String::fromUTF8(mSnap.groupName.c_str());
+        auto tr = titleArea.removeFromTop(30);
+        if (!mSnap.groupPassword.empty()) {   // the padlock right after the stage name
+            const int lockW = hubLockWidth(24.0f);
+            const int tw = std::min((int) std::ceil(g.getCurrentFont().getStringWidthFloat(title)) + 1, tr.getWidth() - lockW);
+            hubDrawPadlock(g, (float) (tr.getX() + tw), (float) tr.getCentreY(), 24.0f);
+            tr.setWidth(std::max(0, tw));
+        }
+        line(title, tr);
+    }
     g.setFont(juce::Font(16.0f));
     g.setColour(pal::textDim);
     line(mPlatform + (mLocation.isNotEmpty() ? juce::String::fromUTF8("  \xc2\xb7  ") + mLocation : juce::String()), titleArea.removeFromTop(22));
@@ -1012,18 +1061,19 @@ void SessionTable::paint(juce::Graphics& g) {
     auto area = getLocalBounds();
     if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
     auto when = [](int64_t ms) { return ms > 0 ? juce::Time(ms).toString(true, true, false, false) : juce::String("-"); };
-    auto stageText = [this](const SonobusHubServer::SessionRecord& sd) {
-        juce::String name = juce::String::fromUTF8(sd.group.c_str());
-        if (!sd.password.empty()) name += "  pw: " + juce::String::fromUTF8(sd.password.c_str());   // Password in clear, plain text
-        if (sd.group == mCurrentGroup) name += "  (current)";
-        return name;
+    auto stageRest = [this](const SonobusHubServer::SessionRecord& sd) {   // what follows the name (and its padlock)
+        juce::String rest;
+        if (!sd.password.empty()) rest += "  pw: " + juce::String::fromUTF8(sd.password.c_str());   // Password in clear, plain text
+        if (sd.group == mCurrentGroup) rest += "  (current)";
+        return rest;
     };
     {   // Dates as wide as the widest date shown; Stage grows to its longest text while the link column keeps 300
         const juce::Font cf(14.0f);
         int dateNeed = SbTextFit::textWidth(cf, "28 May 2026 12:59pm"), stageNeed = 0;
         for (const auto& sd : mRows) {
             dateNeed = std::max({ dateNeed, SbTextFit::textWidth(cf, when(sd.firstUsedMs)), SbTextFit::textWidth(cf, when(sd.lastUsedMs)) });
-            stageNeed = std::max(stageNeed, SbTextFit::textWidth(cf, stageText(sd)));
+            stageNeed = std::max(stageNeed, (int) std::ceil(hubTextAdvance(cf, juce::String::fromUTF8(sd.group.c_str()) + stageRest(sd))) + 2
+                                            + (sd.password.empty() ? 0 : hubLockWidth(cf.getHeight())));
         }
         colW[1] = colW[2] = std::max(colW[1], dateNeed + 6 + 12);
         const int avail = area.getWidth() - 2 * paddingX;
@@ -1053,7 +1103,9 @@ void SessionTable::paint(juce::Graphics& g) {
         g.fillRect(area.getX(), y, area.getWidth(), kRowH);
         int x = paddingX, c = 0;
         auto cell = [&](const juce::String& text, juce::Colour col) { g.setColour(col); hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
-        cell(stageText(sd), sd.group == mCurrentGroup ? pal::green : pal::text);
+        g.setColour(sd.group == mCurrentGroup ? pal::green : pal::text);
+        hubCellLock(g, mCut, juce::String::fromUTF8(sd.group.c_str()), !sd.password.empty(), stageRest(sd), x, y, colW[c] - 6, kRowH);
+        x += colW[c]; ++c;
         cell(when(sd.firstUsedMs), pal::text);
         cell(when(sd.lastUsedMs), pal::text);
         cell(juce::String((int) sd.players.size()), pal::text);
@@ -1089,6 +1141,127 @@ juce::String SessionTable::getTooltip() {
 }
 
 
+// ─── LockText ─────────────────────────────────────────────────────────────────
+void LockText::setParts(std::vector<Part> parts, float fontHeight) {
+    mParts = std::move(parts);
+    mFontH = fontHeight;
+    repaint();
+}
+void LockText::paint(juce::Graphics& g) {
+    float x = 0.0f;
+    for (const auto& p : mParts) {
+        const juce::Font f(mFontH, p.bold ? juce::Font::bold : juce::Font::plain);
+        const int at = juce::roundToInt(x + hubTextAdvance(f, hubLeadingSpaces(p.text)));
+        const int w = (int) std::ceil(f.getStringWidthFloat(p.text.trim())) + 1;
+        g.setFont(f); g.setColour(p.colour);
+        if (p.text.isNotEmpty()) g.drawText(p.text, at, 0, std::min(w, std::max(0, getWidth() - at)), getHeight(), juce::Justification::centredLeft);
+        x += hubTextAdvance(f, p.text);
+        if (p.lock) { hubDrawPadlock(g, x, (float) getHeight() * 0.5f, mFontH); x += (float) hubLockWidth(mFontH); }
+    }
+}
+juce::String LockText::getTooltip() {
+    int w = 0;
+    juce::String all;
+    for (const auto& p : mParts) {
+        w += (int) std::ceil(hubTextAdvance(juce::Font(mFontH, p.bold ? juce::Font::bold : juce::Font::plain), p.text)) + (p.lock ? hubLockWidth(mFontH) : 0);
+        all += p.text;
+    }
+    const auto tip = juce::SettableTooltipClient::getTooltip();
+    return w > getWidth() ? (tip.isNotEmpty() ? tip + "\n" + all : all) : tip;
+}
+
+// ─── OtherPlayersTable ────────────────────────────────────────────────────────
+OtherPlayersTable::OtherPlayersTable() {
+    addChildComponent(mScroll);
+    mScroll.setAutoHide(false);
+    mScroll.setSingleStepSize(1.0);
+    mScroll.setColour(juce::ScrollBar::thumbColourId, pal::accent);
+    mScroll.setColour(juce::ScrollBar::trackColourId, pal::panelLight.brighter(0.25f));
+    mScroll.addListener(this);
+}
+void OtherPlayersTable::setRows(std::vector<Row> rows) {
+    mRows = std::move(rows);
+    layoutScroll();
+    repaint();
+}
+void OtherPlayersTable::layoutScroll() {
+    const int rows = (int) mRows.size();
+    const int visible = std::max(1, (getHeight() - kHeaderH) / kRowH);
+    mFirstRow = std::max(0, std::min(mFirstRow, rows - visible));
+    mScroll.setBounds(getWidth() - kScrollW, kHeaderH, kScrollW, std::max(0, getHeight() - kHeaderH));
+    mScroll.setRangeLimits(0.0, (double) rows, juce::dontSendNotification);
+    mScroll.setCurrentRange((double) mFirstRow, (double) visible, juce::dontSendNotification);
+    mScroll.setVisible(rows > visible);
+}
+void OtherPlayersTable::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) {
+    const int visible = std::max(1, (getHeight() - kHeaderH) / kRowH);
+    const int maxFirst = std::max(0, (int) mRows.size() - visible);
+    const int step = wheel.deltaY > 0 ? -1 : wheel.deltaY < 0 ? 1 : 0;
+    const int nf = std::max(0, std::min(maxFirst, mFirstRow + step));
+    if (nf != mFirstRow) { mFirstRow = nf; mScroll.setCurrentRangeStart((double) nf, juce::dontSendNotification); repaint(); }
+}
+void OtherPlayersTable::paint(juce::Graphics& g) {
+    constexpr int kNumCols = 5;
+    const int colW[kNumCols] = { 220, 230, 160, 110, 60 };
+    static const char* colName[kNumCols] = { "Player", "Stage", "Instrument", "Connected", "Net" };
+    const int paddingX = 10;
+    auto area = getLocalBounds();
+    if (mScroll.isVisible()) { auto track = area.removeFromRight(kScrollW).withTrimmedTop(kHeaderH); g.setColour(pal::panelLight.brighter(0.25f)); g.fillRect(track); }
+    mCut.clear();
+    auto header = area.removeFromTop(kHeaderH);
+    g.setColour(pal::panelLight); g.fillRect(header);
+    g.setColour(pal::textDim); g.setFont(juce::Font(13.0f, juce::Font::bold));
+    { int x = paddingX; for (int i = 0; i < kNumCols; ++i) { g.drawText(colName[i], x, header.getY(), colW[i], header.getHeight(), juce::Justification::centredLeft); x += colW[i]; } }
+    if (mRows.empty()) {
+        g.setColour(pal::textDim); g.setFont(juce::Font(14.0f, juce::Font::italic));
+        g.drawText("nobody on the other stages right now", area.withTrimmedLeft(paddingX).withHeight(kRowH), juce::Justification::centredLeft);
+        return;
+    }
+    const juce::int64 nowMs = juce::Time::currentTimeMillis();
+    g.setFont(juce::Font(14.0f));
+    int y = area.getY();
+    for (size_t r = (size_t) std::max(0, mFirstRow); r < mRows.size(); ++r) {
+        const auto& p = mRows[r];
+        g.setColour((r % 2) == 0 ? pal::panel : pal::panel.brighter(0.06f));
+        g.fillRect(area.getX(), y, area.getWidth(), kRowH);
+        int x = paddingX, c = 0;
+        auto cell = [&](const juce::String& text) { hubCell(g, mCut, text, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c; };
+        g.setColour(pal::text);
+        cell(p.user);
+        hubCellLock(g, mCut, p.stage, p.locked, {}, x, y, colW[c] - 6, kRowH); x += colW[c]; ++c;
+        cell(p.instrument);
+        cell(p.joinedMs > 0 ? hubDurText((nowMs - p.joinedMs) / 1000) : juce::String());
+        cell(p.lan ? "LAN" : "WAN");
+        y += kRowH;
+        if (y > area.getBottom()) break;
+    }
+}
+juce::String OtherPlayersTable::getTooltip() {
+    const auto t = hubCutTextAt(mCut, getMouseXYRelative());
+    return t.isNotEmpty() ? t : juce::SettableTooltipClient::getTooltip();
+}
+
+// ─── BackButton ───────────────────────────────────────────────────────────────
+int BackButton::widthFor(int height) {
+    const auto f = getLookAndFeel().getTextButtonFont(*this, height);
+    return SbTextFit::textWidth(f, getButtonText()) + juce::roundToInt(f.getHeight()) + 6 + 36;
+}
+void BackButton::paintButton(juce::Graphics& g, bool over, bool down) {
+    auto& lf = getLookAndFeel();
+    lf.drawButtonBackground(g, *this, findColour(juce::TextButton::buttonColourId), over, down);
+    const auto f = lf.getTextButtonFont(*this, getHeight());
+    const float aw = f.getHeight(), cy = (float) getHeight() * 0.5f, hd = aw * 0.3f;
+    const int tw = SbTextFit::textWidth(f, getButtonText()) + 1;
+    const float x = ((float) getWidth() - (aw + 6.0f + (float) tw)) * 0.5f;
+    g.setColour(findColour(juce::TextButton::textColourOffId));
+    juce::Path a;
+    a.startNewSubPath(x + aw, cy); a.lineTo(x + 1.0f, cy);
+    a.startNewSubPath(x + 1.0f + hd, cy - hd); a.lineTo(x + 1.0f, cy); a.lineTo(x + 1.0f + hd, cy + hd);
+    g.strokePath(a, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setFont(f);
+    g.drawText(getButtonText(), juce::roundToInt(x + aw + 6.0f), 0, tw, getHeight(), juce::Justification::centredLeft);
+}
+
 // ─── StatusPage ───────────────────────────────────────────────────────────────
 StatusPage::StatusPage() {
     addAndMakeVisible(header);
@@ -1103,6 +1276,20 @@ StatusPage::StatusPage() {
     peerLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     peerLabel.setColour(juce::Label::textColourId, pal::accent);
     peerLabel.setColour(juce::Label::backgroundColourId, pal::bg);
+    // Main hub with other stages: the server line under the heading, the other stages' players under the table
+    addChildComponent(serverTotal);
+    addChildComponent(otherLabel);
+    addChildComponent(otherTable);
+    serverTotal.setTooltip("Everyone on this hub server: this stage and its other stages");
+    otherLabel.setText("  Players on other stages", juce::dontSendNotification);
+    otherLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+    otherLabel.setColour(juce::Label::textColourId, pal::accent);
+    otherLabel.setColour(juce::Label::backgroundColourId, pal::bg);
+    otherLabel.setTooltip("Who is on the other stages of this hub server, as each stage reports it (a few seconds old)");
+    otherLabel.setInterceptsMouseClicks(true, false);
+    addChildComponent(groupLock);
+    groupLock.setParts({ { juce::String(), pal::text, true } }, 16.0f);
+    groupLock.setTooltip("This stage has a password");
     // Bottom strip — recent sessions (left) | selected session's personnel + password + Apply (right)
     addAndMakeVisible(sessionsLabel);
     addAndMakeVisible(sessionTable);
@@ -1155,7 +1342,7 @@ StatusPage::StatusPage() {
     messageEditor.setColour(juce::TextEditor::outlineColourId, pal::panelLight.brighter(0.2f));
     messageEditor.setColour(juce::TextEditor::focusedOutlineColourId, pal::accent);
     messageEditor.setTextToShowWhenEmpty("Message to the stage", pal::textDim);
-    messageEditor.setTooltip("Sends a chat message to every player, from Hub.");
+    messageEditor.setTooltip("Sends a chat message to every player, from the Stage Admin.");
     messageSend.setTooltip("Send this message to every player.");
     auto send = [this]() {
         const auto text = messageEditor.getText().trim();
@@ -1211,6 +1398,7 @@ void StatusPage::resized() {
     auto grow = bounds.removeFromTop(44).reduced(14, 6);
     groupLabel.setBounds(grow.removeFromLeft(std::max(64, SbTextFit::labelWidth(groupLabel))));
     groupEditor.setBounds(grow.removeFromLeft(260));
+    if (groupLock.isVisible()) groupLock.setBounds(grow.removeFromLeft(hubLockWidth(16.0f) + 2));
     grow.removeFromLeft(10);
     groupApply.setBounds(grow.removeFromLeft(std::max(200, hubButtonWidth(groupApply, grow.getHeight()))));
     grow.removeFromLeft(24);
@@ -1223,11 +1411,23 @@ void StatusPage::resized() {
     const int tableH = 28 + PeerTable::kHeaderH + std::max(3, peerTable.numRows()) * PeerTable::kRowH + 16;
     // Recent sessions on top (sized to its rows, 3..6 visible, more scroll),
     // the selected session's players UNDER it, the password + Apply & Restart row at the very bottom.
-    const int sessionsH = 28 + SessionTable::kHeaderH + std::max(3, std::min(6, sessionTable.numRows())) * SessionTable::kRowH + 6;
+    int sessionRows = std::max(3, std::min(6, sessionTable.numRows()));
     const int playersMinH = 28 + 24 + 3 * 22 + 6;
     const bool stageRow = !previousTable.isVisible();   // the password row belongs to a selected stage
+    // Other stages' players (main hub): the server line and a table of 1..4 rows (more scroll). When the page is
+    // too low for everything, the recent stages give up rows first (down to 3), then this table (down to 1).
+    const bool others = otherLabel.isVisible();
+    int otherRows = std::max(1, std::min(4, otherTable.numRows()));
+    auto otherH = [&]() { return others ? 22 + 28 + OtherPlayersTable::kHeaderH + otherRows * OtherPlayersTable::kRowH + 6 : 0; };
+    auto sessionsNeed = [&]() { return 28 + SessionTable::kHeaderH + sessionRows * SessionTable::kRowH + 6; };
+    auto over = [&]() { return tableH + otherH() + sessionsNeed() + playersMinH + (stageRow ? 38 : 0) > bounds.getHeight(); };
+    if (others) {
+        while (sessionRows > 3 && over()) --sessionRows;
+        while (otherRows > 1 && over()) --otherRows;
+    }
+    const int sessionsH = sessionsNeed();
     const int minStrip = sessionsH + playersMinH + (stageRow ? 38 : 0);
-    auto strip = bounds.removeFromBottom(std::max(minStrip, bounds.getHeight() - tableH));
+    auto strip = bounds.removeFromBottom(std::max(minStrip, bounds.getHeight() - tableH - otherH()));
     auto srow = strip.removeFromTop(sessionsH);
     sessionsLabel.setBounds(srow.removeFromTop(28));
     sessionTable.setBounds(srow.withTrimmedBottom(6));
@@ -1250,6 +1450,12 @@ void StatusPage::resized() {
     recentTable.setBounds(strip);
     previousTable.setBounds(strip);
     peerLabel.setBounds(bounds.removeFromTop(28));
+    if (others) {
+        serverTotal.setBounds(bounds.removeFromTop(22).withTrimmedLeft(10).withTrimmedRight(10));
+        auto orow = bounds.removeFromBottom(std::min(bounds.getHeight(), otherH() - 22));
+        otherLabel.setBounds(orow.removeFromTop(28));
+        otherTable.setBounds(orow.withTrimmedBottom(6));
+    }
     // The table keeps every column whole; a window narrower than the table scrolls it sideways
     peerView.setBounds(bounds);
     const bool sideways = peerTable.requiredWidth() > bounds.getWidth();
@@ -1257,11 +1463,56 @@ void StatusPage::resized() {
                         std::max(0, bounds.getHeight() - (sideways ? peerView.getScrollBarThickness() : 0)));
 }
 
+void StatusPage::setStageLocked(bool locked) {
+    if (groupLock.isVisible() == locked) return;
+    groupLock.setVisible(locked);
+    resized();
+}
+void StatusPage::setPlayersHere(int n) {
+    if (n == mPlayersHere) return;
+    mPlayersHere = n;
+    rebuildOther();
+}
+void StatusPage::setOtherStages(const std::vector<hub_settings::OtherStage>& stages) {
+    mStages = stages;
+    rebuildOther();
+}
+void StatusPage::rebuildOther() {
+    const bool have = !mStages.empty();
+    std::vector<OtherPlayersTable::Row> rows;
+    std::vector<LockText::Part> parts;
+    const juce::String dot = juce::String::fromUTF8("  \xc2\xb7  ");
+    int total = 0;
+    for (const auto& st : mStages) {
+        const juce::String stage = st.group.empty() ? juce::String("-") : juce::String::fromUTF8(st.group.c_str());
+        const int n = st.running ? (int) st.who.size() : 0;
+        total += n;
+        parts.push_back({ dot + stage, pal::textDim, st.locked });
+        parts.push_back({ " " + juce::String(n), pal::textDim });
+        if (st.running)
+            for (const auto& p : st.who)
+                rows.push_back({ juce::String::fromUTF8(p.user.c_str()), stage, juce::String::fromUTF8(p.instrument.c_str()), st.locked, p.lan, (juce::int64) p.joinedMs });
+    }
+    std::vector<LockText::Part> line = { { "On this server: ", pal::textDim }, { juce::String(mPlayersHere + total), pal::text, false, true },
+                                         { " players" + dot + "this stage " + juce::String(mPlayersHere), pal::textDim } };
+    line.insert(line.end(), parts.begin(), parts.end());
+    serverTotal.setParts(std::move(line), 15.0f);
+    otherLabel.setText("  Players on other stages     " + juce::String(total) + " now", juce::dontSendNotification);
+    const int before = otherTable.numRows();
+    otherTable.setRows(std::move(rows));
+    if (have != otherLabel.isVisible() || before != otherTable.numRows()) {
+        serverTotal.setVisible(have);
+        otherLabel.setVisible(have);
+        otherTable.setVisible(have);
+        resized();
+    }
+}
+
 // ─── OtherStagesPage ──────────────────────────────────
 namespace { void styleButton(juce::TextButton& b, juce::Colour bg, juce::Colour fg); }
 struct OtherStagesPage::Row : public juce::Component {
     juce::Label name, file, ports, traffic, state;
-    juce::TextButton startStop, forget{"Forget"}, open{"Settings"}, move{"Move ports"}, check{"Check ports"};
+    juce::TextButton startStop, forget{"Forget"}, open{"Open"}, move{"Move ports"}, check{"Check ports"};
     Row() {
         addChildComponent(move);
         addChildComponent(check);
@@ -1277,11 +1528,20 @@ struct OtherStagesPage::Row : public juce::Component {
         styleButton(open, pal::panelLight, pal::text);
         styleButton(move, pal::panelLight, pal::text);
         styleButton(check, pal::panelLight, pal::text);
-        open.setTooltip("Open this stage's own window at its settings (name, password, listing, limits). Close it again and the stage keeps running in the background.");
+       #if JUCE_MAC
+        open.setTooltip("Open this stage's own window: its Status, Settings and Log. Close it again and the stage keeps running in the background.");
+       #else
+        open.setTooltip("Bring this stage's own window forward: its Status, Settings and Log.");
+       #endif
         traffic.setTooltip("Players on that stage, and what it receives and sends now.");
         for (auto* l : { &name, &file, &ports, &traffic }) l->setInterceptsMouseClicks(true, false);   // labels show a hover text only when they take the mouse
     }
-    void paint(juce::Graphics& g) override { g.setColour(pal::panelLight.withAlpha(0.6f)); g.fillRect(0, getHeight() - 1, getWidth(), 1); }
+    bool locked = false;   // padlock after the name
+    int lockX = 0;
+    void paint(juce::Graphics& g) override {
+        g.setColour(pal::panelLight.withAlpha(0.6f)); g.fillRect(0, getHeight() - 1, getWidth(), 1);
+        if (locked) hubDrawPadlock(g, (float) lockX, (float) name.getBounds().getCentreY(), 15.0f);
+    }
     void resized() override {
         auto b = getLocalBounds().reduced(4, 6);
         forget.setBounds(b.removeFromRight(std::max(90, hubButtonWidth(forget, b.getHeight(), { "Forget", "Delete" }))));
@@ -1294,7 +1554,12 @@ struct OtherStagesPage::Row : public juce::Component {
         state.setBounds(b.removeFromRight(std::max(100, SbTextFit::labelWidth(state) + 8)));
         traffic.setBounds(b.removeFromRight(std::max(250, SbTextFit::labelWidth(traffic) + 8)));
         ports.setBounds(b.removeFromRight(std::max(250, SbTextFit::labelWidth(ports) + 8)));
-        name.setBounds(b.removeFromLeft(std::min(240, b.getWidth() / 3)));
+        {   // the padlock sits right after the name, inside the name's column
+            auto nb = b.removeFromLeft(std::min(240, b.getWidth() / 3));
+            const int lockW = locked ? hubLockWidth(15.0f) : 0;
+            name.setBounds(nb.withWidth(std::max(0, std::min(nb.getWidth() - lockW, locked ? SbTextFit::labelWidth(name) : nb.getWidth()))));
+            lockX = name.getRight() - 3;
+        }
         file.setBounds(b);
         SbTextFit::tooltipIfCut(file, file.getText(), SbTextFit::labelWidth(file));
         SbTextFit::tooltipIfCut(name, name.getText(), SbTextFit::labelWidth(name));
@@ -1413,21 +1678,21 @@ void OtherStagesPage::act(juce::File file, juce::String action) {
     std::string err;
     const bool ok = action == "start" ? hub_settings::startOtherStage(file, err)
                   : action == "stop" ? hub_settings::stopOtherStage(file, err)
-                  : action == "show" ? hub_settings::showOtherStage(file, err, true)
+                  : action == "show" ? hub_settings::showOtherStage(file, err)
                   : action == "delete" ? hub_settings::deleteStage(file, err)
                   : action == "moveports" ? hub_settings::moveStagePorts(file, err)
                   : action == "checkports" ? hub_settings::checkStagePorts(file, err)
                   : hub_settings::forgetOtherStage(file, err);
     mPending = {};
     if (!ok) {
-        const juce::String what = action == "start" ? "Could not start " : action == "stop" ? "Could not stop " : action == "show" ? "Could not open the settings of "
+        const juce::String what = action == "start" ? "Could not start " : action == "stop" ? "Could not stop " : action == "show" ? "Could not open "
                                 : action == "delete" ? "Could not delete " : action == "moveports" ? "Could not move the ports of " : action == "checkports" ? "Could not check the ports of " : "Could not take off the list: ";
         say(what + name + ": " + juce::String::fromUTF8(err.c_str()), 2);
     } else if (action == "forget") {
         say(name + " taken off the list", 1);
     } else {
         mPending.file = file; mPending.action = action; mPending.name = name; mPending.at = juce::Time::currentTimeMillis(); mPending.target = target;
-        say(action == "start" ? "Starting " + name + "..." : action == "stop" ? "Stopping " + name + "..." : action == "show" ? "Opening the settings of " + name + "..."
+        say(action == "start" ? "Starting " + name + "..." : action == "stop" ? "Stopping " + name + "..." : action == "show" ? "Opening " + name + "..."
             : action == "delete" ? "Deleting " + name + "..." : action == "checkports" ? "Checking the ports of " + name + "..." : "Moving the ports of " + name + "...", 0);
     }
     mLast.clear();
@@ -1444,7 +1709,7 @@ void OtherStagesPage::checkPending(const std::vector<hub_settings::OtherStage>& 
     juce::String done;
     if (a == "start" && st != nullptr && st->running && !st->stopping) done = n + " started";
     else if (a == "stop" && st != nullptr && !st->running) done = n + " stopped";
-    else if (a == "show" && !mPending.file.getSiblingFile("SHOW").existsAsFile()) done = n + ": its window is open at Settings";
+    else if (a == "show" && !mPending.file.getSiblingFile("SHOW").existsAsFile()) done = n + ": its window is open";
     else if (a == "delete" && st == nullptr) done = n + " deleted: its folder is kept in stages-deleted";
     else if (a == "moveports" && st != nullptr && st->serverPort == mPending.target && (st->running || juce::Time::currentTimeMillis() - mPending.at > 1500) && !st->stopping)
         done = n + " moved to ports " + juce::String(st->serverPort) + " / " + juce::String(st->udpPort);
@@ -1475,7 +1740,7 @@ void OtherStagesPage::refresh() {
     const juce::String forward = juce::String::fromUTF8(hub_settings::stagesForwardHelp().c_str());
     juce::String key = warn + "\n" + forward + "\n";
     for (const auto& st : list) key << st.file.getFullPathName() << "|" << juce::String::fromUTF8(st.group.c_str()) << "|" << st.serverPort << "|" << st.udpPort << "|" << st.webPort
-                                    << "|" << (int) st.running << (int) st.stopping << (int) st.managed << "|" << st.moveServerPort << "|" << st.portState << "|" << juce::String::fromUTF8(st.portText.c_str()) << "|" << st.players << "|" << (juce::int64) st.inBytesPerSec << "|" << (juce::int64) st.outBytesPerSec
+                                    << "|" << (int) st.running << (int) st.stopping << (int) st.managed << (int) st.locked << "|" << st.moveServerPort << "|" << st.portState << "|" << juce::String::fromUTF8(st.portText.c_str()) << "|" << st.players << "|" << (juce::int64) st.inBytesPerSec << "|" << (juce::int64) st.outBytesPerSec
                                     << "|" << juce::String::fromUTF8(st.problem.c_str()) << "\n";
     if (key == mLast && mRows.size() == list.size()) return;
     mLast = key;
@@ -1486,6 +1751,7 @@ void OtherStagesPage::refresh() {
     for (const auto& st : list) {
         auto r = std::make_unique<Row>();
         r->name.setText(st.group.empty() ? juce::String("-") : juce::String::fromUTF8(st.group.c_str()), juce::dontSendNotification);
+        r->locked = st.locked;
         r->file.setText(st.file.getParentDirectory().getFullPathName() + (st.managed ? juce::String() : juce::String("  (added by path)"))
                         + (st.problem.empty() ? juce::String() : "  (" + juce::String::fromUTF8(st.problem.c_str()) + ")"), juce::dontSendNotification);
         r->ports.setText("server " + juce::String(st.serverPort) + juce::String::fromUTF8("  \xc2\xb7  audio ") + juce::String(st.udpPort)
@@ -1512,7 +1778,7 @@ void OtherStagesPage::refresh() {
         r->forget.setTooltip(st.managed ? "Stop this stage, take it out of the Stages Directory and move its folder to stages-deleted."
                                         : "Take it off this list. Its folder and files stay.");
         r->forget.setVisible(control && (st.managed ? !st.stopping : !st.running));
-       #if JUCE_MAC
+       #if JUCE_MAC || JUCE_WINDOWS
         r->open.setVisible(control && st.running && !st.stopping);
        #endif
         const juce::File f = st.file;
@@ -1669,9 +1935,10 @@ void styleButton(juce::TextButton& b, juce::Colour bg, juce::Colour fg) {
 } // namespace
 
 struct SettingsPanel::Row : public juce::Component {
-    enum Kind { Text = 0, Bool = 1, Choice = 2, StagePassword = 3 };
+    enum Kind { Text = 0, Bool = 1, Choice = 2, StagePassword = 3, MultiText = 4 };
+    static constexpr int kMultiLines = 5;   // editor height of a text of several lines, in rows
 
-    Row(const char* k, Kind kd, const juce::String& label, const char* choiceList)
+    Row(const char* k, Kind kd, const juce::String& label, const char* choiceList, const char* hintText = nullptr)
         : key(k), kind(kd) {
         name.setText(label, juce::dontSendNotification);
         name.setFont(juce::Font(15.0f));
@@ -1687,6 +1954,7 @@ struct SettingsPanel::Row : public juce::Component {
 
         switch (kind) {
         case Text:
+        case MultiText:
             editor = std::make_unique<juce::TextEditor>();
             editor->setFont(juce::Font(15.0f));
             editor->setColour(juce::TextEditor::backgroundColourId, pal::panelLight);
@@ -1694,6 +1962,17 @@ struct SettingsPanel::Row : public juce::Component {
             editor->setColour(juce::TextEditor::outlineColourId, pal::panelLight.brighter(0.2f));
             editor->setColour(juce::TextEditor::focusedOutlineColourId, pal::accent);
             editor->setSelectAllWhenFocused(false);
+            if (kind == MultiText) {   // the whole text: word wrap, a scroll bar when it is longer than the box
+                editor->setMultiLine(true, true);
+                editor->setReturnKeyStartsNewLine(true);
+                editor->setScrollbarsShown(true);
+                editor->setInputRestrictions((int) hub_settings::kWelcomeMaxBytes);
+                hint.setText(juce::String::fromUTF8(hintText ? hintText : ""), juce::dontSendNotification);
+                hint.setFont(juce::Font(13.0f));
+                hint.setColour(juce::Label::textColourId, pal::textDim);
+                hint.setMinimumHorizontalScale(1.0f);
+                addAndMakeVisible(hint);
+            }
             editor->onTextChange = [this]() { if (onEdited) onEdited(*this); };
             addAndMakeVisible(*editor);
             break;
@@ -1764,12 +2043,13 @@ struct SettingsPanel::Row : public juce::Component {
         }
     }
 
-    int height() const { return kind == StagePassword ? 3 * kRowH : kRowH; }
+    int height() const { return kind == StagePassword ? 3 * kRowH : kind == MultiText ? (kMultiLines + 2) * kRowH : kRowH; }
 
     // Canonical text of the control's current value (matches getValueString()).
     juce::String value() const {
         switch (kind) {
-        case Text:   return editor->getText();
+        case Text:
+        case MultiText: return editor->getText();
         case Bool:   return toggle->getToggleState() ? "1" : "0";
         case Choice: {
             const int idx = combo->getSelectedId() - 1;
@@ -1784,6 +2064,7 @@ struct SettingsPanel::Row : public juce::Component {
     void setValue(const juce::String& v) {
         switch (kind) {
         case Text:
+        case MultiText:
             editor->setText(v, false);
             break;
         case Bool: {
@@ -1836,6 +2117,16 @@ struct SettingsPanel::Row : public juce::Component {
             if (removeButton.isVisible()) removeButton.setBounds(l3.removeFromLeft(hubButtonWidth(removeButton, kRowH - 6) + 8).reduced(4, 3));
             hint.setBounds(l3.reduced(4, 0));
             SbTextFit::tooltipIfCut(hint, hint.getText(), SbTextFit::labelWidth(hint));
+            return;
+        }
+        if (kind == MultiText) {   // the name and its tag, the text over the full width, the hint
+            auto l1 = b.removeFromTop(kRowH);
+            name.setBounds(l1.removeFromLeft(nameW));
+            tag.setBounds(l1.removeFromRight(tagW));
+            auto l3 = b.removeFromBottom(kRowH);
+            hint.setBounds(l3.reduced(4, 0));
+            SbTextFit::tooltipIfCut(hint, hint.getText(), SbTextFit::labelWidth(hint));
+            editor->setBounds(b.reduced(4, 3));
             return;
         }
         name.setBounds(b.removeFromLeft(nameW));
@@ -1961,7 +2252,7 @@ void SettingsPanel::buildRows() {
             continue;
         }
         const bool stagePw = sp.kind == 3 && std::string(sp.key) == "group_password";
-        auto r = std::make_unique<Row>(sp.key, stagePw ? Row::StagePassword : (Row::Kind)(sp.kind == 3 ? 0 : sp.kind), sp.label, sp.choices);
+        auto r = std::make_unique<Row>(sp.key, stagePw ? Row::StagePassword : (Row::Kind)(sp.kind == 3 ? 0 : sp.kind), sp.label, sp.choices, sp.hint);
         r->onEdited = [this](Row& row) { onRowEdited(row); };
         if (stagePw) {
             r->onSetPassword = [this](const juce::String& pw) {
@@ -2337,6 +2628,29 @@ HubContent::HubContent(SonobusHubServer* hub,
     if (hub_settings::canManageOtherStages()) {   // a stage with its own folder manages no others
         mStagesPage = std::make_unique<OtherStagesPage>();
         mTabs.addTab("Other stages", pal::panel, mStagesPage.get(), false);
+        mStageRead = std::make_unique<juce::ThreadPool>(1);
+    }
+    if (hub_settings::isStage()) {   // a stage's own window: back to the main hub's window
+        mMainHubButton.setButtonText("Main hub");
+        styleButton(mMainHubButton, pal::accentSoft, pal::text);
+        mMainHubButton.setTooltip("Back to the main hub's window: its stages, players and settings");
+        mMainHubButton.onClick = [this]() {
+            std::string err;
+            const juce::String tip = mMainHubButton.getTooltip();
+            if (!hub_settings::showMainHub(err)) { mMainHubButton.setTooltip(juce::String::fromUTF8(err.c_str())); return; }
+            // A request nobody took within 3 s: the main hub is not running
+            juce::Component::SafePointer<HubContent> sp(this);
+            juce::Timer::callAfterDelay(3000, [sp, tip]() {
+                const juce::File show = hub_settings::stageMainFolder().getChildFile("SHOW");
+                const bool left = show.existsAsFile();
+                if (left) show.deleteFile();
+                if (!sp) return;
+                sp->mMainHubButton.setButtonText(left ? "Main hub is not running" : "Main hub");
+                sp->resized();
+                if (left) juce::Timer::callAfterDelay(4000, [sp]() { if (sp) { sp->mMainHubButton.setButtonText("Main hub"); sp->resized(); } });
+            });
+        };
+        addAndMakeVisible(mMainHubButton);
     }
     mTabs.setCurrentTabIndex(0, false);
     addAndMakeVisible(mTabs);
@@ -2350,8 +2664,13 @@ HubContent::HubContent(SonobusHubServer* hub,
     mQuitButton.onClick = [this]() {
         if (mQuitFn) mQuitFn();
     };
+    styleButton(mSupportButton, pal::panelLight, pal::text);
+    mSupportButton.onClick = [this]() { saveLogsForSupport(); };
+    mSupportButton.setTooltip("Saves a zip of this hub's logs (and its crash reports) to your Desktop, to send for support. No passwords inside.");
+    mWebPort = running.webPassword.empty() ? 0 : running.webPort;
     addAndMakeVisible(mRestartButton);
     addAndMakeVisible(mQuitButton);
+    addAndMakeVisible(mSupportButton);
     mRestartButton.setTooltip("Restart the hub. Players reconnect automatically.");
     mQuitButton.setTooltip("Stop hosting and quit the hub.");
     mStatusPage.copyLinkButton.setTooltip("Copy a link that opens this stage in SonoBus RP.");
@@ -2410,6 +2729,8 @@ HubContent::HubContent(SonobusHubServer* hub,
 
 HubContent::~HubContent() {
     stopTimer();
+    mStageRead.reset();
+    mSupportRun.reset();
     mUpdateCheck.reset();
     mLogWindow.reset();
     mTabs.clearTabs();   // the Log and Other stages pages are owned here, destroyed next
@@ -2435,6 +2756,74 @@ private:
     std::function<void(juce::Result)> mDone;
 };
 } // namespace
+
+namespace {
+// Builds the support zip on the Desktop, then reports on the message thread: the file, or what failed.
+class HubSupportRun : public juce::Thread {
+public:
+    HubSupportRun(hub_support::Info info, std::function<void(juce::File, juce::String)> done)
+        : juce::Thread("hub support zip"), mInfo(std::move(info)), mDone(std::move(done)) {
+        mInfo.cancel = &mCancel;
+        startThread(juce::Thread::Priority::low);
+    }
+    ~HubSupportRun() override { mCancel = true; stopThread(30000); }
+    void run() override {
+        const juce::File desktop = juce::File::getSpecialLocation(juce::File::userDesktopDirectory);
+        const juce::File target = desktop.getChildFile(hub_support::zipFileName(mInfo.stageName));
+        const juce::File part = desktop.getChildFile(target.getFileName() + ".part");
+        juce::String problem;
+        part.deleteFile();
+        {
+            juce::FileOutputStream out(part);
+            std::string err;
+            if (!out.openedOk()) problem = "the file could not be made on your Desktop (" + desktop.getFullPathName() + ").";
+            else if (!hub_support::writeLogsZip(mInfo, out, err)) problem = juce::String::fromUTF8(err.c_str()) + ".";
+            else if (out.getStatus().failed()) problem = "the file could not be written to your Desktop (is the disk full?).";
+        }
+        if (problem.isEmpty()) {
+            target.deleteFile();
+            if (!part.moveFileTo(target)) problem = "the file could not be put on your Desktop (" + target.getFullPathName() + ").";
+        }
+        if (problem.isNotEmpty()) part.deleteFile();
+        if (mCancel) return;
+        juce::MessageManager::callAsync([done = mDone, target, problem]() { done(target, problem); });
+    }
+private:
+    hub_support::Info mInfo;
+    std::function<void(juce::File, juce::String)> mDone;
+    std::atomic<bool> mCancel { false };
+};
+} // namespace
+
+void HubContent::saveLogsForSupport() {
+    if (mSupportRun != nullptr && mSupportRun->isThreadRunning()) return;
+    hub_support::Info info;
+    info.stageName = mStatusPage.groupEditor.getText().toStdString();
+    info.logFile = mLogFile;
+    info.webPort = mWebPort;
+    if (mHub != nullptr) {
+        const auto s = mHub->snapshotForUI();
+        if (!s.groupName.empty()) info.stageName = s.groupName;
+        info.serverPort = s.aooServerPort;
+        info.udpPort = s.localUdpPort;
+        if (s.hubStartedAtMs > 0) info.uptimeSec = (juce::Time::currentTimeMillis() - s.hubStartedAtMs) / 1000;
+    }
+    mSupportButton.setEnabled(false);
+    mSupportButton.setButtonText("Saving Logs...");
+    juce::Component::SafePointer<HubContent> sp(this);   // outside the inner lambda (MSVC)
+    mSupportRun = std::make_unique<HubSupportRun>(info, [sp](juce::File file, juce::String problem) {
+        if (!sp) return;
+        sp->mSupportButton.setButtonText("Save Logs for Support");
+        sp->mSupportButton.setEnabled(true);
+        if (problem.isNotEmpty()) {
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Logs not saved", "The logs could not be saved: " + problem, "OK", sp.getComponent());
+            return;
+        }
+        file.revealToUser();
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Logs saved",
+            "Saved to your Desktop: " + file.getFileName() + ".\nSend this file to your SonoBus RP contact (drag it into a text or email).", "OK", sp.getComponent());
+    });
+}
 
 void HubContent::startInstallUpdate() {
     if (!mUpdateCheck || mUpdateRun) return;
@@ -2467,7 +2856,8 @@ void HubContent::paint(juce::Graphics& g) {
     g.setColour(pal::panel);
     g.fillRect(controlBar);
 
-    auto bwArea = controlBar.reduced(14, 10).withTrimmedRight(320);
+    auto bwArea = controlBar.reduced(14, 10);
+    bwArea.setRight(mSupportButton.getX() - 10);
     g.setColour(pal::accent);
     g.setFont(juce::Font(17.0f, juce::Font::bold));
     auto kbps = [](float bps) { return hubRateText(bps); };   // Bits, shared rule
@@ -2485,10 +2875,16 @@ void HubContent::resized() {
     mQuitButton.setBounds(controlBar.removeFromRight(std::max(130, hubButtonWidth(mQuitButton, controlBar.getHeight()))));
     controlBar.removeFromRight(10);
     mRestartButton.setBounds(controlBar.removeFromRight(std::max(160, hubButtonWidth(mRestartButton, controlBar.getHeight()))));
+    controlBar.removeFromRight(10);
+    mSupportButton.setBounds(controlBar.removeFromRight(std::max(200, hubButtonWidth(mSupportButton, controlBar.getHeight(), { "Save Logs for Support", "Saving Logs..." }))));
 
     // Update banner on top while one is available, so it shows on every tab.
     if (mUpdateBanner.isVisible()) mUpdateBanner.setBounds(bounds.removeFromTop(UpdateBanner::kHeight));
     if (mPortAlert.isVisible()) mPortAlert.setBounds(bounds.removeFromTop(34));
+    if (mMainHubButton.getParentComponent() != nullptr) {   // a stage's window: "<- Main hub" above the tabs, left
+        auto row = bounds.removeFromTop(46).reduced(14, 7);
+        mMainHubButton.setBounds(row.removeFromLeft(std::max(140, mMainHubButton.widthFor(row.getHeight()))));
+    }
     // Tabs take everything above the control bar.
     mTabs.setBounds(bounds);
 }
@@ -2569,6 +2965,16 @@ void HubContent::timerCallback() {
     // Heading: connected now, and distinct players since the hub started
     mStatusPage.peerLabel.setText(juce::String("  Players     ") + juce::String((int) snap.peers.size()) + " now" + juce::String::fromUTF8("  \xc2\xb7  ")
                                   + juce::String(mHub->playersSinceStart()) + " since hub start", juce::dontSendNotification);
+    mStatusPage.setStageLocked(!snap.groupPassword.empty());
+    mStatusPage.setPlayersHere((int) snap.peers.size());
+    if (mStageRead && !mStageReadBusy && mStatusPage.isShowing()) {   // main hub: who is on the other stages, read off this thread
+        mStageReadBusy = true;
+        juce::Component::SafePointer<HubContent> sp(this);
+        mStageRead->addJob([sp]() {
+            auto list = std::make_shared<std::vector<hub_settings::OtherStage>>(hub_settings::otherStages());
+            juce::MessageManager::callAsync([sp, list]() { if (sp) { sp->mStageReadBusy = false; sp->mStatusPage.setOtherStages(*list); } });
+        });
+    }
     // Recent sessions (newest first) + the selected/current session's personnel
     {   // The sessions table is sized to its rows — re-layout when the count changes
         const int before = mStatusPage.sessionTable.numRows();
@@ -2665,7 +3071,7 @@ void HubContent::refreshSessionDetail() {
 
 // ─── Background stages (Mac) ──────────────────────────────────────────────────
 // A stage with its own settings folder (an "other stage") runs in the background on a Mac: no Dock icon, no window
-// at start. The main hub's "Open window" writes SHOW into the stage's folder; the window then shows until it is
+// at start. The main hub's "Open" writes SHOW into the stage's folder; the window then shows until it is
 // closed, and the stage keeps running. The main hub (default folder) keeps its Dock icon and window.
 #if JUCE_MAC
 extern "C" void* objc_getClass(const char*);
@@ -2788,13 +3194,13 @@ static void windowsGuiSetup() {
 namespace {
 class QuitFileWatch : public juce::Timer {
 public:
-    QuitFileWatch(std::function<void()> fn, std::function<void(bool)> showFn = {}) : mFn(std::move(fn)), mShowFn(std::move(showFn)) { mFile.deleteFile(); mShow.deleteFile(); startTimer(1000); }
+    QuitFileWatch(std::function<void()> fn, std::function<void(const juce::String&)> showFn = {}) : mFn(std::move(fn)), mShowFn(std::move(showFn)) { mFile.deleteFile(); mShow.deleteFile(); startTimer(1000); }
     void timerCallback() override {
         if (mShowFn && mShow.existsAsFile()) {
-            const bool settings = mShow.loadFileAsString().trim() == "settings";   // the main hub's Settings button
+            const juce::String tab = mShow.loadFileAsString().trim();   // "settings", "stages" (a stage's Main hub button) or the Status tab
             mShow.deleteFile();
-            std::cout << "[HUB] SHOW file found, opening the window" << (settings ? " at Settings\n" : "\n");
-            mShowFn(settings);
+            std::cout << "[HUB] SHOW file found, bringing the window forward (" << tab << ")\n";
+            mShowFn(tab);
         }
         if (!mFile.existsAsFile()) return;
         mFile.deleteFile();
@@ -2806,7 +3212,7 @@ private:
     juce::File mFile = hub_settings::dataDir().getChildFile("QUIT");
     juce::File mShow = hub_settings::dataDir().getChildFile("SHOW");
     std::function<void()> mFn;
-    std::function<void(bool)> mShowFn;
+    std::function<void(const juce::String&)> mShowFn;
 };
 }
 
@@ -2822,19 +3228,19 @@ void HubJuceApp::initialise(const juce::String&) {
 #endif
 #if JUCE_WINDOWS
     windowsGuiSetup();
-    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); });
-#else
-    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); }, [this](bool settings) {
+#endif
+    // SHOW: a stage's window for the main hub's Open, the main hub's window for a stage's Main hub button
+    mQuitWatch = std::make_unique<QuitFileWatch>([this]() { quit(); }, [this](const juce::String& tab) {
         if (!mWindow) return;
-        if (settings) if (auto* content = dynamic_cast<HubContent*>(mWindow->getContentComponent())) content->showSettingsTab();
+        if (auto* content = dynamic_cast<HubContent*>(mWindow->getContentComponent()))
+            content->showTab(tab == "settings" ? "Settings" : tab == "stages" ? "Other stages" : "Status");
        #if JUCE_MAC
-        setActivationPolicyRaw(1, true);
+        setActivationPolicyRaw(g_backgroundStage ? 1 : 0, true);   // a background stage stays out of the Dock
        #endif
         if (mWindow->isMinimised()) mWindow->setMinimised(false);
         mWindow->setVisible(true);
         mWindow->toFront(true);
     });
-#endif
     if (firstLaunch) askFirstLaunch();
     else startHubAndWindow();
 }
@@ -2997,7 +3403,8 @@ void HubJuceApp::makeWindow() {
     }
    #endif
     if (!mArgs.groupName.empty())   // Which stage this window serves; one of a main hub's other stages says so
-        title << (hub_settings::isStage() ? " (other stage): " : ": ") << juce::String::fromUTF8(mArgs.groupName.c_str());
+        title << (hub_settings::isStage() ? " (other stage): " : ": ") << juce::String::fromUTF8(mArgs.groupName.c_str())
+              << (mArgs.groupPassword.empty() ? juce::String() : juce::String::fromUTF8("\xc2\xa0\xf0\x9f\x94\x92"));   // padlock: the title bar is drawn by the system
     mWindow = std::make_unique<HubMainWindow>(
         title, mHub.get(), mArgs, mMeta, std::move(cb), restartFn, quitFn, applyGroupFn, applyHoldFn, applySessionFn);
 #if JUCE_WINDOWS
@@ -3309,6 +3716,8 @@ void HubJuceApp::shutdown() {
     mWindow.reset();
     if (mHub) mHub->stop();
     mHub.reset();
+    hub_settings::stopStageWatchdog();
+    hub_settings::noteStageStoppedInOrder();   // a stage: this end was in order, no crash
 #if JUCE_WINDOWS
     std::cout << "[HUB] stopped\n";
     std::cout.flush();

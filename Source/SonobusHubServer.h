@@ -20,6 +20,7 @@
 #include <utility>   // Std::pair (session settings snapshot)
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -448,6 +449,9 @@ struct HubPeer {
 
     std::vector<float> recvBuffer;
     bool active = false;
+    // The welcome message: when it is due (steady ms, 0 = not due) and when it last went out. Control path only.
+    std::atomic<int64_t> welcomeDueMs{0};
+    std::atomic<int64_t> welcomeSentMs{0};
     int recvChannels = HUB_DEFAULT_CHANNELS;
     int sendChannels = HUB_DEFAULT_CHANNELS;
     // Lock-free mirror of
@@ -488,6 +492,8 @@ struct HubPeer {
     std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
     std::string clientPlugin;             // Plugin format and host ("AU in Logic Pro", fourth string); empty for the app
     std::string clientId;                 // The install's anonymous id (fifth string, 32 hex); empty for older players
+    std::string hairpinVia;               // Set at join when this player's connection arrives through the router; fixed afterwards
+    std::atomic<int> hairpinHintsLeft { 0 };   // /sb/hxlanhint answers still owed to this player
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
     std::atomic<float> clientIfaceMs { -1.0f };   // Player's audio interface latency, input + output (ms, /sb/hxbuf arg 12); -1 = not reported
     std::atomic<uint32_t> clientRxUnderrunsTotal { 0 }, clientRxPopsTotal { 0 };
@@ -901,6 +907,7 @@ public:
         bool list = false;                   // listed at the stage directory (the operator opts in)
         std::string genre = "Any";
         std::string description;
+        std::string welcome;                 // chat text for each player who joins; empty = none
         std::string city;
         std::string country;                 // two-letter code, empty = not given
         int names = 0;                       // player names in the listing: 0 automatic (shown on an open stage, hidden on a locked one), 1 show, 2 hide
@@ -1008,6 +1015,7 @@ private:
     // to stats.csv in the hub data dir by a separate writer thread, to correlate per-block budget compression with audible degradation.
     void statsWriterThread();
     void latencyBroadcastTick();   // /sb/ping + /sb/hxlat every 10 s from statsWriterThread
+    void welcomeTick(const std::vector<std::shared_ptr<HubPeer>>& peers);   // statsWriterThread: the welcome message, once per join
     std::unique_ptr<std::thread> mStatsThread;
 
     // ─── RT-safe telemetry log ring ────────────────
@@ -1624,6 +1632,12 @@ private:
     std::mutex mRemovedFileMutex;              // one writer at a time; taken before mStageMutex, never the other way
     void removedPlayersSave();                 // permanent removals to the file; control threads only
     std::string mGatewayIp;                    // this computer's default gateway, found at start; under mStageMutex
+    // A player on this network who connects through the public address is told the local one (/sb/hxlanhint).
+    std::mutex mHairpinMutex;                  // leaf lock for the three members below
+    std::string mHairpinGatewayIp, mHairpinPublicIp;
+    std::map<std::string, std::string> mJoinIpByUser;   // address each member's server connection came from
+    std::string hairpinViaFor(const std::string& user, const std::string& peerIp);
+    void sendLanHint(const struct sockaddr* to, socklen_t tolen);
     // Install ids as players report them: queued by the receive thread, handled on the client thread.
     struct PlayerIdNote { std::string user, id; struct sockaddr_storage addr; socklen_t addrlen; };
     std::mutex mIdNoteMutex;

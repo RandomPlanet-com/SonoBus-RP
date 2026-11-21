@@ -1442,7 +1442,7 @@ ChannelGroupView * ChannelGroupsView::createChannelGroupView(bool first)
         };
         pvf->nameLabel->setTooltip(TRANS("Set name for this group that others will see"));
     } else {
-        pvf->nameLabel->setTooltip(TRANS("Click to toggle extra information visibility"));
+        pvf->nameLabel->setTooltip({});
         //pvf->nameLabel->setColour(TextEditor::outlineColourId, Colours::transparentBlack);
         //pvf->nameLabel->setColour(TextEditor::backgroundColourId, Colours::transparentBlack);
     }
@@ -3503,9 +3503,19 @@ void ChannelGroupsView::updatePeerModeChannelViews(int specific)
     bool connected = processor.getRemotePeerConnected(mPeerIndex);
     String username = processor.getRemotePeerUserName(mPeerIndex);
 
-    mMainChannelView->nameLabel->setText(username, dontSendNotification);
+    // On a stage the player's instrument follows the name, as in the stages list: "Name (Instrument)"
+    String shownName = username;
+    const String instrument = processor.getRemotePeerHubInstrument(mPeerIndex);
+    if (instrument.isNotEmpty()) shownName << " (" << instrument << ")";
+    const bool nameChanged = mMainChannelView->nameLabel->getText() != shownName;
+    mMainChannelView->nameLabel->setText(shownName, dontSendNotification);
     // The whole name in the hover while the row shows it cut
-    SbTextFit::tooltipIfCut(*mMainChannelView->nameLabel, username, SbTextFit::labelWidth(*mMainChannelView->nameLabel, username));
+    SbTextFit::tooltipIfCut(*mMainChannelView->nameLabel, shownName, SbTextFit::labelWidth(*mMainChannelView->nameLabel, shownName));
+    if (nameChanged) {
+        // The name column is measured from this text: lay the rows out again, after this update
+        Component::SafePointer<ChannelGroupsView> safe(this);
+        MessageManager::callAsync([safe]() { if (safe) safe->listeners.call (&ChannelGroupsView::Listener::channelLayoutChanged, safe.getComponent()); });
+    }
 
     String chantext;
     if (peerInfoOnly) {
@@ -5027,11 +5037,10 @@ void ChannelGroupsView::mouseDrag (const MouseEvent& event)
 
 void ChannelGroupsView::mouseUp (const MouseEvent& event)
 {
-    if (mMainChannelView) {
-        if (event.eventComponent == mMainChannelView->nameLabel.get()) {
-            listeners.call (&ChannelGroupsView::Listener::nameLabelClicked, this);
-            return;
-        }
+    // A click on a player's name does nothing: the row's details follow the layout buttons for all rows,
+    // and the name is the handle for dragging the row.
+    if (mMainChannelView && event.eventComponent == mMainChannelView->nameLabel.get()) {
+        return;
     }
 
     for (int i=0; i < mChannelViews.size(); ++i) {

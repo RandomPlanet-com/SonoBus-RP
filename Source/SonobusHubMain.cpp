@@ -130,6 +130,7 @@ static void printUsage(const char* progname) {
               << "  --list-stage            List this stage at stages.randomplanet.com (needs --location)\n"
               << "  --stage-genre <text>    Genre for the listing, for example \"Jazz/Blues\"\n"
               << "  --stage-description <text>  One line for the listing\n"
+              << "  --welcome-message <text>    Shown in the chat of each player who joins\n"
               << "  --stage-country <code>  Two-letter country code for the listing, for example US\n"
               << "  --stage-names <mode>    Player names in the listing: Automatic, Show or Hide\n\n"
               << "Logging [S]:\n"
@@ -202,6 +203,7 @@ static bool parseArgs(int argc, char* argv[], HubLaunchArgs& a, bool& nogui, std
         else if (arg == "--no-list-stage") { a.listStage = false; pin("list_stage"); }
         else if (arg == "--stage-genre" && i + 1 < argc) { a.stageGenre = argv[++i]; pin("stage_genre"); }
         else if (arg == "--stage-description" && i + 1 < argc) { a.stageDescription = argv[++i]; pin("stage_description"); }
+        else if (arg == "--welcome-message" && i + 1 < argc) { a.welcomeMessage = argv[++i]; pin("welcome_message"); }
         else if (arg == "--stage-country" && i + 1 < argc) { a.stageCountry = argv[++i]; pin("stage_country"); }
         else if (arg == "--stage-names" && i + 1 < argc) { a.stageNames = argv[++i]; pin("stage_names"); }
         else if (arg == "--stage-directory" && i + 1 < argc) { a.stageDirectory = argv[++i]; pin("stage_directory"); }
@@ -341,6 +343,7 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile, const st
     if (!hub.start(serverHost, serverPort, a.userName, a.groupName, a.groupPassword,
                    a.udpPort, a.sampleRate, a.blockSize, a.channels)) {
         std::cerr << "Failed to start hub server.\n";
+        if (!hub.startError().empty()) std::cerr << hub.startError() << " Stop the other hub (or program) using it, then start this one again.\n";
         return 1;
     }
 
@@ -386,7 +389,9 @@ static int runHeadless(HubLaunchArgs a, const juce::File& settingsFile, const st
     stageDirectory.stopThread(20000);   // removes the listing before the hub goes
     web.stop();
     hub.stop();
+    hs::stopStageWatchdog();
     hs::stopChildStages();   // Linux main hub: its stages stop with it
+    hs::noteStageStoppedInOrder();   // a stage: this end was in order, no crash
     if (gRelaunchSelf.load()) {
         hs::clearSinkEnv();   // the replacement reads its sink settings from the file again
 #if defined(_WIN32)
@@ -572,6 +577,7 @@ int main(int argc, char* argv[]) {
     aoo_initialize();
 
     if (!noSettings) hs::restartStartedStages();   // main hub: the stages that were started run again
+    if (!noSettings) hs::startStageWatchdog();     // and a stage that crashes later is started again
 
 #if defined(SONOBUS_HUB_NOGUI)
     (void) meta;

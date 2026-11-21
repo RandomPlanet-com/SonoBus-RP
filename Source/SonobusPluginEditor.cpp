@@ -910,6 +910,10 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mChatView = std::make_unique<ChatView>(processor, currConnectionInfo);
     mChatView->setVisible(false);
     mChatView->addComponentListener(this);
+#if !(JUCE_IOS || JUCE_ANDROID)
+    // The standalone app opens with the chat panel shown; a plugin keeps its remembered state.
+    if (JUCEApplicationBase::isStandaloneApp()) processor.setLastChatShown(true);
+#endif
 
     mChatButton = std::make_unique<SonoDrawableButton>("chat", DrawableButton::ButtonStyle::ImageOnButtonBackground);
     std::unique_ptr<Drawable> chatdotsimg(Drawable::createFromImageData(BinaryData::chat_dots_svg, BinaryData::chat_dots_svgSize));
@@ -1899,6 +1903,7 @@ void SonobusAudioProcessorEditor::showStageNotice(const String & group, const St
 void SonobusAudioProcessorEditor::sbChatEventReceived(SonobusAudioProcessor *comp, const SBChatEvent & mesg)
 {
     haveNewChatEvents = true;
+    if (mesg.from == "Hub" && mesg.tags == "welcome") mWelcomeArrived = true;
 
     triggerAsyncUpdate();
 }
@@ -3580,7 +3585,7 @@ void SonobusAudioProcessorEditor::mouseDown (const MouseEvent& event)
           //  showOrHideSettings();
         }
     }
-    else if (event.eventComponent == mTitleLabel.get() || event.eventComponent == mTitleImage.get()) {
+    else if (titleClickHit(event)) {
         settingsWasShownOnDown = settingsCalloutBox != nullptr;
         settingsClosedTimestamp = 0; // reset on a down
         if (settingsWasShownOnDown) {
@@ -3617,9 +3622,17 @@ void SonobusAudioProcessorEditor::mouseDown (const MouseEvent& event)
     }
 }
 
+// The title opens Settings from its words only, not from the empty space after them.
+bool SonobusAudioProcessorEditor::titleClickHit (const MouseEvent& event)
+{
+    if (event.eventComponent == mTitleImage.get()) return true;
+    if (event.eventComponent != mTitleLabel.get()) return false;
+    return event.x <= SbTextFit::labelWidth(*mTitleLabel);
+}
+
 void SonobusAudioProcessorEditor::mouseUp (const MouseEvent& event)
 {
-    if (event.eventComponent == mTitleLabel.get() || event.eventComponent == mTitleImage.get()) {
+    if (titleClickHit(event)) {
         if (Time::getMillisecondCounter() > settingsClosedTimestamp + 1000) {
             // only show if it wasn't just dismissed
             showSettings(true);
@@ -4250,6 +4263,18 @@ String SonobusAudioProcessorEditor::generateNewUsername(const AooServerConnectio
 }
 
 
+void SonobusAudioProcessorEditor::flushJoinHold(bool welcomeCame)
+{
+    ++mJoinHoldGen;   // a pending timer finds nothing to do
+    if (mJoinHold.isEmpty()) return;
+    Array<SBChatEvent> held;
+    held.swapWith(mJoinHold);
+    for (auto & e : held) {
+        if (welcomeCame && e.tags == "joinedstage") continue;
+        mChatView->addNewChatMessage(e);
+    }
+}
+
 void SonobusAudioProcessorEditor::rosterPost(const String & group, const String & user, bool joined)
 {
     if (currConnectionInfo.groupIsPublic) return;
@@ -4384,8 +4409,13 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
 
                 // A second confirmation of the stage we are already on (a double join at launch) adds nothing.
                 const bool alreadyConfirmed = mRosterGroup == ev.group && !mRosterKept;
-                if (!alreadyConfirmed)
-                    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "", statstr));
+                if (!alreadyConfirmed) {
+                    flushJoinHold(false);
+                    mJoinHold.add(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "joinedstage", statstr));
+                    const uint32 gen = ++mJoinHoldGen;
+                    Component::SafePointer<SonobusAudioProcessorEditor> safe(this);
+                    Timer::callAfterDelay(4000, [safe, gen]() { if (safe && safe->mJoinHoldGen == gen) safe->flushJoinHold(false); });
+                }
 
                 // The players reported before this join was confirmed were already on the stage.
                 StringArray present;
@@ -4404,8 +4434,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
                     // nothing more to tell
                 } else if (!resumed) {
                     if (present.size() > 0 && !currConnectionInfo.groupIsPublic) {
-                        mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "roster",
-                                                                 present.joinIntoString("\n")));
+                        mJoinHold.add(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "roster", present.joinIntoString("\n")));
                     }
                 } else {
                     for (auto & user : present) if (!before.contains(user)) rosterPost(ev.group, user, true);
@@ -4471,6 +4500,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             resized();
         }
         else if (ev.type == ClientEvent::GroupLeaveEvent) {
+            flushJoinHold(false);
             String statstr;
             if (ev.success) {
                 statstr = TRANS("Left Stage: ") + ev.group;
@@ -4556,6 +4586,16 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
     if (haveNewChatEvents.compareAndSetBool(false, true))
     {
         mChatView->refreshMessages();
+    }
+
+    // The stage's welcome message opens the chat panel, without a change of the window size.
+    if (mWelcomeArrived.compareAndSetBool(false, true))
+    {
+        flushJoinHold(true);   // the welcome is in the chat already: the roster follows it
+        if (!mChatView->isVisible()) {
+            showChatPanel(true, false);
+            resized();
+        }
     }
 
     if (mReloadFile) {

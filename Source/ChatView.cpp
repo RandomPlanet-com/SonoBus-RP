@@ -311,6 +311,7 @@ void ChatView::updateFontSizes()
 
     mChatNameFont = Font((13 + offset) * SonoLookAndFeel::getFontScale());
     mChatMesgFont = Font((16 + offset) * SonoLookAndFeel::getFontScale());
+    mChatRosterFont = Font((15 + offset) * SonoLookAndFeel::getFontScale());
     mChatMesgFixedFont = Font(Font::getDefaultMonospacedFontName(), 15+offset, Font::plain);
     mChatEditFont = Font((14 + offset) * SonoLookAndFeel::getFontScale());
     mChatEditFixedFont = Font(Font::getDefaultMonospacedFontName(), 15+offset, Font::plain);
@@ -339,7 +340,7 @@ void ChatView::updateTitles()
     
     mChatSendTextEditor->setEnabled(enabled);
     if (enabled) {
-        mesg = TRANS("Enter message here...") + String(" -> ") + name;
+        mesg = TRANS("Enter message here...") + String(" -> ") + name + "\n" + TRANS("*bold*   _italic_   __underline__");
     }
     else {
         mesg = name + TRANS(" is not connected");
@@ -794,14 +795,24 @@ bool ChatView::keyPressed (const KeyPress & key)
 
 Colour ChatView::getOrGenerateUserColor(const String & name)
 {
-    Colour usecolor;
-    if (mChatUserColors.find(name) == mChatUserColors.end()) {
-        // create a new color for them
-        mChatUserColors[name] = usecolor = Colour::fromHSL(Random::getSystemRandom().nextFloat(), 0.5f, 0.8f, 1.0f);
+    // One colour per player from a palette that suits the dark theme. A name starts at the colour its spelling points
+    // to (so it is mostly the same on every screen) and takes the next free one when another player has it here.
+    auto found = mChatUserColors.find(name);
+    if (found != mChatUserColors.end()) return found->second;
+    static const uint32 kPalette[] = { 0xff7ee08a, 0xffb49cf0, 0xfff0a04b, 0xffe3c141, 0xff6fb7ff,
+                                       0xffc9d46a, 0xff8fa0ff, 0xffd9c39a, 0xfff4b183, 0xff8ee3ef };
+    const int n = (int) (sizeof (kPalette) / sizeof (kPalette[0]));
+    uint32 h = 2166136261u;
+    for (auto p = name.toRawUTF8(); *p != 0; ++p) { h ^= (uint8) *p; h *= 16777619u; }
+    const int start = (int) (h % (uint32) n);
+    Colour usecolor (kPalette[start]);
+    for (int k = 0; k < n; ++k) {
+        const Colour c (kPalette[(start + k) % n]);
+        bool taken = false;
+        for (auto & kv : mChatUserColors) if (kv.second == c) { taken = true; break; }
+        if (! taken) { usecolor = c; break; }
     }
-    else {
-        usecolor = mChatUserColors[name];
-    }
+    mChatUserColors[name] = usecolor;
     return usecolor;
 }
 
@@ -889,8 +900,11 @@ void ChatView::processNewChatMessages(int index, int count)
     const Colour otherNameColour(0xaaffffaa);
     const Colour selfTextColour(0xffeeeeee);
     const Colour otherTextColour(0xffffffaa);
-    const Colour sysTextColour(0xffffaaaa);
+    const Colour sysTextColour(0xff9a9a9a);       // joins, leaves, the stage roster: dim, out of the way
+    const Colour sysAlertColour(0xffe3c141);      // a failed join or leave
+    const Colour adminColour(0xff3fb8af);         // the stage admin (messages from the hub)
     const Colour urlTextColour(0xff44aaff);
+    const Colour welcomeHeadColour(0xff3fb8af);
 
     mChatTextEditor->moveCaretToEnd();
 
@@ -993,12 +1007,16 @@ void ChatView::processNewChatMessages(int index, int count)
         else if (event.type == SBChatEvent::SystemType) {
             usecolor = sysTextColour;
         }
+        else if (event.from == "Hub") {
+            usecolor = adminColour;
+            gotuser = true;
+        }
         else {
             usecolor = getOrGenerateUserColor(event.from);
             gotuser = true;
         }
 
-        Colour namecolor = usecolor.withAlpha(0.7f);
+        Colour namecolor = usecolor;   // a player's name and text share their colour
 
         mChatTextEditor->setFont(mChatSpacerFont);
         mChatTextEditor->insertTextAtCaret("\n");
@@ -1007,24 +1025,35 @@ void ChatView::processNewChatMessages(int index, int count)
         //mChatTextEditor->moveCaretToStartOfLine(false);
 
         if (event.type == SBChatEvent::SystemType) {
-            mChatTextEditor->setColour(TextEditor::textColourId, usecolor);
-            mChatTextEditor->setFont(mChatNameFont);
-            mChatTextEditor->insertTextAtCaret("==  ");
             if (event.tags == "roster") {
-                // heading carries the time; one name per line, a closing "==" on its own line
-                mChatTextEditor->insertTextAtCaret("Players on Stage as of " + event.stamp.toString(false, true, false));
+                // "Players on Stage as of <time> :", then one name per line in the player's chat colour
+                mChatTextEditor->setFont(mChatRosterFont);
+                mChatTextEditor->setColour(TextEditor::textColourId, sysTextColour);
+                mChatTextEditor->insertTextAtCaret(TRANS("Players on Stage as of") + " " + event.stamp.toString(false, true, false) + " :\n");
                 StringArray names = StringArray::fromLines(event.message);
                 for (auto & name : names) {
+                    if (name.isEmpty()) continue;
                     mChatTextEditor->insertTextAtCaret("\n");
+                    mChatTextEditor->setColour(TextEditor::textColourId, getOrGenerateUserColor(name));
                     mChatTextEditor->insertTextAtCaret(name);
                 }
-                mChatTextEditor->insertTextAtCaret("\n==");
             }
             else {
-                mChatTextEditor->insertTextAtCaret(event.message);
-
-                mChatTextEditor->insertTextAtCaret("      ");
-                mChatTextEditor->insertTextAtCaret(event.stamp.toString(false, true, false));
+                // One dim line: the player's name in their colour, what happened, the time
+                const bool failed = event.message.startsWith(TRANS("Failed"));
+                mChatTextEditor->setFont(mChatNameFont);
+                String rest = event.message;
+                if (event.from.isNotEmpty() && rest.startsWith(event.from)) {
+                    mChatTextEditor->setColour(TextEditor::textColourId, getOrGenerateUserColor(event.from));
+                    mChatTextEditor->setFont(mChatNameFont.boldened());
+                    mChatTextEditor->insertTextAtCaret(event.from);
+                    mChatTextEditor->setFont(mChatNameFont);
+                    rest = " " + rest.substring(event.from.length()).trimCharactersAtStart(" -");
+                }
+                mChatTextEditor->setColour(TextEditor::textColourId, failed ? sysAlertColour : sysTextColour);
+                mChatTextEditor->insertTextAtCaret(rest);
+                mChatTextEditor->setColour(TextEditor::textColourId, sysTextColour);
+                mChatTextEditor->insertTextAtCaret(String(CharPointer_UTF8("   \xc2\xb7   ")) + event.stamp.toString(false, true, false));
             }
             mLastChatShowTimeStamp = nowtime;
             mLastShownEventSec = evsec;
@@ -1032,10 +1061,22 @@ void ChatView::processNewChatMessages(int index, int count)
             mChatTextEditor->insertTextAtCaret("\n");
         }
         else {
-            if (event.from != mLastChatEventFrom || showtime) {
+            // The stage's welcome message from the hub: a heading with the stage name, then the text as written.
+            const bool welcome = event.type == SBChatEvent::UserType && event.from == "Hub" && event.tags == "welcome";
+            if (welcome) {
+                usecolor = selfTextColour;
+                mChatTextEditor->setColour(TextEditor::textColourId, welcomeHeadColour);
+                mChatTextEditor->setFont(mChatMesgFont.withHeight(mChatMesgFont.getHeight() * 1.15f).boldened());
+                mChatTextEditor->insertTextAtCaret(event.group.isNotEmpty() ? TRANS("Welcome to") + " " + event.group : TRANS("Welcome"));
+                mChatTextEditor->insertTextAtCaret("\n");
+                mLastChatShowTimeStamp = nowtime;
+                mLastShownEventSec = evsec;
+            }
+            else if (event.from != mLastChatEventFrom || showtime) {
                 mChatTextEditor->setColour(TextEditor::textColourId, namecolor);
+                mChatTextEditor->setFont(mChatNameFont.boldened());
+                mChatTextEditor->insertTextAtCaret(event.from == "Hub" ? TRANS("Stage Admin (host)") : event.from);
                 mChatTextEditor->setFont(mChatNameFont);
-                mChatTextEditor->insertTextAtCaret(event.from);
 
                 mChatTextEditor->insertTextAtCaret("      ");
                 mChatTextEditor->insertTextAtCaret(event.stamp.toString(false, true, false));
@@ -1046,11 +1087,8 @@ void ChatView::processNewChatMessages(int index, int count)
             }
 
             mChatTextEditor->setColour(TextEditor::textColourId, usecolor);
-            if (fixedwidth) {
-                mChatTextEditor->setFont(mChatMesgFixedFont);
-            } else {
-                mChatTextEditor->setFont(mChatMesgFont);
-            }
+            const Font mesgFont = fixedwidth ? mChatMesgFixedFont : mChatMesgFont;
+            mChatTextEditor->setFont(mesgFont);
 
             if (parseStringForUrl(event.message, urlranges)) {
                 // found URLS, write them out in blue
@@ -1061,12 +1099,13 @@ void ChatView::processNewChatMessages(int index, int count)
                     int urllen = rng.getLength();
 
                     // write the text before the next url
-                    mChatTextEditor->insertTextAtCaret(event.message.substring(pos, urlstart));
+                    insertMarkedText(event.message.substring(pos, urlstart), mesgFont);
 
                     // write the URL
                     auto urlstr = event.message.substring(urlstart, urlstart+urllen);
                     auto posInChat = mChatTextEditor->getCaretPosition();
                     mChatTextEditor->setColour(TextEditor::textColourId, urlTextColour);
+                    mChatTextEditor->setFont(mesgFont);
                     mChatTextEditor->insertTextAtCaret(urlstr);
                     mChatTextEditor->setColour(TextEditor::textColourId, usecolor);
 
@@ -1079,15 +1118,16 @@ void ChatView::processNewChatMessages(int index, int count)
 
                 // write what's left
                 if (pos < event.message.length()) {
-                    mChatTextEditor->insertTextAtCaret(event.message.substring(pos));
+                    insertMarkedText(event.message.substring(pos), mesgFont);
                 }
             }
             else {
-                mChatTextEditor->insertTextAtCaret(event.message);
+                insertMarkedText(event.message, mesgFont);
             }
             mChatTextEditor->insertTextAtCaret("\n");
+            if (welcome) mChatTextEditor->insertTextAtCaret("\n");   // a blank line between the welcome and what follows
 
-            mLastChatEventFrom = event.from;
+            mLastChatEventFrom = welcome ? String() : event.from;   // the next line names its sender again
             mLastChatUserMessageStamp = nowtime;
         }
 
@@ -1111,6 +1151,61 @@ void ChatView::visibilityChanged()
     }
 }
 
+
+// A marker opens at the start of a word and closes at the end of one, on the same line, so names such as
+// my_file_name or 2*3*4 stay as typed. Styles can be nested.
+static bool sbMarkOpens (const String& s, int i, int len)
+{
+    if (i > 0) {
+        const juce_wchar p = s[i - 1];
+        if (! (CharacterFunctions::isWhitespace (p) || String ("([{\"'*_").containsChar (p))) return false;
+    }
+    return i + len < s.length() && ! CharacterFunctions::isWhitespace (s[i + len]);
+}
+
+static bool sbMarkCloses (const String& s, int i, int len)
+{
+    if (i == 0 || CharacterFunctions::isWhitespace (s[i - 1])) return false;
+    return i + len >= s.length() || ! CharacterFunctions::isLetterOrDigit (s[i + len]);
+}
+
+void ChatView::insertMarkedText (const String & text, const Font & base, int styleFlags)
+{
+    auto plain = [&](const String& t) {
+        if (t.isEmpty()) return;
+        mChatTextEditor->setFont (base.withStyle (base.getStyleFlags() | styleFlags));
+        mChatTextEditor->insertTextAtCaret (t);
+    };
+
+    int i = 0, start = 0;
+    const int n = text.length();
+    while (i < n) {
+        int mlen = 0, style = 0;
+        if (text[i] == '_' && i + 1 < n && text[i + 1] == '_') { mlen = 2; style = Font::underlined; }
+        else if (text[i] == '*') { mlen = 1; style = Font::bold; }
+        else if (text[i] == '_') { mlen = 1; style = Font::italic; }
+
+        if (mlen > 0 && sbMarkOpens (text, i, mlen)) {
+            const String marker = text.substring (i, i + mlen);
+            int lineEnd = text.indexOfChar (i, '\n');
+            if (lineEnd < 0) lineEnd = n;
+            int close = -1;
+            for (int j = text.indexOf (i + mlen, marker); j >= 0 && j < lineEnd; j = text.indexOf (j + 1, marker)) {
+                if (mlen == 1 && marker == "_" && ((j + 1 < n && text[j + 1] == '_') || text[j - 1] == '_')) continue;   // part of __
+                if (sbMarkCloses (text, j, mlen)) { close = j; break; }
+            }
+            if (close > i + mlen) {
+                plain (text.substring (start, i));
+                insertMarkedText (text.substring (i + mlen, close), base, styleFlags | style);
+                i = close + mlen;
+                start = i;
+                continue;
+            }
+        }
+        i += jmax (1, mlen);
+    }
+    plain (text.substring (start));
+}
 
 bool ChatView::parseStringForUrl(const String & str, Array<Range<int> > & retranges)
 {

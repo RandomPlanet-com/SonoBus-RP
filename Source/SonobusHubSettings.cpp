@@ -27,7 +27,9 @@
 #include <sys/wait.h>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -74,6 +76,7 @@ const std::vector<Binding>& bindings() {
         { { "udp_port",           "--udp-port",                        Tier::Restart }, &HubLaunchArgs::udpPort },
         { { "group",              "--group",                           Tier::Restart }, &HubLaunchArgs::groupName },
         { { "group_password",     "--group-password",                  Tier::Restart }, &HubLaunchArgs::groupPassword },
+        { { "welcome_message",    "--welcome-message",                 Tier::Live    }, &HubLaunchArgs::welcomeMessage },
         // ── audio ──
         { { "samplerate",         "--samplerate",                      Tier::Restart }, &HubLaunchArgs::sampleRate },
         { { "blocksize",          "--blocksize",                       Tier::Restart }, &HubLaunchArgs::blockSize },
@@ -180,6 +183,8 @@ const std::vector<FormSpec>& formSpecs() {
         { 0, "udp_port",           "Hub audio UDP port",                0, nullptr },
         { 0, "group",              "Stage name",                        0, nullptr },
         { 0, "group_password",     "Stage password",                    3, nullptr },
+        { 0, "welcome_message",    "Welcome message",                   4, nullptr,
+          "Shown in the chat of each player who joins this stage." },
         { 0, nullptr,              "Stage limits",                      0, nullptr },
         { 0, "max_players",        "Most players",                      0, nullptr },
         { 0, "max_channels",       "Most channels per player",          0, nullptr },
@@ -339,6 +344,7 @@ const char* tipFor(const std::string& key) {
         { "udp_port",           "The UDP port that carries audio. Forward it on your router for players outside your network." },
         { "group",              "The name of the stage players join." },
         { "group_password",     "Optional. Players must enter this password to join. A listed stage with a password shows as locked." },
+        { "welcome_message",    "Shown in the chat of each player who joins this stage. Several lines and links are fine, up to 2000 characters. Empty = no message." },
         { "max_players",        "The most players this stage takes at once. 0 = no limit. Each player's audio goes to every other player, so the hub's upload grows quickly with the player count." },
         { "forget_players_days", "Previous players not seen for this many days leave the list. 0 = never (the list keeps the last 1000 players). Removed players stay removed." },
         { "max_channels",       "The most channels one player may send. A stereo pair counts as 2. Extra channels are not passed on. 0 = no limit." },
@@ -387,9 +393,36 @@ const char* regionCodes(const std::string& country) {
     if (c == "CA") return "AB,BC,MB,NB,NL,NS,NT,NU,ON,PE,QC,SK,YT";
     return "";
 }
+// A state or province written out becomes its code, and fills an empty country ("San Jose, California" -> CA, US).
+static juce::String placeCode(const juce::String& country, const juce::String& region) {
+    static const char* const us[] = { "alabama","AL","alaska","AK","arizona","AZ","arkansas","AR","california","CA","colorado","CO",
+        "connecticut","CT","delaware","DE","district of columbia","DC","florida","FL","georgia","GA","hawaii","HI","idaho","ID",
+        "illinois","IL","indiana","IN","iowa","IA","kansas","KS","kentucky","KY","louisiana","LA","maine","ME","maryland","MD",
+        "massachusetts","MA","michigan","MI","minnesota","MN","mississippi","MS","missouri","MO","montana","MT","nebraska","NE",
+        "nevada","NV","new hampshire","NH","new jersey","NJ","new mexico","NM","new york","NY","north carolina","NC",
+        "north dakota","ND","ohio","OH","oklahoma","OK","oregon","OR","pennsylvania","PA","rhode island","RI","south carolina","SC",
+        "south dakota","SD","tennessee","TN","texas","TX","utah","UT","vermont","VT","virginia","VA","washington","WA",
+        "west virginia","WV","wisconsin","WI","wyoming","WY","puerto rico","PR", nullptr };
+    static const char* const ca[] = { "alberta","AB","british columbia","BC","manitoba","MB","new brunswick","NB",
+        "newfoundland and labrador","NL","newfoundland","NL","nova scotia","NS","ontario","ON","prince edward island","PE",
+        "quebec","QC","saskatchewan","SK","northwest territories","NT","nunavut","NU","yukon","YT", nullptr };
+    const juce::String r = region.trim().toLowerCase();
+    const auto* table = country == "US" ? us : country == "CA" ? ca : nullptr;
+    if (table == nullptr) return {};
+    for (int k = 0; table[k] != nullptr; k += 2) if (r == table[k]) return table[k + 1];
+    return {};
+}
 void normaliseLocation(HubLaunchArgs& a) {
     std::string city, region;
     splitLocation(a.location, city, region);
+    juce::String country = juce::String(a.stageCountry).trim().toUpperCase();
+    const juce::String reg = juce::String::fromUTF8(region.c_str()).trim();
+    if (country.isEmpty() && reg.isNotEmpty()) {   // fill the country from a US state or a Canadian province
+        if (placeCode("US", reg).isNotEmpty() || juce::StringArray::fromTokens(regionCodes("US"), ",", "").contains(reg.toUpperCase())) country = "US";
+        else if (placeCode("CA", reg).isNotEmpty()) country = "CA";
+        if (country.isNotEmpty()) a.stageCountry = country.toStdString();
+    }
+    if (const juce::String code = placeCode(country, reg); code.isNotEmpty()) region = code.toStdString();
     if (regionCodes(a.stageCountry)[0] != 0) region = juce::String::fromUTF8(region.c_str()).toUpperCase().toStdString();
     a.location = joinLocation(city, region);
 }
@@ -398,11 +431,23 @@ std::string locationProblem(const HubLaunchArgs& a) {
     splitLocation(a.location, city, region);
     if (city.empty()) return "Enter the city";
     if (region.empty()) return "Enter the state, province or region";
+    if (a.listStage && juce::String(a.stageCountry).trim().isEmpty()) return "Enter the country (two letters, for example US) to list this stage";
     const juce::String codes(regionCodes(a.stageCountry));
     if (codes.isNotEmpty() && !juce::StringArray::fromTokens(codes, ",", "").contains(juce::String::fromUTF8(region.c_str()).toUpperCase()))
         return juce::String(a.stageCountry).trim().toUpperCase() == "US" ? "State: enter the two-letter code, for example GA"
                                                                         : "Province: enter the two-letter code, for example ON";
     return {};
+}
+
+std::string tidyWelcome(const std::string& text) {
+    std::string s = juce::String::fromUTF8(text.c_str()).replace("\r\n", "\n").replaceCharacter('\r', '\n').trim().toStdString();
+    if (s.size() > kWelcomeMaxBytes) {
+        size_t n = kWelcomeMaxBytes;
+        while (n > 0 && ((unsigned char) s[n] & 0xC0) == 0x80) --n;   // never cut inside a character
+        s.resize(n);
+        while (!s.empty() && std::isspace((unsigned char) s.back())) s.pop_back();
+    }
+    return s;
 }
 
 // ─── string accessors ─────────────────────────────────────────────────────────
@@ -436,6 +481,7 @@ bool setValueFromString(HubLaunchArgs& a, const std::string& key, const juce::St
     }
     auto* b = findBinding(key);
     if (!b) return false;
+    if (key == "welcome_message") { a.welcomeMessage = tidyWelcome(text.toStdString()); return true; }
     if (std::holds_alternative<std::monostate>(b->member)) {
         auto s = text.trim().toLowerCase();
         if (s == "pcm")  { a.useOpus = false; return true; }
@@ -593,6 +639,7 @@ bool load(const juce::File& f, HubLaunchArgs& a, std::string& err) {
     }
     // The port checker has no user setting, so a saved address from an older version must not pin it.
     tmp.portCheckHelper = HubLaunchArgs().portCheckHelper;
+    tmp.welcomeMessage = tidyWelcome(tmp.welcomeMessage);
     // Unknown keys: warn (typo guard), never fatal.
     for (auto& nv : obj->getProperties()) {
         auto k = nv.name.toString();
@@ -677,6 +724,7 @@ void applyStageToHub(SonobusHubServer& hub, const HubLaunchArgs& a) {
     st.list = a.listStage;
     st.genre = a.stageGenre.empty() ? "Any" : a.stageGenre;
     st.description = a.stageDescription;
+    st.welcome = tidyWelcome(a.welcomeMessage);
     st.country = juce::String::fromUTF8(a.stageCountry.c_str()).trim().toUpperCase().toStdString();
     st.city = juce::String::fromUTF8(a.location.c_str()).trim().toStdString();
     st.names = a.stageNames == "Show" ? 1 : a.stageNames == "Hide" ? 2 : 0;
@@ -934,6 +982,10 @@ bool relaunchProcess(const std::vector<std::string>& argvIn, std::string& err) {
 
 
 // ─── Other stages on this computer ───────────────────────────────────────────
+static thread_local bool tWatchdogStart = false;                  // this start comes from the watchdog, not the operator
+static void noteStageLaunched(const juce::File& file);            // watchdog: just started, not up yet
+static void noteStageStartedByOperator(const juce::File& file);   // watchdog: Start pressed, crash count forgotten
+static bool stageGaveUp(const juce::File& file);                  // watchdog: crashed 3 times, left stopped
 static juce::File otherStagesFile() { return mainDataDir().getChildFile("other_stages.json"); }
 static juce::File stagesRoot() { return mainDataDir().getChildFile("stages"); }
 static juce::File deletedStagesRoot() { return mainDataDir().getChildFile("stages-deleted"); }
@@ -1071,10 +1123,11 @@ static OtherStage describeStage(const StageEntry& e) {
     std::string err;
     if (!e.file.existsAsFile()) st.problem = "settings file not found";
     else if (!load(e.file, a, err)) st.problem = err.empty() ? "settings file cannot be read" : err;
-    else { st.group = a.groupName; st.serverPort = a.localServerPort; st.udpPort = a.udpPort; st.webPort = a.webPassword.empty() ? 0 : a.webPort; }
+    else { st.group = a.groupName; st.locked = !a.groupPassword.empty(); st.serverPort = a.localServerPort; st.udpPort = a.udpPort; st.webPort = a.webPassword.empty() ? 0 : a.webPort; }
     const juce::File dir = e.file.getParentDirectory();
     st.running = livePid(dir) > 0;
     st.stopping = st.running && dir.getChildFile("QUIT").existsAsFile();
+    if (!st.running && st.problem.empty() && stageGaveUp(e.file)) st.problem = "crashed 3 times, not restarted";
     if (st.running) {   // its own figures, a few seconds old at most
         const juce::var s = juce::JSON::parse(dir.getChildFile("hub_status.json").loadFileAsString());
         const juce::int64 t = (juce::int64) s.getProperty("t", 0);
@@ -1085,6 +1138,16 @@ static OtherStage describeStage(const StageEntry& e) {
             st.portState = (int) s.getProperty("ports", -1);
             st.portRuns = (int) s.getProperty("portRuns", 0);
             st.portText = s.getProperty("portText", juce::var()).toString().toStdString();
+            if (const auto* arr = s.getProperty("who", juce::var()).getArray()) {
+                for (const auto& v : *arr) {
+                    StagePlayer p;
+                    p.user = v.getProperty("u", juce::var()).toString().toStdString();
+                    p.instrument = v.getProperty("i", juce::var()).toString().toStdString();
+                    p.joinedMs = (long long) (juce::int64) v.getProperty("j", 0);
+                    p.lan = (bool) v.getProperty("lan", false);
+                    if (!p.user.empty()) st.who.push_back(std::move(p));
+                }
+            }
         }
     }
     return st;
@@ -1164,6 +1227,8 @@ bool startOtherStage(const juce::File& file, std::string& err) {
     if (livePid(dir) > 0) { err = "that stage is running"; return false; }
     dir.getChildFile("QUIT").deleteFile();
     markStageOfThisHub(file);
+    noteStageLaunched(file);
+    if (!tWatchdogStart) noteStageStartedByOperator(file);
     const std::string path = file.getFullPathName().toStdString();
 #if defined(__APPLE__)
     // Through Launch Services, as a separate copy of this app (the same way a script would start it)
@@ -1264,11 +1329,14 @@ bool stopOtherStage(const juce::File& file, std::string& err) {
 
 bool showOtherStage(const juce::File& file, std::string& err, bool settings) {
     err.clear();
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     if (!canStartOtherStages()) { err = "only the main hub opens other stages"; return false; }
     if (!listed(file)) { err = "that stage is not in the list"; return false; }
     const juce::File dir = file.getParentDirectory();
     if (livePid(dir) <= 0) { err = "that stage is not running"; return false; }
+#if defined(_WIN32)
+    AllowSetForegroundWindow(ASFW_ANY);   // the stage's window may come to the front
+#endif
     if (!dir.getChildFile("SHOW").replaceWithText(settings ? "settings\n" : "show\n", false, false, "\n")) { err = "could not write to " + dir.getFullPathName().toStdString(); return false; }
     std::cout << "[HUB-STAGES] open window " << file.getFullPathName().toStdString() << " (SHOW written)\n";
     return true;
@@ -1277,6 +1345,18 @@ bool showOtherStage(const juce::File& file, std::string& err, bool settings) {
     err = "this system has no background stage windows to open";
     return false;
 #endif
+}
+
+bool showMainHub(std::string& err) {
+    err.clear();
+    const juce::File dir = stageMainFolder();
+    if (dir == juce::File()) { err = "this hub is not a stage of a main hub"; return false; }
+#if defined(_WIN32)
+    AllowSetForegroundWindow(ASFW_ANY);   // the main hub's window may come to the front
+#endif
+    if (!dir.getChildFile("SHOW").replaceWithText("stages\n", false, false, "\n")) { err = "could not write to " + dir.getFullPathName().toStdString(); return false; }
+    std::cout << "[HUB-STAGES] main hub window asked forward (SHOW written)\n";
+    return true;
 }
 
 // ── New stage / Delete stage ──
@@ -1477,6 +1557,7 @@ bool createStage(const NewStage& in, OtherStage& made, std::string& err) {
     if (const std::string problem = locationProblem(a); !problem.empty()) { dir.deleteRecursively(); err = problem; return false; }
     a.stageGenre = HubLaunchArgs().stageGenre;
     a.stageDescription.clear();
+    a.welcomeMessage.clear();
     a.stageHubId.clear();
     a.stageHubKey.clear();
     if (const std::string problem = validate(a); !problem.empty()) { dir.deleteRecursively(); err = problem; return false; }
@@ -1614,15 +1695,27 @@ void writeInstancePid() {
 #else
     const long pid = (long) getpid();
 #endif
+    dataDir().getChildFile("STOPPED").deleteFile();   // running: an end without this file is a crash
     dataDir().getChildFile("hub.pid").replaceWithText(juce::String(pid) + "\n", false, false, "\n");
 }
 
-void writeStageStatus(int players, double inBytesPerSec, double outBytesPerSec, int portState, int portRuns, const std::string& portText) {
+void writeStageStatus(int players, double inBytesPerSec, double outBytesPerSec, int portState, int portRuns, const std::string& portText,
+                      const std::vector<StagePlayer>& who) {
     if (!isStage()) return;
+    juce::Array<juce::var> list;
+    for (const auto& p : who) {
+        auto* o = new juce::DynamicObject();
+        o->setProperty("u", juce::String::fromUTF8(p.user.c_str()));
+        o->setProperty("i", juce::String::fromUTF8(p.instrument.c_str()));
+        o->setProperty("j", (juce::int64) p.joinedMs);
+        o->setProperty("lan", p.lan);
+        list.add(juce::var(o));
+    }
     const juce::String s = "{\"t\":" + juce::String(juce::Time::currentTimeMillis() / 1000) + ",\"players\":" + juce::String(players)
                          + ",\"in\":" + juce::String((juce::int64) inBytesPerSec) + ",\"out\":" + juce::String((juce::int64) outBytesPerSec)
                          + ",\"ports\":" + juce::String(portState) + ",\"portRuns\":" + juce::String(portRuns)
-                         + ",\"portText\":" + juce::JSON::toString(juce::var(juce::String::fromUTF8(portText.c_str())), true) + "}\n";
+                         + ",\"portText\":" + juce::JSON::toString(juce::var(juce::String::fromUTF8(portText.c_str())), true)
+                         + ",\"who\":" + juce::JSON::toString(juce::var(list), true) + "}\n";
     dataDir().getChildFile("hub_status.json").replaceWithText(s, false, false, "\n");
 }
 
@@ -1641,6 +1734,7 @@ bool checkStagePorts(const juce::File& file, std::string& err) {
 // restart of the computer, an update, or a quit of everything).
 void restartStartedStages() {
     if (!canManageOtherStages()) return;
+    pauseStageWatchdog(false);
     // An entry from an earlier build that lives outside stages/ and carries no marker: on a Mac or Windows computer
     // it is this hub's stage and gets the marker; on Linux it is a hub of its own (a service with its own settings
     // file) and leaves the list.
@@ -1697,11 +1791,113 @@ static int stopStagesKeepStarted(const char* why) {
 
 void stopChildStages() {
 #if !defined(__APPLE__) && !defined(_WIN32)
+    pauseStageWatchdog(true);
     stopStagesKeepStarted("with this hub");
 #endif
 }
 
-int stopStagesForUpdate() { return stopStagesKeepStarted("for the update: they start again with the new hub"); }
+int stopStagesForUpdate() { pauseStageWatchdog(true); return stopStagesKeepStarted("for the update: they start again with the new hub"); }
+
+// ── A stage that stopped in order leaves the file STOPPED in its folder; a crash leaves none ──
+void noteStageStoppedInOrder() {
+    if (isStage()) dataDir().getChildFile("STOPPED").replaceWithText("stopped\n", false, false, "\n");
+}
+
+// ── Crash watchdog (main hub) ──
+// A stage marked as started that is gone without the STOPPED file crashed: it is started again after 5 s, after a
+// second crash within 10 minutes after 30 s; a third crash within 10 minutes is the last: "crashed 3 times, not
+// restarted" until the operator presses Start. A start that brings no running stage is tried again after 2 minutes.
+// A stage stopped on purpose is never touched: Stop, Delete and Quit in its own window take its mark away, and
+// every stop in order (QUIT file, a restart of itself, Move ports, an update, the service stopping) leaves STOPPED.
+namespace {
+struct StageWatch {
+    juce::int64 downAt = 0, nextTry = 0, launchedAt = 0;
+    std::deque<juce::int64> crashes;
+    bool gaveUp = false;
+};
+std::mutex& watchMutex() { static std::mutex m; return m; }
+std::map<std::string, StageWatch>& watchMap() { static std::map<std::string, StageWatch> m; return m; }
+std::atomic<bool> gWatchRun{false}, gWatchPaused{false}, gWatchDone{true};
+
+void watchStagesOnce() {
+    const juce::int64 now = juce::Time::currentTimeMillis();
+    for (const auto& e : savedStageEntries()) {
+        if (!e.run || !e.file.existsAsFile()) continue;
+        const juce::File dir = e.file.getParentDirectory();
+        const std::string key = e.file.getFullPathName().toStdString();
+        const bool live = livePid(dir) > 0;
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> lk(watchMutex());
+            StageWatch& w = watchMap()[key];
+            if (live) { w.downAt = 0; w.nextTry = 0; if (w.gaveUp) { w.gaveUp = false; w.crashes.clear(); } continue; }
+            if (w.gaveUp || now - w.launchedAt < 15000) continue;            // given up, or just started and not up yet
+            if (dir.getChildFile("STOPPED").existsAsFile()) { w.downAt = 0; w.nextTry = 0; continue; }   // stopped in order
+            if (w.downAt == 0) {
+                w.downAt = now;
+                while (!w.crashes.empty() && now - w.crashes.front() > 600000) w.crashes.pop_front();
+                w.crashes.push_back(now);
+                const int n = (int) w.crashes.size();
+                if (n >= 3) {
+                    w.gaveUp = true;
+                    std::cout << "[HUB-STAGES] " << key << " crashed 3 times in 10 minutes, not restarted (Start in the Other stages list starts it)\n";
+                    continue;
+                }
+                w.nextTry = now + (n == 1 ? 5000 : 30000);
+                std::cout << "[HUB-STAGES] " << key << " stopped without being asked (crash " << n << "): starting it again in " << (n == 1 ? 5 : 30) << " s\n";
+            } else if (w.nextTry != 0 && now >= w.nextTry) {
+                w.nextTry = now + 120000;   // if this start brings no running stage
+                start = true;
+            }
+        }
+        if (start) {
+            std::string err;
+            tWatchdogStart = true;
+            const bool ok = startOtherStage(e.file, err);
+            tWatchdogStart = false;
+            if (ok) std::cout << "[HUB-STAGES] started again after a crash: " << key << "\n";
+            else std::cout << "[HUB-STAGES] could not start " << key << " again after a crash: " << err << " (next try in 2 minutes)\n";
+        }
+    }
+}
+}
+
+static void noteStageLaunched(const juce::File& file) {
+    std::lock_guard<std::mutex> lk(watchMutex());
+    StageWatch& w = watchMap()[file.getFullPathName().toStdString()];
+    w.launchedAt = juce::Time::currentTimeMillis();
+    w.downAt = 0;
+}
+static void noteStageStartedByOperator(const juce::File& file) {
+    std::lock_guard<std::mutex> lk(watchMutex());
+    StageWatch& w = watchMap()[file.getFullPathName().toStdString()];
+    w.gaveUp = false;
+    w.crashes.clear();
+}
+static bool stageGaveUp(const juce::File& file) {
+    std::lock_guard<std::mutex> lk(watchMutex());
+    const auto it = watchMap().find(file.getFullPathName().toStdString());
+    return it != watchMap().end() && it->second.gaveUp;
+}
+
+void pauseStageWatchdog(bool paused) { gWatchPaused = paused; }
+
+void startStageWatchdog() {
+    if (!canManageOtherStages() || gWatchRun.exchange(true)) return;
+    gWatchDone = false;
+    std::thread([]() {
+        while (gWatchRun.load()) {
+            for (int i = 0; i < 10 && gWatchRun.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (gWatchRun.load() && !gWatchPaused.load()) watchStagesOnce();
+        }
+        gWatchDone = true;
+    }).detach();
+}
+
+void stopStageWatchdog() {
+    if (!gWatchRun.exchange(false)) return;
+    for (int i = 0; i < 50 && !gWatchDone.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
 
 } // namespace hub_settings
 } // namespace sb_hub_gui
