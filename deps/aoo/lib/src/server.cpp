@@ -392,6 +392,10 @@ std::mutex g_sbKickMutex;
 std::vector<std::string> g_sbKickNames;   // closed by the run loop, which owns the client list
 std::atomic<server*> g_sbServer{nullptr};
 std::atomic<int> g_sbStageMaxPlayers{0};
+// A stage ping that reaches the hub through the hub's own router is answered with the hub's local address too
+std::mutex g_sbLanHintMutex;
+std::string g_sbLanHintGateway, g_sbLanHintPublic, g_sbLanHintHost;
+int g_sbLanHintPort = 0;
 static const char* const kSbHubUser = "SonoBus-Hub";   // the hub's own member of its group
 // Connection/security events (tcp connect, login, join/refusals, leave, disconnect, bad
 // messages) -> SonobusHubServer::connLog (timestamped [HUB-CONN] lines in hub.log + the web page's Log tab).
@@ -957,10 +961,20 @@ void server::receive_udp(){
                             for (auto& u : g->users()) if (u && u->name != kSbHubUser) ++players;
                         }
                     }
-                    char out[64];
+                    std::string lanHost; int lanPort = 0;   // only for a ping from this hub's own site
+                    {
+                        std::lock_guard<std::mutex> lk(g_sbLanHintMutex);
+                        const std::string from = addr.name();
+                        if (!g_sbLanHintHost.empty() && !from.empty() && (from == g_sbLanHintGateway || from == g_sbLanHintPublic)) {
+                            lanHost = g_sbLanHintHost; lanPort = g_sbLanHintPort;
+                        }
+                    }
+                    char out[192];
                     osc::OutboundPacketStream pong(out, sizeof(out));
                     pong << osc::BeginMessage("/sb/stage/pong") << token << (int32_t)players
-                         << (int32_t)g_sbStageMaxPlayers.load(std::memory_order_relaxed) << osc::EndMessage;
+                         << (int32_t)g_sbStageMaxPlayers.load(std::memory_order_relaxed);
+                    if (!lanHost.empty()) pong << lanHost.c_str() << (int32_t)lanPort;   // older players read only the first three
+                    pong << osc::EndMessage;
                     sendto(udpsocket_, pong.Data(), (int)pong.Size(), 0, (const struct sockaddr *)&addr.address, addr.length);
                 } catch (const osc::Exception&) {
                 }
@@ -1679,6 +1693,13 @@ extern "C" void aoo_sb_set_fwprobe_req_handler(aoo::net::sb_fwprobe_req_fn fn){
 }
 extern "C" void aoo_sb_set_join_gate(aoo::net::sb_join_gate_fn fn){
     aoo::net::g_sbJoinGate.store(fn, std::memory_order_release);
+}
+extern "C" void aoo_sb_set_lan_hint(const char* gatewayIp, const char* publicIp, const char* lanHost, int lanPort){
+    std::lock_guard<std::mutex> lk(aoo::net::g_sbLanHintMutex);
+    aoo::net::g_sbLanHintGateway = gatewayIp ? gatewayIp : "";
+    aoo::net::g_sbLanHintPublic = publicIp ? publicIp : "";
+    aoo::net::g_sbLanHintHost = lanHost ? lanHost : "";
+    aoo::net::g_sbLanHintPort = lanPort;
 }
 extern "C" void aoo_sb_set_stage_max_players(int n){
     aoo::net::g_sbStageMaxPlayers.store(n, std::memory_order_relaxed);

@@ -521,6 +521,22 @@ public:
     bool setCurrentUsername(const String & name);
     String getCurrentUsername() const { return mCurrentUsername; }
 
+    // The name others see. On a hub stage it can be changed without leaving; the name the stage was joined
+    // with (getCurrentUsername) stays this player's identity until it leaves.
+    String getShownUsername() const;
+    bool renameOnStage(const String & name);                     // false when not on a hub stage
+    enum StageRenameState { StageRenameNone = 0, StageRenameAsked, StageRenameDone, StageRenameRefused };
+    int getStageRenameState() const { return mStageRenameState.load(); }
+    String getShownNameForUser(const String & user) const;       // by the name a player joined with
+    String getJoinNameForShown(const String & shown) const;      // the other way round; unknown names come back as given
+    int getHubColorIndex(const String & joinName) const;         // the stage's colour for a player (0..9), -1 = not given
+    std::map<String, int> mHubColors;            // join name -> colour index from the hub; guarded by mInstrumentLock
+    String mHubColorsKey;                        // the hub address they belong to: kept through a rejoin, so earlier lines keep their colours
+    std::atomic<int> mHubColorGen { 0 };         // counts changes: the chat is drawn again
+    void sbSetHubColor(const String & who, int idx);
+    int getHubColorGen() const { return mHubColorGen.load(); }
+    String getRemotePeerShownName(int index) const;
+
     // The instrument this player shows to others (stage list, hub). Empty = not given.
     void setCurrentInstrument(const String & instrument);
     String getCurrentInstrument() const;
@@ -1566,6 +1582,21 @@ private:
     String mCurrentUsername;
     CriticalSection mInstrumentLock;
     String mCurrentInstrument;
+    String mStageShownName;    // empty = the name the stage was joined with; guarded by mInstrumentLock
+    // A hub at this player's own site answers with its local address; later joins to the same address go there
+    String mRouteTypedKey;                      // "host:port" as asked for, before any local swap
+    std::map<String, String> mLanRoutes;        // typed "host:port" -> local "host:port"; guarded by mLanRoutesLock
+    bool mLanRoutesLoaded = false;
+    CriticalSection mLanRoutesLock;
+    void sbLanRoutesLoad();
+    void sbLanRoutesSave();
+    bool sbLanRouteFor(const String & host, int port, String & lanHost, int & lanPort);
+    bool sbAskHubForLanAddress(const String & host, int port, String & lanHost, int & lanPort, bool & answered);
+    String mStageNameAsked, mStageNameWas;
+    std::atomic<int> mStageRenameState { StageRenameNone };
+    std::map<String, String> mStageShownNames;   // other players' changed names by join name; same lock
+    bool sbSetShownNameForUser(const String & user, const String & shown, String * before = nullptr);   // true = changed
+    void sbPostNameChange(const String & before, const String & now, const String & joinName);   // one quiet chat line
     // Our own to/from-hub legs as the hub computes them (/sb/hxlat self entry)
     float mSelfHubLatToMs = -1.0f, mSelfHubLatFromMs = -1.0f, mSelfHubRttMs = -1.0f;
     int64_t mSelfHubUplinkLost = -1;

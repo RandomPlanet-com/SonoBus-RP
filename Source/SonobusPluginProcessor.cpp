@@ -2081,7 +2081,93 @@ bool SonobusAudioProcessor::setCurrentUsername(const String & name)
     if (mIsConnectedToServer) return false;
 
     mCurrentUsername = name.substring(0, kMaxUserNameLength);
+    const ScopedLock sl (mInstrumentLock);
+    mStageShownName.clear();
     return true;
+}
+
+String SonobusAudioProcessor::getShownUsername() const
+{
+    const ScopedLock sl (mInstrumentLock);
+    return mStageShownName.isNotEmpty() ? mStageShownName : mCurrentUsername;
+}
+
+// Control path only: the new name rides on the version report to the hub, which tells the others.
+bool SonobusAudioProcessor::renameOnStage(const String & nameAsGiven)
+{
+    const String name = nameAsGiven.trim().substring(0, kMaxUserNameLength).trim();
+    if (name.isEmpty() || !mIsConnectedToServer || !isHostedMixModeEnabled()) return false;
+    {
+        const ScopedLock sl (mInstrumentLock);
+        mStageNameWas = mStageShownName.isNotEmpty() ? mStageShownName : mCurrentUsername;
+        mStageNameAsked = name;
+        mStageShownName = (name == mCurrentUsername) ? String() : name;
+    }
+    mStageRenameState = StageRenameAsked;
+    sbSendVersionToHub();
+    return true;
+}
+
+String SonobusAudioProcessor::getShownNameForUser(const String & user) const
+{
+    const ScopedLock sl (mInstrumentLock);
+    if (user == mCurrentUsername) return mStageShownName.isNotEmpty() ? mStageShownName : user;
+    const auto it = mStageShownNames.find(user);
+    return it != mStageShownNames.end() ? it->second : user;
+}
+
+String SonobusAudioProcessor::getJoinNameForShown(const String & shown) const
+{
+    const ScopedLock sl (mInstrumentLock);
+    if (mStageShownName.isNotEmpty() && shown == mStageShownName) return mCurrentUsername;
+    for (const auto & kv : mStageShownNames) if (kv.second == shown) return kv.first;
+    return shown;
+}
+
+void SonobusAudioProcessor::sbSetHubColor(const String & who, int idx)
+{
+    if (idx < 0 || who.isEmpty()) return;
+    bool changed = false;
+    {
+        const ScopedLock sl (mInstrumentLock);
+        const auto it = mHubColors.find(who);
+        changed = it == mHubColors.end() || it->second != idx;
+        if (changed) mHubColors[who] = idx;
+    }
+    if (changed) mHubColorGen.fetch_add(1);
+}
+
+int SonobusAudioProcessor::getHubColorIndex(const String & joinName) const
+{
+    const ScopedLock sl (mInstrumentLock);
+    const auto it = mHubColors.find(joinName);
+    return it != mHubColors.end() ? it->second : -1;
+}
+
+String SonobusAudioProcessor::getRemotePeerShownName(int index) const
+{
+    return getShownNameForUser(getRemotePeerUserName(index));
+}
+
+bool SonobusAudioProcessor::sbSetShownNameForUser(const String & user, const String & shown, String * before)
+{
+    const ScopedLock sl (mInstrumentLock);
+    const auto it = mStageShownNames.find(user);
+    const String was = it != mStageShownNames.end() ? it->second : user;
+    if (before != nullptr) *before = was;
+    if (was == shown || shown.isEmpty()) return false;
+    if (shown == user) mStageShownNames.erase(user);
+    else mStageShownNames[user] = shown;
+    return true;
+}
+
+void SonobusAudioProcessor::sbPostNameChange(const String & before, const String & now, const String & joinName)
+{
+    SBChatEvent ev (SBChatEvent::SystemType, getCurrentJoinedGroup(), joinName, "", "", before + " " + TRANS("is now") + " " + now);
+    ev.stage = sbChatStageKey();
+    ev.tags = "rename";   // the whole line in the player's colour
+    mAllChatEvents.add (ev);
+    clientListeners.call (&SonobusAudioProcessor::ClientListener::sbChatEventReceived, this, ev);
 }
 
 
@@ -2095,9 +2181,89 @@ int SonobusAudioProcessor::getServerPortAsTyped() const
     return mServerEndpoint ? mServerEndpoint->port : 0;
 }
 
-bool SonobusAudioProcessor::connectToServer(const String & host, int port, const String & usernameAsGiven, const String & passwd)
+bool SonobusAudioProcessor::sbLanRouteFor(const String & host, int port, String & lanHost, int & lanPort)
 {
-    const String username = usernameAsGiven.substring(0, kMaxUserNameLength);
+    sbLanRoutesLoad();
+    const ScopedLock rl (mLanRoutesLock);
+    const auto it = mLanRoutes.find(host + ":" + String(port));
+    if (it == mLanRoutes.end()) return false;
+    lanHost = it->second.upToLastOccurrenceOf(":", false, false);
+    lanPort = it->second.fromLastOccurrenceOf(":", false, false).getIntValue();
+    return lanHost.isNotEmpty() && lanPort > 0;
+}
+
+// One stage ping before the connection: a hub at this player's own site answers with its local address
+// ("/sb/stage/pong h:token i:players i:max [s:lanHost i:lanPort]"). At most 250 ms; older hubs answer without it.
+bool SonobusAudioProcessor::sbAskHubForLanAddress(const String & host, int port, String & lanHost, int & lanPort, bool & answered)
+{
+    answered = false;
+    DatagramSocket sock (false);
+    if (! sock.bindToPort (0)) return false;
+    char pkt[28] = { 0 };
+    std::memcpy (pkt, "/sb/stage/ping", 14);
+    pkt[16] = ','; pkt[17] = 'h';
+    const int64 token = Time::currentTimeMillis();
+    for (int b = 0; b < 8; ++b) pkt[20 + b] = (char) ((token >> (8 * (7 - b))) & 0xff);
+    if (sock.write (host, port, pkt, (int) sizeof (pkt)) != (int) sizeof (pkt)) return false;
+    const double t0 = Time::getMillisecondCounterHiRes();
+    for (;;) {
+        const double left = 250.0 - (Time::getMillisecondCounterHiRes() - t0);
+        if (left <= 0.0) break;
+        const int ready = sock.waitUntilReady (true, (int) left + 1);
+        if (ready < 0) break;
+        if (ready == 0) continue;
+        char in[256];
+        String fromHost; int fromPort = 0;
+        const int got = sock.read (in, (int) sizeof (in), false, fromHost, fromPort);
+        if (got < 32 || std::memcmp (in, "/sb/stage/pong", 14) != 0) continue;
+        try {
+            osc::ReceivedPacket packet (in, (size_t) got);
+            osc::ReceivedMessage msg (packet);
+            auto it = msg.ArgumentsBegin();
+            if (it == msg.ArgumentsEnd() || ! it->IsInt64() || (int64) it->AsInt64() != token) continue;
+            answered = true;
+            ++it;
+            if (it != msg.ArgumentsEnd()) ++it;   // players
+            if (it != msg.ArgumentsEnd()) ++it;   // most players
+            if (it != msg.ArgumentsEnd() && it->IsString()) {
+                lanHost = String (CharPointer_UTF8 (it->AsString())).trim();
+                ++it;
+                if (it != msg.ArgumentsEnd() && it->IsInt32()) lanPort = it->AsInt32();
+            }
+        } catch (const osc::Exception &) { continue; }
+        return lanHost.isNotEmpty() && lanPort > 0 && lanPort <= 65535;
+    }
+    return false;
+}
+
+void SonobusAudioProcessor::sbLanRoutesLoad()
+{
+    const ScopedLock rl (mLanRoutesLock);
+    if (mLanRoutesLoaded) return;
+    mLanRoutesLoaded = true;
+    const auto v = JSON::parse(mSupportDir.getChildFile("lan-routes.json"));
+    if (auto* o = v.getDynamicObject())
+        for (const auto & p : o->getProperties()) mLanRoutes[p.name.toString()] = p.value.toString();
+}
+
+void SonobusAudioProcessor::sbLanRoutesSave()
+{
+    DynamicObject::Ptr o = new DynamicObject();
+    {
+        const ScopedLock rl (mLanRoutesLock);
+        for (const auto & kv : mLanRoutes) o->setProperty(kv.first, kv.second);
+    }
+    mSupportDir.getChildFile("lan-routes.json").replaceWithText(JSON::toString(var(o.get())));
+}
+
+bool SonobusAudioProcessor::connectToServer(const String & hostAsAsked, int portAsAsked, const String & usernameAsGiven, const String & passwd)
+{
+    String host = hostAsAsked; int port = portAsAsked;   // the local address may replace them below
+    String username = usernameAsGiven.substring(0, kMaxUserNameLength);
+    {   // A reconnect after a rename on the stage joins under the new name: one name from then on
+        const ScopedLock sl (mInstrumentLock);
+        if (mStageShownName.isNotEmpty() && username == mCurrentUsername) username = mStageShownName;
+    }
     sbApplyPeerFilter();   // Every (re)connect, so a hosted player never handshakes another player directly
     if (!mAooClient) {
         sbLaunchConnectFailed("no aoo client");   
@@ -2119,8 +2285,35 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
     if (!mRecoveringFromServerLoss) {
         removeAllRemotePeers();
     }
-    
-    
+
+    // A hub at this site that told us its local address earlier: go there directly when it answers
+    mRouteTypedKey = hostAsAsked + ":" + String(portAsAsked);
+    {   // Ask first: at the hub's own site the very first join already takes the local network
+        String askHost; int askPort = 0; bool answered = false;
+        const bool told = sbAskHubForLanAddress(hostAsAsked, portAsAsked, askHost, askPort, answered);
+        sbLanRoutesLoad();
+        bool changed = false;
+        {
+            const ScopedLock rl (mLanRoutesLock);
+            const String value = askHost + ":" + String(askPort);
+            const auto it = mLanRoutes.find(mRouteTypedKey);
+            if (told && mRouteTypedKey != value) { changed = it == mLanRoutes.end() || it->second != value; if (changed) mLanRoutes[mRouteTypedKey] = value; }
+            else if (answered && ! told && it != mLanRoutes.end()) { mLanRoutes.erase(it); changed = true; }   // no longer at the hub's site
+        }
+        if (changed) sbLanRoutesSave();
+        if (sbDiagOn()) fprintf(stderr, "[SB-LANROUTE] asked %s: %s\n", mRouteTypedKey.toRawUTF8(), told ? (askHost + ":" + String(askPort)).toRawUTF8() : (answered ? "not at the hub's site" : "no answer"));
+    }
+    {
+        String lanHost; int lanPort = 0;
+        if (sbLanRouteFor(hostAsAsked, portAsAsked, lanHost, lanPort)) {
+            StreamingSocket probe;
+            if (probe.connect(lanHost, lanPort, 300)) { host = lanHost; port = lanPort; }
+            probe.close();
+            if (sbDiagOn()) fprintf(stderr, "[SB-LANROUTE] %s -> %s:%d %s\n", mRouteTypedKey.toRawUTF8(), lanHost.toRawUTF8(), lanPort,
+                                    host == lanHost ? "(local)" : "(no answer: public address)");
+        }
+    }
+
     mServerEndpoint->ipaddr = host;
     mServerEndpoint->port = port;
     {   // Remember the address we reach the hub at (numeric hosts only; the hub row's endpoint refines it)
@@ -2129,6 +2322,14 @@ bool SonobusAudioProcessor::connectToServer(const String & host, int port, const
     }
     mServerEndpoint->peer.reset();
 
+    {   // a reconnect under the same name keeps the name shown on the stage
+        const ScopedLock sl (mInstrumentLock);
+        if (username != mCurrentUsername || username == mStageShownName) mStageShownName.clear();
+        mStageNameAsked.clear();
+        mStageShownNames.clear();
+        if (mHubColorsKey != mRouteTypedKey) { mHubColors.clear(); mHubColorsKey = mRouteTypedKey; }
+    }
+    mStageRenameState = StageRenameNone;
     mCurrentUsername = username;
 
     const bool connectWasInFlight = launchRaceFixOn() && mServerConnectInFlight.get() != 0;
@@ -10600,6 +10801,15 @@ bool SonobusAudioProcessor::handleReceivedPacket(const char * buf, int nbytes, E
 // Hub -> every player the moment someone starts/stops recording: "/sb/hxrecstate s:userName i:rec".
 #define SONOBUS_MSG_HXRECSTATE "/hxrecstate"
 #define SONOBUS_MSG_HXRECSTATE_LEN 11
+// Hub -> every player when someone changes their shown name: "/sb/hxnamestate s:userName s:shownName i:announce".
+#define SONOBUS_MSG_HXNAMESTATE "/hxnamestate"
+// Hub -> a player that reached it through the hub's own router: "/sb/hxlanhost s:host i:port", its local address.
+#define SONOBUS_MSG_HXLANHOST "/hxlanhost"
+// Hub -> players: "/sb/hxcolor s:userName i:index", that player's chat colour on the stage.
+#define SONOBUS_MSG_HXCOLOR "/hxcolor"
+#define SONOBUS_MSG_HXCOLOR_LEN 8
+#define SONOBUS_MSG_HXLANHOST_LEN 10
+#define SONOBUS_MSG_HXNAMESTATE_LEN 12
 // Hub -> every player when someone mutes/unmutes their send: "/sb/hxsendmutestate s:userName i:muted".
 #define SONOBUS_MSG_HXSENDMUTESTATE "/hxsendmutestate"
 #define SONOBUS_MSG_HXSENDMUTESTATE_LEN 16
@@ -10628,6 +10838,9 @@ enum {
     SONOBUS_MSGTYPE_HXHUBHELLO,
     SONOBUS_MSGTYPE_HXLAT,
     SONOBUS_MSGTYPE_HXRECSTATE,
+    SONOBUS_MSGTYPE_HXNAMESTATE,
+    SONOBUS_MSGTYPE_HXLANHOST,
+    SONOBUS_MSGTYPE_HXCOLOR,
     SONOBUS_MSGTYPE_HXSENDMUTESTATE,   
     SONOBUS_MSGTYPE_HXREMOVED,
     SONOBUS_MSGTYPE_FWPROBEREQ   
@@ -10730,6 +10943,27 @@ static int32_t sonobusOscParsePattern(const char *msg, int32_t n, int32_t & rett
         {
             rettype = SONOBUS_MSGTYPE_HXRECSTATE;
             offset += SONOBUS_MSG_HXRECSTATE_LEN;
+            return offset;
+        }
+        else if (n >= (offset + SONOBUS_MSG_HXCOLOR_LEN)
+            && !memcmp(msg + offset, SONOBUS_MSG_HXCOLOR, SONOBUS_MSG_HXCOLOR_LEN))
+        {
+            rettype = SONOBUS_MSGTYPE_HXCOLOR;
+            offset += SONOBUS_MSG_HXCOLOR_LEN;
+            return offset;
+        }
+        else if (n >= (offset + SONOBUS_MSG_HXLANHOST_LEN)
+            && !memcmp(msg + offset, SONOBUS_MSG_HXLANHOST, SONOBUS_MSG_HXLANHOST_LEN))
+        {
+            rettype = SONOBUS_MSGTYPE_HXLANHOST;
+            offset += SONOBUS_MSG_HXLANHOST_LEN;
+            return offset;
+        }
+        else if (n >= (offset + SONOBUS_MSG_HXNAMESTATE_LEN)
+            && !memcmp(msg + offset, SONOBUS_MSG_HXNAMESTATE, SONOBUS_MSG_HXNAMESTATE_LEN))
+        {
+            rettype = SONOBUS_MSGTYPE_HXNAMESTATE;
+            offset += SONOBUS_MSG_HXNAMESTATE_LEN;
             return offset;
         }
         else if (n >= (offset + SONOBUS_MSG_HXSENDMUTESTATE_LEN)
@@ -11101,6 +11335,60 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             }
             return true;
         }
+        else if (type == SONOBUS_MSGTYPE_HXCOLOR) {
+            auto it = message.ArgumentsBegin();
+            if (it == message.ArgumentsEnd() || !it->IsString()) return true;
+            const String who = CharPointer_UTF8((it++)->AsString());
+            if (it == message.ArgumentsEnd() || !it->IsInt32()) return true;
+            sbSetHubColor(who, it->AsInt32());
+            return true;
+        }
+        else if (type == SONOBUS_MSGTYPE_HXLANHOST) {
+            // We reached the hub through its own router: remember its local address for the next join to this address
+            auto it = message.ArgumentsBegin();
+            if (it == message.ArgumentsEnd() || !it->IsString()) return true;
+            const String lanHost = String(CharPointer_UTF8((it++)->AsString())).trim();
+            const int lanPort = (it != message.ArgumentsEnd() && it->IsInt32()) ? it->AsInt32() : 0;
+            if (lanHost.isEmpty() || lanPort <= 0 || lanPort > 65535 || mRouteTypedKey.isEmpty()) return true;
+            const String value = lanHost + ":" + String(lanPort);
+            if (mRouteTypedKey == value) return true;
+            bool changed = false;
+            {
+                const ScopedLock rl (mLanRoutesLock);
+                if (!mLanRoutesLoaded) { mLanRoutesLoaded = true; }
+                auto & slot = mLanRoutes[mRouteTypedKey];
+                changed = slot != value; slot = value;
+            }
+            if (changed) {
+                if (sbDiagOn()) fprintf(stderr, "[SB-LANROUTE] %s -> %s from now on\n", mRouteTypedKey.toRawUTF8(), value.toRawUTF8());
+                MessageManager::callAsync([this] { sbLanRoutesSave(); });
+            }
+            return true;
+        }
+        else if (type == SONOBUS_MSGTYPE_HXNAMESTATE) {
+            // A player's shown name changed (or the hub's answer to our own change). The join name stays the key.
+            auto it = message.ArgumentsBegin();
+            const String who = CharPointer_UTF8((it++)->AsString());
+            const String shown = String(CharPointer_UTF8((it++)->AsString())).substring(0, kMaxUserNameLength).trim();
+            const bool announce = it != message.ArgumentsEnd() && it->IsInt32() && it->AsInt32() != 0;
+            if (shown.isEmpty()) return true;
+            if (who == mCurrentUsername) {
+                if (mStageRenameState.load() == StageRenameNone) return true;   // nothing was asked
+                String before; bool asAsked = false;
+                {
+                    const ScopedLock nl (mInstrumentLock);
+                    before = mStageNameWas;
+                    mStageShownName = (shown == mCurrentUsername) ? String() : shown;   // the hub's word holds
+                    asAsked = shown == mStageNameAsked;
+                }
+                const int was = mStageRenameState.exchange(asAsked ? StageRenameDone : StageRenameRefused);
+                if (asAsked && announce && was == StageRenameAsked && before != shown) sbPostNameChange(before, shown, mCurrentUsername);
+                return true;
+            }
+            String before;
+            if (sbSetShownNameForUser(who, shown, &before) && announce) sbPostNameChange(before, shown, who);
+            return true;
+        }
         else if (type == SONOBUS_MSGTYPE_HXRECSTATE) {
             // Immediate recording start/stop for one player (the 10-s /sb/hxlat re-asserts it).
             auto it = message.ArgumentsBegin();
@@ -11135,6 +11423,11 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             if (it != message.ArgumentsEnd() && it->IsFloat()) ifaceMs = (it++)->AsFloat();
             bool haveInst = false; String inst;   // Their instrument (older hubs omit it)
             if (it != message.ArgumentsEnd() && it->IsString()) { inst = String(CharPointer_UTF8((it++)->AsString())).substring(0, 24).trim(); haveInst = true; }
+            bool haveShown = false; String shown;   // Their changed name, empty = as joined (older hubs omit it)
+            if (it != message.ArgumentsEnd() && it->IsString()) { shown = String(CharPointer_UTF8((it++)->AsString())).substring(0, kMaxUserNameLength).trim(); haveShown = true; }
+            if (it != message.ArgumentsEnd() && it->IsInt32()) {   // Their chat colour on this stage (older hubs omit it)
+                sbSetHubColor(who, it->AsInt32());
+            }
             if (who == mCurrentUsername) {   // Our own legs, same model as everyone's rows → header
                 mSelfHubLatToMs = toHub; mSelfHubLatFromMs = fromHub; mSelfHubRttMs = rtt; mSelfHubUplinkLost = uplinkLost;
                 mSelfHubLatStampMs = Time::getMillisecondCounter();
@@ -11153,6 +11446,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                     p->hubRttMs = rtt; p->hubUpKbps = upKbps;
                     p->hubIfaceMs = (ifaceMs >= 0.0f && ifaceMs < 1000.0f) ? ifaceMs : -1.0f;
                     if (haveInst) { const SpinLock::ScopedLockType il(p->hubInstrumentLock); if (p->hubInstrument != inst) p->hubInstrument = inst; }
+                    if (haveShown) sbSetShownNameForUser(who, shown.isNotEmpty() ? shown : who);   // catches a missed change; no chat line
                     p->hubLatStampMs = Time::getMillisecondCounter();
                     break;
                 }
@@ -11962,12 +12256,15 @@ void SonobusAudioProcessor::sbSendHxver(RemotePeer * hubPeer)
     // A plugin names platform and format here ("Mac AU"): the field every hub shows after the version
     if (plug.isNotEmpty() && mPluginOsText.isNotEmpty()) os = mPluginOsText.toRawUTF8();
     const String instrument = getCurrentInstrument();
-    char vb[288];
+    String shownName;   // only when it differs from the name the stage was joined with
+    { const ScopedLock nl (mInstrumentLock); shownName = mStageShownName; }
+    char vb[512];
     osc::OutboundPacketStream vm(vb, sizeof(vb));
     try {
         vm << osc::BeginMessage("/sb/hxver") << ver.substring(0, 60).toRawUTF8() << os << instrument.substring(0, 48).toRawUTF8()
            << plug.substring(0, 40).toRawUTF8()      // Fourth: plugin format and host, empty in the app
-           << mInstallId.toRawUTF8() << osc::EndMessage;   // Fifth: this install's anonymous id (older hubs ignore it)
+           << mInstallId.toRawUTF8()                 // Fifth: this install's anonymous id (older hubs ignore it)
+           << shownName.toRawUTF8() << osc::EndMessage;   // Sixth: the name to show from now on, empty = as joined (older hubs ignore it)
         sendPeerMessage(hubPeer, vm.Data(), (int32_t) vm.Size());
     } catch (const osc::Exception&) {}
 }
@@ -19876,7 +20173,7 @@ void SonobusAudioProcessor::getStateInformationWithOptions(MemoryBlock& destData
     extraTree.setProperty(lastSoundboardShownKey, mLastSoundboardShown, nullptr);
     if (mSendAllDefaultsMigrated) extraTree.setProperty(sendAllDefaultsV2Key, true, nullptr);   
     extraTree.setProperty(linkMonitoringDelayTimesKey, mLinkMonitoringDelayTimes, nullptr);
-    extraTree.setProperty(lastUsernameKey, mCurrentUsername, nullptr);
+    extraTree.setProperty(lastUsernameKey, getShownUsername(), nullptr);
     extraTree.setProperty(lastInstrumentKey, getCurrentInstrument(), nullptr);
     extraTree.setProperty(langOverrideCodeKey, mLangOverrideCode, nullptr);
     extraTree.setProperty(useUnivFontKey, mUseUniversalFont, nullptr);

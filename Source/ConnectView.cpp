@@ -2,6 +2,7 @@
 // Copyright (C) 2021 Jesse Chappell
 // Modifications Copyright (C) 2026 Jason Buecker (Random Planet)
 
+#include "SbChooserCombo.h"
 #include "ConnectView.h"
 #include "StagesView.h"
 #include "SonobusPlusVersion.h"
@@ -9,6 +10,50 @@
 #include "SbTextFit.h"
 
 using namespace SonoAudio;
+
+// The recents list is a table: one place for the column positions, for the header and for the rows
+namespace {
+struct RecentsColumns { int stageX = 0, stageW = 0, nameX = 0, nameW = 0, addrX = 0, addrW = 0, whenX = 0, whenW = 0, removeX = 0; };
+RecentsColumns recentsColumns(int width)
+{
+    const int removeW = 36, avail = jmax(0, width - removeW);
+    RecentsColumns c;
+    c.stageW = roundToInt((float) avail * 0.31f);
+    c.nameX = c.stageW;           c.nameW = roundToInt((float) avail * 0.27f);
+    c.addrX = c.nameX + c.nameW;  c.addrW = roundToInt((float) avail * 0.24f);
+    c.whenX = c.addrX + c.addrW;  c.whenW = avail - c.whenX;
+    c.removeX = avail;
+    return c;
+}
+const int kRecentsCellPad = 8;
+
+void drawRecentsLock(Graphics & g, Rectangle<int> cell, Colour c)
+{
+    const auto r = cell.toFloat().withSizeKeepingCentre(10.0f, 12.0f);
+    g.setColour(c);
+    g.fillRoundedRectangle(r.withTrimmedTop(5.0f), 1.5f);
+    Path shackle;
+    shackle.addCentredArc(r.getCentreX(), r.getY() + 5.0f, 3.0f, 3.5f, 0.0f, -MathConstants<float>::halfPi, MathConstants<float>::halfPi, true);
+    g.strokePath(shackle, PathStrokeType(1.6f));
+}
+
+class RecentsHeader : public Component
+{
+public:
+    void paint(Graphics & g) override
+    {
+        g.fillAll(Colour(0xff141414));
+        g.setColour(Colour(0xff8f8f8f));
+        g.setFont(Font(13.0f * SonoLookAndFeel::getFontScale(), Font::bold));
+        const auto c = recentsColumns(getWidth());
+        const int h = getHeight(), p = kRecentsCellPad;
+        g.drawText(TRANS("Stage"), c.stageX + p, 0, c.stageW - 2 * p, h, Justification::centredLeft, true);
+        g.drawText(TRANS("Your name"), c.nameX + p, 0, c.nameW - 2 * p, h, Justification::centredLeft, true);
+        g.drawText(TRANS("Address"), c.addrX + p, 0, c.addrW - 2 * p, h, Justification::centredLeft, true);
+        g.drawText(TRANS("When"), c.whenX + p, 0, c.whenW - 2 * p, h, Justification::centredLeft, true);
+    }
+};
+}
 
 class SonobusConnectTabbedComponent : public TabbedComponent
 {
@@ -116,9 +161,7 @@ publicGroupsListModel(this)
     mStagesView = std::make_unique<StagesView>();
     mStagesView->currentStage = [this] { return processor.isConnectedToServer() ? processor.getCurrentJoinedGroup() : String(); };
     mStagesView->currentPort = [this] { return processor.getServerPortAsTyped(); };
-    mStagesView->userName = [this] { return mServerUsernameEditor->getText().trim(); };
-    mStagesView->stageUserName = [this] { return processor.getCurrentUsername(); };
-    mStagesView->userInstrument = [this] { return processor.getCurrentInstrument(); };
+    mStagesView->stageUserName = [this] { return processor.getShownUsername(); };
     mStagesView->setDirectoryMemory(processor.getSupportDir().getChildFile("stage-directory.txt"));
     // Real stages only; the directory's made-up test stages only with the run-scoped switch SB_TEST_STAGES=1
     mStagesView->setWantTestStages(SonobusAudioProcessor::sbTapOn("SB_TEST_STAGES"));
@@ -216,14 +259,14 @@ publicGroupsListModel(this)
     mServerUsernameEditor = std::make_unique<TextEditor>("srvaddredit");
     mServerUsernameEditor->setTitle(TRANS("Your Displayed Name:"));
     mServerUsernameEditor->setFont(Font(16 * SonoLookAndFeel::getFontScale()));
-    mServerUsernameEditor->setText(processor.getCurrentUsername(), false);
+    mServerUsernameEditor->setText(processor.getShownUsername(), false);
     configEditor(mServerUsernameEditor.get());
     mServerUsernameEditor->setInputRestrictions(SonobusAudioProcessor::kMaxUserNameLength);
 
     mServerInstrumentStaticLabel = std::make_unique<Label>("serverinstst", TRANS("Instrument:"));
     configServerLabel(mServerInstrumentStaticLabel.get());
     mServerInstrumentStaticLabel->setMinimumHorizontalScale(1.0f);
-    mServerInstrumentCombo = std::make_unique<ComboBox>("instrument");
+    mServerInstrumentCombo = std::make_unique<SbChooserCombo>("instrument");
     mServerInstrumentCombo->setEditableText(true);   // the list is a help; anything can be typed
     mServerInstrumentCombo->addItemList(instrumentChoices(), 1);
     mServerInstrumentCombo->setTextWhenNothingSelected(TRANS("choose or type"));
@@ -235,11 +278,22 @@ publicGroupsListModel(this)
     mServerInstrumentHelpLabel->setBorderSize(BorderSize<int>(0, 2, 0, 2));
     mServerInstrumentHelpLabel->setMinimumHorizontalScale(1.0f);
     mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
-    mServerInstrumentCombo->onChange = [this] {
-        processor.setCurrentInstrument(mServerInstrumentCombo->getText());
-        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
-        if (onInstrumentChanged) onInstrumentChanged();
-    };
+    mServerInstrumentCombo->onChange = [this] { instrumentPicked(mServerInstrumentCombo->getText()); };
+    wireConnectBar(mStagesView->connectBar());
+    mRecentsBar = std::make_unique<SbConnectBar>(TRANS("Double-click a recent stage to connect"));
+    wireConnectBar(*mRecentsBar);
+    mRecentsBar->onConnect = [this] { connectRecent(mRecentsListBox->getSelectedRow()); };
+    mRecentsBar->onHeightChanged = [this] { layoutRecents(); };
+    mPrivateBar = std::make_unique<SbConnectBar>(TRANS("Connect to the stage entered below"));
+    wireConnectBar(*mPrivateBar);
+    mPrivateBar->setCanConnect(true);
+    mPrivateBar->onConnect = [this] { buttonClicked(mServerConnectButton.get()); };
+    mPrivateBar->onHeightChanged = [this] { layoutServerForm(); };
+    mRecentsHeader = std::make_unique<RecentsHeader>();
+    mRecentsHintLabel = std::make_unique<Label>("recentshint", TRANS("Double-click a stage to join it again."));
+    mRecentsHintLabel->setFont(Font(14.0f * SonoLookAndFeel::getFontScale()));
+    mRecentsHintLabel->setColour(Label::textColourId, Colour(0xff8f8f8f));
+    mRecentsHintLabel->setJustificationType(Justification::centredLeft);
 
     mServerUserPasswordEditor = std::make_unique<TextEditor>("userpass"); // 0x25cf
     mServerUserPasswordEditor->setFont(Font(14 * SonoLookAndFeel::getFontScale()));
@@ -371,7 +425,7 @@ publicGroupsListModel(this)
 #endif
     mRecentsListBox->getViewport()->setScrollBarsShown(true, false);
     mRecentsListBox->setMultipleSelectionEnabled (false);
-    mRecentsListBox->setRowHeight(40);   // more of the 10 recents visible
+    mRecentsListBox->setRowHeight(30);   // one line per recent
     mRecentsListBox->setModel (&recentsListModel);
     mRecentsListBox->setRowSelectedOnMouseDown(true);
     mRecentsListBox->setRowClickedOnMouseDown(false);
@@ -477,6 +531,14 @@ publicGroupsListModel(this)
     mServerConnectContainer->addAndMakeVisible(mServerInfoSubLabel.get());
     mServerConnectContainer->addAndMakeVisible(mServerAudioInfoLabel.get());
 
+    mRecentsContainer->addAndMakeVisible(mRecentsBar.get());
+    mRecentsContainer->addAndMakeVisible(mRecentsHeader.get());
+    mRecentsContainer->addAndMakeVisible(mRecentsHintLabel.get());
+    mServerConnectContainer->addAndMakeVisible(mPrivateBar.get());
+    // The name, the instrument and Connect are in the bar at the top of the tab; these keep the values
+    for (Component * c : { (Component*) mServerUserStaticLabel.get(), (Component*) mServerUsernameEditor.get(), (Component*) mServerInstrumentStaticLabel.get(),
+                           (Component*) mServerInstrumentCombo.get(), (Component*) mServerInstrumentHelpLabel.get(), (Component*) mServerConnectButton.get() })
+        c->setVisible(false);
     mRecentsContainer->addAndMakeVisible(mRecentsListBox.get());
     mRecentsContainer->addAndMakeVisible(mClearRecentsButton.get());
 
@@ -578,8 +640,7 @@ void ConnectView::configServerLabel(Label *label)
 // In a form too narrow for that the Stage Name field keeps a flexible width and the captions wrap.
 int ConnectView::serverLabelColumnNeed()
 {
-    return jmax(jmax(SbTextFit::labelWidth(*mServerGroupStaticLabel), SbTextFit::labelWidth(*mServerGroupPassStaticLabel)),
-                jmax(SbTextFit::labelWidth(*mServerUserStaticLabel), SbTextFit::labelWidth(*mServerInstrumentStaticLabel)),
+    return jmax(SbTextFit::labelWidth(*mServerGroupStaticLabel), SbTextFit::labelWidth(*mServerGroupPassStaticLabel),
                 SbTextFit::labelWidth(*mServerHostStaticLabel));
 }
 
@@ -664,9 +725,11 @@ void ConnectView::layoutServerForm()
         width -= vp->getScrollBarThickness();
         lay(width);
     }
-    minHeight = need;
-    mServerConnectContainer->setBounds(0, 0, width, jmax(need, vp->getHeight()));
-    serverBox.performLayout(mServerConnectContainer->getLocalBounds().withSizeKeepingCentre(formW, mServerConnectContainer->getHeight()));
+    const int barH = mPrivateBar->heightFor(width);
+    minHeight = need + barH;
+    mServerConnectContainer->setBounds(0, 0, width, jmax(need + barH, vp->getHeight()));
+    mPrivateBar->setBounds(0, 0, width, barH);
+    serverBox.performLayout(mServerConnectContainer->getLocalBounds().withTrimmedTop(barH).withSizeKeepingCentre(formW, mServerConnectContainer->getHeight() - barH));
 
     // The top row again at its own width, centred over the form
     for (auto & item : serverBox.items)
@@ -787,17 +850,97 @@ void ConnectView::updateStagesActive()
     if (mStagesView != nullptr) mStagesView->setActive(mTabsReady && isShowing() && stagesTabShowing());
 }
 
+static_assert(SbConnectBar::kMaxNameLength == SonobusAudioProcessor::kMaxUserNameLength, "one name length everywhere");
+
 StringArray ConnectView::instrumentChoices()
 {
-    return { "Drums", "Percussion", "Bass", "Guitar", "Acoustic Guitar", "Keys", "Piano", "Organ", "Synth", "Vocals",
-             "Sax", "Trumpet", "Trombone", "Flute", "Clarinet", "Violin", "Viola", "Cello", "Double Bass",
-             "Mandolin", "Banjo", "Pedal Steel", "Harmonica", "Accordion", "DJ / Electronics" };
+    return SbConnectBar::instrumentChoices();
 }
 
 void ConnectView::refreshInstrument()
 {
+    const String stored = processor.getCurrentInstrument();
     if (! mServerInstrumentCombo->hasKeyboardFocus(true))
-        mServerInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
+        mServerInstrumentCombo->setText(stored, dontSendNotification);
+    mStagesView->connectBar().setInstrument(stored);
+    mRecentsBar->setInstrument(stored);
+    mPrivateBar->setInstrument(stored);
+}
+
+void ConnectView::refreshName()
+{
+    const String name = mServerUsernameEditor->getText().trim();
+    mStagesView->connectBar().setPlayerName(name);
+    mRecentsBar->setPlayerName(name);
+    mPrivateBar->setPlayerName(name);
+}
+
+void ConnectView::wireConnectBar(SbConnectBar & bar)
+{
+    bar.setPlayerName(mServerUsernameEditor->getText().trim());
+    bar.setInstrument(processor.getCurrentInstrument());
+    bar.onNameChanged = [this](const String & name) { nameTyped(name); };
+    bar.onNameCommitted = [this](const String & name) { nameCommitted(name); };
+    bar.onInstrumentChanged = [this](const String & text) { instrumentPicked(text); };
+}
+
+// Typed in one tab, shown in all of them
+void ConnectView::nameTyped(const String & name)
+{
+    if (! mServerUsernameEditor->hasKeyboardFocus(true) && mServerUsernameEditor->getText().trim() != name)
+        mServerUsernameEditor->setText(name, false);
+    refreshName();
+    if (name.isNotEmpty()) mRecentsBar->setNotice({});
+    processor.setCurrentUsername(name);   // not taken while connected
+}
+
+void ConnectView::putNameBack(const String & name)
+{
+    mServerUsernameEditor->setText(name, false);
+    mStagesView->connectBar().resetPlayerName(name);
+    mRecentsBar->resetPlayerName(name);
+    mPrivateBar->resetPlayerName(name);
+}
+
+// On a hub stage a finished edit of the name is sent to the hub; everyone there sees it, nobody leaves.
+void ConnectView::nameCommitted(const String & name)
+{
+    if (! processor.isConnectedToServer() || processor.getCurrentJoinedGroup().isEmpty()) return;
+    const String shown = processor.getShownUsername();
+    if (name == shown) return;
+    if (name.isEmpty() || ! processor.renameOnStage(name)) { putNameBack(shown); return; }
+
+    currConnectionInfo.userName = name;
+    putNameBack(name);   // every name field shows it, wherever it was typed: the next join uses the same name
+    mStagesView->showNotice({});
+    if (onStageNameChanged) onStageNameChanged();
+
+    // The hub answers at once. Another name back: the hub kept that one.
+    Component::SafePointer<ConnectView> safe(this);
+    Timer::callAfterDelay(2500, [safe, name] {
+        if (safe == nullptr || ! safe->processor.isConnectedToServer()) return;
+        const int state = safe->processor.getStageRenameState();
+        const String now = safe->processor.getShownUsername();
+        if (state == SonobusAudioProcessor::StageRenameRefused && now != name) {
+            safe->currConnectionInfo.userName = now;
+            safe->putNameBack(now);
+            const String why = TRANS("That name is in use on this stage. You are still") + " " + now + ".";
+            safe->mStagesView->showNotice(why);
+            if (safe->onStageNameChanged) safe->onStageNameChanged();
+            if (safe->onStageNameRefused) safe->onStageNameRefused(why);
+        }
+    });
+}
+
+void ConnectView::instrumentPicked(const String & text)
+{
+    processor.setCurrentInstrument(text);
+    const String stored = processor.getCurrentInstrument();
+    mServerInstrumentCombo->setText(stored, dontSendNotification);
+    mStagesView->connectBar().setInstrument(stored, true);
+    mRecentsBar->setInstrument(stored, true);
+    mPrivateBar->setInstrument(stored, true);
+    if (onInstrumentChanged) onInstrumentChanged();
 }
 
 void ConnectView::updateState()
@@ -881,8 +1024,9 @@ void ConnectView::updateLayout()
 
     servAddressBox.items.clear();
     servAddressBox.flexDirection = FlexBox::Direction::row;
-    servAddressBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerHostStaticLabel).withMargin(2).withFlex(1));
+    servAddressBox.items.add(FlexItem(servLabelWidth, minpassheight, *mServerHostStaticLabel).withMargin(2).withFlex(1));
     servAddressBox.items.add(FlexItem(172, minpassheight, *mServerHostEditor).withMargin(2).withFlex(1));
+    servAddressBox.items.add(FlexItem(minPannerWidth, 4).withMargin(2).withFlex(0));   // the password row's eye: all three fields the same width
 
     servModeBox.items.clear();
     servModeBox.flexDirection = FlexBox::Direction::row;
@@ -909,8 +1053,9 @@ void ConnectView::updateLayout()
 
     servGroupBox.items.clear();
     servGroupBox.flexDirection = FlexBox::Direction::row;
-    servGroupBox.items.add(FlexItem(servLabelWidth, minitemheight, *mServerGroupStaticLabel).withMargin(2).withFlex(0.25));
-    servGroupBox.items.add(FlexItem(120, minitemheight, *mServerGroupEditor).withMargin(2).withFlex(1));
+    servGroupBox.items.add(FlexItem(servLabelWidth, minpassheight, *mServerGroupStaticLabel).withMargin(2).withFlex(0.25));
+    servGroupBox.items.add(FlexItem(120, minpassheight, *mServerGroupEditor).withMargin(2).withFlex(1));
+    servGroupBox.items.add(FlexItem(minPannerWidth, 4).withMargin(2).withFlex(0));
 
     servGroupPassBox.items.clear();
     servGroupPassBox.flexDirection = FlexBox::Direction::row;
@@ -940,24 +1085,19 @@ void ConnectView::updateLayout()
 
     int maxservboxwidth = 400;
 
+    // The name, the instrument and Connect are in the bar above; here: the text, the hub, the stage and its password
     serverBox.items.clear();
     serverBox.flexDirection = FlexBox::Direction::column;
     serverBox.items.add(FlexItem(5, 3).withFlex(0));
     // Status line: room for two lines of its text even in a short window
-    serverBox.items.add(FlexItem(80, minitemheight, servStatusBox).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
-    serverBox.items.add(FlexItem(5, 4).withFlex(0));
-    serverBox.items.add(FlexItem(180, minitemheight, servGroupBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(180, minpassheight, servGroupPassBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(5, 6).withFlex(0));
-    serverBox.items.add(FlexItem(180, minitemheight, servUserBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(180, minitemheight, servInstrumentBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(180, 16, servInstrumentHelpBox).withMargin(FlexItem::Margin(0, 2, 2, 2)).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(5, 6).withFlex(1).withMaxHeight(14));
-    serverBox.items.add(FlexItem(minButtonWidth, minitemheight, servButtonBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(5, 10).withFlex(1));
-    serverBox.items.add(FlexItem(100, minitemheight, servAddressBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
-    serverBox.items.add(FlexItem(80, minpassheight, *mServerAudioInfoLabel).withMargin(2).withFlex(1).withMaxWidth(maxservboxwidth).withMaxHeight(60));
+    serverBox.items.add(FlexItem(80, minitemheight, servStatusBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth).withMaxHeight(60));
     serverBox.items.add(FlexItem(5, 8).withFlex(0));
+    serverBox.items.add(FlexItem(100, minpassheight, servAddressBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
+    serverBox.items.add(FlexItem(80, minpassheight, *mServerAudioInfoLabel).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth).withMaxHeight(60));
+    serverBox.items.add(FlexItem(5, 4).withFlex(0));
+    serverBox.items.add(FlexItem(180, minpassheight, servGroupBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
+    serverBox.items.add(FlexItem(180, minpassheight, servGroupPassBox).withMargin(2).withFlex(0).withMaxWidth(maxservboxwidth));
+    serverBox.items.add(FlexItem(5, 10).withFlex(1));
 
     minHeight = 7*minitemheight + 2*minpassheight + 62;
 
@@ -1000,13 +1140,14 @@ void ConnectView::updateLayout()
     // recents
     clearRecentsBox.items.clear();
     clearRecentsBox.flexDirection = FlexBox::Direction::row;
-    clearRecentsBox.items.add(FlexItem(10, 5).withMargin(0).withFlex(1));
+    clearRecentsBox.items.add(FlexItem(6, 5).withMargin(0).withFlex(0));
     clearRecentsBox.items.add(FlexItem(minButtonWidth, minitemheight, *mClearRecentsButton).withMargin(0).withFlex(0));
-    clearRecentsBox.items.add(FlexItem(10, 5).withMargin(0).withFlex(1));
+    clearRecentsBox.items.add(FlexItem(8, 5).withMargin(0).withFlex(0));
+    clearRecentsBox.items.add(FlexItem(60, minitemheight, *mRecentsHintLabel).withMargin(0).withFlex(1));
 
     recentsBox.items.clear();
     recentsBox.flexDirection = FlexBox::Direction::column;
-    recentsBox.items.add(FlexItem(minButtonWidth, minitemheight, *mRecentsListBox).withMargin(6).withFlex(1));
+    recentsBox.items.add(FlexItem(minButtonWidth, minitemheight, *mRecentsListBox).withMargin(FlexItem::Margin(0, 6, 6, 6)).withFlex(1));
     recentsBox.items.add(FlexItem(minButtonWidth, minitemheight, clearRecentsBox).withMargin(1).withFlex(0));
     recentsBox.items.add(FlexItem(10, 5).withMargin(0).withFlex(0));
 
@@ -1038,6 +1179,11 @@ void ConnectView::resized()  {
 
 
     mainBox.performLayout(getLocalBounds().reduced(2, 2));
+    {   // In a wide window the tabs and what they show share one centred column
+        const auto b = mConnectTab->getBounds();
+        const int maxW = roundToInt(1100.0f * SonoLookAndFeel::getFontScale());
+        if (b.getWidth() > maxW) mConnectTab->setBounds(b.withSizeKeepingCentre(maxW, b.getHeight()));
+    }
 
     layoutServerForm();
 
@@ -1064,8 +1210,35 @@ void ConnectView::resized()  {
 // Recents is a tab in every width; in a wide window the list keeps a readable width.
 void ConnectView::layoutRecents()
 {
-    if (recentsBox.items.isEmpty() || mRecentsContainer == nullptr) return;
-    recentsBox.performLayout(mRecentsContainer->getLocalBounds().withSizeKeepingCentre(jmin(820, mRecentsContainer->getWidth()), mRecentsContainer->getHeight()));
+    if (recentsBox.items.isEmpty() || mRecentsContainer == nullptr || mRecentsBar == nullptr) return;
+    auto area = mRecentsContainer->getLocalBounds();
+    mRecentsBar->setBounds(area.removeFromTop(mRecentsBar->heightFor(area.getWidth())));
+    mRecentsHeader->setBounds(area.removeFromTop(26).reduced(6, 0));
+    recentsBox.performLayout(area);
+}
+
+void ConnectView::recentSelectionChanged()
+{
+    const auto * info = recentsListModel.recentAt(mRecentsListBox->getSelectedRow());
+    mRecentsBar->setSelected(info != nullptr ? TRANS("Selected:") + " " + info->groupName : String());
+    mRecentsBar->setCanConnect(info != nullptr);
+}
+
+void ConnectView::connectRecent(int row)
+{
+    const auto * recent = recentsListModel.recentAt(row);
+    if (recent == nullptr) return;
+    AooServerConnectionInfo info = *recent;   // copy: the list may refresh while connecting
+    const String name = mRecentsBar->getPlayerName();
+    if (name.isEmpty()) {
+        mRecentsBar->setNameMissing(true);
+        mRecentsBar->setNotice(TRANS("Enter your name first."));
+        return;
+    }
+    mRecentsBar->setNotice({});
+    info.userName = name;
+    connectWithInfo(info);
+    updateServerFieldsFromConnectionInfo();
 }
 
 void ConnectView::groupJoinFailed()
@@ -1122,7 +1295,7 @@ void ConnectView::visibilityChanged ()
     if (!isVisible()) {
         // force password show to off here
         mServerGroupPasswordShowButton->setToggleState(false, dontSendNotification);
-        currConnectionInfo.userName = mServerUsernameEditor->getText().trim();
+        currConnectionInfo.userName = processor.isConnectedToServer() ? processor.getShownUsername() : mServerUsernameEditor->getText().trim();
         currConnectionInfo.groupName = mServerGroupEditor->getText().trim();
         currConnectionInfo.groupPassword = mServerGroupPasswordEditor->getText();
         updateState();
@@ -1318,7 +1491,10 @@ void ConnectView::textEditorTextChanged (TextEditor& ed)
         if (mServerStatusLabel->isVisible() && !processor.isConnectedToServer()) resetPrivateGroupLabels();   // the message is answered
     }
 
-    if (&ed == mPublicServerUsernameEditor.get() || &ed == mServerUsernameEditor.get()) {
+    if (&ed == mServerUsernameEditor.get()) {
+        nameTyped(ed.getText().trim());
+    }
+    else if (&ed == mPublicServerUsernameEditor.get()) {
         // try to set the current username, it will fail if we are connected, no big deal
         processor.setCurrentUsername(ed.getText().trim());
     }
@@ -1330,6 +1506,9 @@ void ConnectView::textEditorFocusLost (TextEditor& ed)
     // only one we care about live is udp port
     if (&ed == mPublicServerHostEditor.get() || &ed == mPublicServerUsernameEditor.get()) {
         publicGroupLogin();
+    }
+    else if (&ed == mServerUsernameEditor.get()) {
+        nameCommitted(ed.getText().trim());
     }
 
 }
@@ -2290,6 +2469,9 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
     if (currConnectionInfo.userName.trim().isEmpty()) {
         String mesg = TRANS("You need to specify a user name!");
 
+        mStagesView->connectBar().setNameMissing(true);
+        mRecentsBar->setNameMissing(true);
+        mPrivateBar->setNameMissing(true);
         if (info.groupIsPublic) {
             mPublicServerStatusInfoLabel->setText(mesg, dontSendNotification);
             mPublicServerUsernameEditor->setColour(TextEditor::backgroundColourId, Colour(0xff880000));
@@ -2305,6 +2487,9 @@ void ConnectView::connectWithInfo(const AooServerConnectionInfo & info, bool all
         return;
     }
     else {
+        mStagesView->connectBar().setNameMissing(false);
+        mRecentsBar->setNameMissing(false);
+        mPrivateBar->setNameMissing(false);
         mServerUsernameEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
         mServerUsernameEditor->repaint();
         mPublicServerUsernameEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
@@ -2439,6 +2624,7 @@ void ConnectView::updateRecents()
     recentsListModel.updateState();
     mRecentsListBox->updateContent();
     mRecentsListBox->deselectAllRows();
+    recentSelectionChanged();
 }
 
 void ConnectView::updatePublicGroups()
@@ -2584,11 +2770,13 @@ void ConnectView::updateServerStatusLabel(const String & mesg, bool mainonly)
 }
 
 
-// A recent fills the Connect fields (server:port, group, password, the name used in that session) and nothing else:
-// no automatic join, so the user can change the name (or anything) and press Connect to Group.
+// A selected recent also fills the Private Stage form (server:port, stage, password), for a join with changes.
+// The name stays the one in the name field. The tab does not change.
 void ConnectView::populateFromRecent(const AooServerConnectionInfo & info)
 {
+    const String name = mServerUsernameEditor->getText().trim();
     currConnectionInfo = info;
+    if (name.isNotEmpty()) currConnectionInfo.userName = name;
     updateServerFieldsFromConnectionInfo();
     mServerStatusLabel->setText(TRANS("Press Connect to Stage to join"), dontSendNotification);
     mServerStatusLabel->setVisible(true);
@@ -2596,7 +2784,6 @@ void ConnectView::populateFromRecent(const AooServerConnectionInfo & info)
     mServerGroupPasswordEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupEditor->setColour(TextEditor::backgroundColourId, Colour(0xff050505));
     mServerGroupPasswordEditor->repaint(); mServerGroupEditor->repaint();
-    if (recentsIsTab()) showPrivateGroupTab();   // narrow window: recents live in a tab, so show the form
 }
 
 void ConnectView::updateServerFieldsFromConnectionInfo()
@@ -2615,6 +2802,7 @@ void ConnectView::updateServerFieldsFromConnectionInfo()
         mPublicServerHostEditor->setText( hostport, false);
     }
     mServerUsernameEditor->setText(currConnectionInfo.userName.substring(0, SonobusAudioProcessor::kMaxUserNameLength), false);
+    refreshName();
     mPublicServerUsernameEditor->setText(currConnectionInfo.userName, false);
     if (currConnectionInfo.groupIsPublic) {
         mPublicServerGroupEditor->setText(currConnectionInfo.groupName, false);
@@ -2736,23 +2924,26 @@ static String recentInfoText(const AooServerConnectionInfo & info)
     return infostr;
 }
 
-// The whole row in the hover when the list is too narrow for one of its texts
+static String recentAddressText(const AooServerConnectionInfo & info)
+{
+    return info.serverHost != DEFAULT_SERVER_HOST ? info.serverHost + ":" + String(info.serverPort) : String();
+}
+
+// The whole row in the hover when a column is too narrow for its text
 String ConnectView::RecentsListModel::getTooltipForRow (int rowNumber)
 {
     if (rowNumber < 0 || rowNumber >= recents.size() || cachedWidth <= 0) return {};
 
     const auto & info = recents.getReference(rowNumber);
-    const int height = parent->mRecentsListBox->getRowHeight();
-    const float xratio = 0.5f, yratio = 0.6f;
-    const float adjwidth = (float) (cachedWidth - jmin(36, height - 6));
-    const float iconsize = height * yratio;
-
-    const String grouptext = recentGroupText(info), infostr = recentInfoText(info);
-    const bool cut = parent->recentsGroupFont.getStringWidthFloat(grouptext) > adjwidth*xratio - 8 - iconsize
-                  || parent->recentsNameFont.getStringWidthFloat(info.userName) > adjwidth*(1.0f - xratio) - 4 - iconsize
-                  || parent->recentsInfoFont.getStringWidthFloat(infostr) > adjwidth - 24;
+    const auto c = recentsColumns(cachedWidth);
+    const float sc = SonoLookAndFeel::getFontScale();
+    const Font stageFont(15.0f * sc, Font::bold), cellFont(15.0f * sc);
+    const String grouptext = recentGroupText(info), addr = recentAddressText(info);
+    const bool cut = stageFont.getStringWidthFloat(grouptext) > (float) (c.stageW - 2 * kRecentsCellPad - (info.groupPassword.isNotEmpty() ? 18 : 0))
+                  || cellFont.getStringWidthFloat(info.userName) > (float) (c.nameW - 2 * kRecentsCellPad)
+                  || cellFont.getStringWidthFloat(addr) > (float) (c.addrW - 2 * kRecentsCellPad);
     if (! cut) return {};
-    return grouptext + " - " + info.userName + "\n" + infostr.trim();
+    return grouptext + " - " + info.userName + "\n" + recentInfoText(info).trim();
 }
 
 void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g, int width, int height, bool rowIsSelected)
@@ -2760,46 +2951,46 @@ void ConnectView::RecentsListModel::paintListBoxItem (int rowNumber, Graphics &g
     if (rowNumber >= recents.size()) return;
 
     if (rowIsSelected) {
-        g.setColour (parent->findColour(selectedColourId));
+        g.setColour (Colour(0xff1f5c58));   // the stage list's selected row
         g.fillRect(Rectangle<int>(0,0,width,height));
     }
 
     g.setColour(parent->findColour(separatorColourId));
     g.drawLine(0, height-1, width, height);
 
-
-    g.setColour (parent->findColour(nameTextColourId));
-    g.setFont (parent->recentsGroupFont);
-
     AooServerConnectionInfo & info = recents.getReference(rowNumber);
+    const auto c = recentsColumns(width);
+    const float sc = SonoLookAndFeel::getFontScale();
+    const int p = kRecentsCellPad;
+    const Colour text = parent->findColour(nameTextColourId);
 
-    float xratio = 0.5;
-    int removewidth = jmin(36, height - 6);
-    float yratio = 0.6;
-    float adjwidth = width - removewidth;
-
-    // DebugLogC("Paint %s", text.toRawUTF8());
-    float iconsize = height*yratio;
-    float groupheight = height*yratio;
-    g.drawImageWithin(groupImage, 0, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
+    // Stage, with a padlock after the name when it had a password
+    const Font stageFont(15.0f * sc, Font::bold);
     const String grouptext = recentGroupText(info);
-    g.drawFittedText (grouptext, iconsize + 4, 0, adjwidth*xratio - 8 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
+    const bool locked = info.groupPassword.isNotEmpty();
+    const int stageRoom = c.stageW - 2 * p - (locked ? 18 : 0);
+    g.setColour (text);
+    g.setFont (stageFont);
+    g.drawText (grouptext, c.stageX + p, 0, stageRoom, height, Justification::centredLeft, true);
+    if (locked) {
+        const int textW = jmin(stageRoom, (int) std::ceil(stageFont.getStringWidthFloat(grouptext)));
+        drawRecentsLock(g, Rectangle<int>(c.stageX + p + textW + 4, 0, 14, height), Colour(0xffd6b03e).withMultipliedAlpha(0.85f));
+    }
 
-    g.setFont (parent->recentsNameFont);
-    g.setColour (parent->findColour(nameTextColourId).withAlpha(0.8f));
-    g.drawImageWithin(personImage, adjwidth*xratio, 0, iconsize, iconsize, RectanglePlacement::fillDestination);
-    g.drawFittedText (info.userName, adjwidth*xratio + iconsize, 0, adjwidth*(1.0f - xratio) - 4 - iconsize, groupheight, Justification::centredLeft, true, 1.0f);
+    g.setFont (Font(15.0f * sc));
+    g.setColour (text.withAlpha(0.9f));
+    g.drawText (info.userName, c.nameX + p, 0, c.nameW - 2 * p, height, Justification::centredLeft, true);
 
-    const String infostr = recentInfoText(info);
+    g.setColour (text.withAlpha(0.55f));
+    g.drawText (recentAddressText(info), c.addrX + p, 0, c.addrW - 2 * p, height, Justification::centredLeft, true);
 
-    g.setColour (parent->findColour(nameTextColourId).withAlpha(0.5f));
-    g.setFont (parent->recentsInfoFont);
+    g.setColour (text.withAlpha(0.8f));
+    g.drawText (Time(info.timestamp).toString(true, true, false), c.whenX + p, 0, c.whenW - 2 * p, height, Justification::centredLeft, true);
 
-    g.drawFittedText (infostr, 14, height * yratio, adjwidth - 24, height * (1.0f - yratio), Justification::centredTop, true, 1.0f);
+    const float rm = 12.0f;
+    removeImage->drawWithin(g, Rectangle<float>((float) c.removeX + (36.0f - rm) * 0.5f, ((float) height - rm) * 0.5f, rm, rm), RectanglePlacement::fillDestination, 0.9);
 
-    removeImage->drawWithin(g, Rectangle<float>(adjwidth + removewidth*0.25*yratio, height*0.5 - removewidth*0.5*yratio, removewidth*yratio, removewidth*yratio), RectanglePlacement::fillDestination, 0.9);
-
-    removeButtonX = adjwidth;
+    removeButtonX = c.removeX;
     cachedWidth = width;
 }
 
@@ -2813,7 +3004,7 @@ void ConnectView::RecentsListModel::listBoxItemClicked (int rowNumber, const Mou
         parent->updateRecents();
     }
     else {
-        parent->populateFromRecent(recents.getReference(rowNumber));   // Fill the fields only — Connect to Group is the user's
+        parent->populateFromRecent(recents.getReference(rowNumber));
     }
 }
 
@@ -2823,13 +3014,12 @@ void ConnectView::RecentsListModel::listBoxItemDoubleClicked (int rowNumber, con
     if (rowNumber < 0 || rowNumber >= recents.size() || e.getPosition().x > removeButtonX) return;
     if (e.getNumberOfClicks() != 2) return;   // a triple click must not connect twice
 
-    const AooServerConnectionInfo info = recents.getReference(rowNumber);   // copy: the list may refresh while connecting
-    parent->connectWithInfo(info);
+    parent->connectRecent(rowNumber);
 }
 
 void ConnectView::RecentsListModel::selectedRowsChanged(int rowNumber)
 {
-
+    parent->recentSelectionChanged();
 }
 
 void ConnectView::RecentsListModel::deleteKeyPressed (int rowNumber)
@@ -2845,9 +3035,7 @@ void ConnectView::RecentsListModel::returnKeyPressed (int rowNumber)
 {
     DBG("return key pressed: " << rowNumber);
 
-    if (rowNumber < recents.size()) {
-        parent->populateFromRecent(recents.getReference(rowNumber));   // Fill the fields only — Connect to Group is the user's
-    }
+    parent->connectRecent(rowNumber);   // the same as the Connect button
 }
 
 #pragma PublicGroupsListModel

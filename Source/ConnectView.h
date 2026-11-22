@@ -13,6 +13,7 @@
 #include "GenericItemChooser.h"
 
 class StagesView;
+class SbConnectBar;
 
 
 class ConnectView :
@@ -60,7 +61,11 @@ public:
     // Instrument: one stored value (the processor), shown here and in the main window
     static StringArray instrumentChoices();
     void refreshInstrument();                       // show the stored value unless the field is being edited
+    void refreshName();                             // the same for the name, in every tab
     std::function<void()> onInstrumentChanged;      // called after this panel stored a new value
+    std::function<void()> onStageNameChanged;       // the name was changed while on a stage
+    std::function<void(const String&)> onStageNameRefused;   // the hub kept the old name; the text says why
+    void nameCommitted(const String & name);        // on a stage: rename at once, without leaving
 
     void paint(Graphics & g) override;
     void resized() override;
@@ -80,6 +85,7 @@ public:
     void showPrivateGroupTab();
     void showPublicGroupTab();
     void showStagesTab();
+    void showTabForTest(int index) { mConnectTab->setCurrentTabIndex(index); }   // test aid (SB_UI_CMD)
     void setBrowseOnly(bool browse);   // in a stage: the stage list alone, no connect forms
     StagesView * getStagesView() const { return mStagesView.get(); }
 
@@ -177,6 +183,18 @@ protected:
     std::unique_ptr<Label> mServerInfoSubLabel;
     std::unique_ptr<Label> mMainStatusLabel;
 
+    // Name and instrument are one setting each, shown on every tab
+    void wireConnectBar(SbConnectBar & bar);
+    void nameTyped(const String & name);
+    void putNameBack(const String & name);
+    void instrumentPicked(const String & text);
+    void recentSelectionChanged();
+    void connectRecent(int row);   // joins that recent stage under the name in the field
+    std::unique_ptr<SbConnectBar> mRecentsBar;
+    std::unique_ptr<SbConnectBar> mPrivateBar;        // the same name, instrument and Connect row on the Private Stage tab
+    std::unique_ptr<Component> mRecentsHeader;        // column titles over the recents list
+    std::unique_ptr<Label> mRecentsHintLabel;
+
     bool recentsIsTab() const;
     int tabIndexOf(const Component * content) const;
     bool stagesTabShowing() const;
@@ -219,6 +237,7 @@ protected:
         String getTooltipForRow (int rowNumber) override;
 
         void updateState();
+        const AooServerConnectionInfo * recentAt(int row) const { return row >= 0 && row < recents.size() ? &recents.getReference(row) : nullptr; }
 
     protected:
         ConnectView * parent;

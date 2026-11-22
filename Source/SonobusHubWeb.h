@@ -7,6 +7,7 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -47,9 +48,14 @@ private:
     std::string applySessionRequest(const std::string& body, bool& ok);   // POST /api/sessions/apply -> JSON reply
     void threadMain();
     std::string buildStatusJson() const;
-    void handleClient(int fd);
+    void handleClient(int fd, uint32_t fromIp);
     void sendLogsZip(int fd);   // GET /api/logs.zip
-    bool authorised(const std::string& headers) const;
+    bool authorised(const std::string& headers, bool* offered = nullptr) const;   // offered: a password was sent
+    // Wrong passwords per address (IPv4, network order). Web thread only.
+    struct LoginTrack { int wrong = 0; long long firstWrongMs = 0, blockedUntilMs = 0, lastMs = 0; };
+    std::map<uint32_t, LoginTrack> mLogins;
+    long long loginBlockedForMs(uint32_t ip, long long nowMs);
+    void loginWrong(uint32_t ip, long long nowMs);
     std::string applySettings(const std::string& body, bool& ok);   // returns the JSON reply
     // Per-player city/state via the shared HubGeoResolver (SonobusHubGeo.h).
     std::string locationFor(const std::string& ip, bool lan) const;

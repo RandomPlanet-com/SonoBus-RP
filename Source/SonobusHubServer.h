@@ -285,6 +285,19 @@ struct HubPeer {
             for (int i = 0; i < kGapBuckets; ++i) gapHist[gapSlice][i] = 0;
             for (int i = 0; i < kFineBuckets; ++i) gapFine[gapSlice][i] = 0;
         }
+        // Gaps longer than ms in the slice being filled; rotate = then move on to the next slice. Stats thread.
+        uint32_t newestGapsAbove(int ms, bool rotate) {
+            if (ms < 0) ms = 0;
+            std::lock_guard<std::mutex> g(lock);
+            uint32_t c = 0;
+            for (int b = ms + 1; b < kGapBuckets; ++b) c += gapHist[gapSlice][b];
+            if (rotate) {
+                gapSlice = (gapSlice + 1) % kGapSlices;
+                for (int i = 0; i < kGapBuckets; ++i) gapHist[gapSlice][i] = 0;
+                for (int i = 0; i < kFineBuckets; ++i) gapFine[gapSlice][i] = 0;
+            }
+            return c;
+        }
         struct GapWindow { uint32_t total = 0; uint32_t above[kGapBuckets] = {}; uint32_t aboveFine[kFineBuckets] = {}; double maxMs = 0; };
         GapWindow gapWindow() const {      // counts of gaps > H ms for every integer H, over the whole 60 s
             GapWindow w;
@@ -384,6 +397,11 @@ struct HubPeer {
     // kernel even + user-space paired → it is this thread's wake-up pattern. Printed as [HUB-KJIT].
     JitterStats kstats;
     uint64_t jitBytesSnap = 0;   // Stats thread only — bytesIn at the last [HUB-JIT] print (→ kbps)
+    // Directory totals: what the stats thread has already counted of this player. Written by the stats thread under
+    // the shared peer lock, read once more by removePeer under the exclusive one.
+    uint32_t dirLostSnap = 0, dirConcealSnap = 0;
+    uint64_t dirPacketsSnap = 0;
+    int64_t dirSeenMs = 0;   // steady clock; 0 = not counted yet
     // Stats thread only: where the arrival ring stood at the last [HUB-JIT] print, so the next one reads exactly the
     // arrivals in between.
     int hostPrevPos = -1; uint64_t hostPrevPackets = 0; std::chrono::steady_clock::time_point hostPrevLast {};
@@ -492,6 +510,11 @@ struct HubPeer {
     std::string clientInstrument;         // Player's instrument (third string of /sb/hxver); empty when not given
     std::string clientPlugin;             // Plugin format and host ("AU in Logic Pro", fourth string); empty for the app
     std::string clientId;                 // The install's anonymous id (fifth string, 32 hex); empty for older players
+    std::string shownName;                // The name the player changed to while on the stage (sixth string); empty = userName
+    std::atomic<int> colorIndex{-1};      // The player's chat colour on this stage (0..9), the same on every player's screen
+    std::atomic<bool> colorFinal{false};  // Settled by the player's first report of this join (its install id decides)
+    std::string refusedName;              // A change that was turned down, so it is answered once
+    std::atomic<bool> nameHeard { false };   // false until the first report after a join
     std::string hairpinVia;               // Set at join when this player's connection arrives through the router; fixed afterwards
     std::atomic<int> hairpinHintsLeft { 0 };   // /sb/hxlanhint answers still owed to this player
     std::atomic<int32_t> clientDevBuf { -1 }, clientDevSr { -1 };   // Player's audio buffer (samples) + rate in force
@@ -698,6 +721,22 @@ public:
     // Port-forward self-test. host:port (its server_port) of a hub that probes us back from outside.
     void setPortCheckHelper(const std::string& hostPort) { mPortCheckHelper = hostPort; }
     void requestPortCheck() { mPortCheckRequested.store(true, std::memory_order_relaxed); }   // Web page button re-runs the self-test
+    // The last finished port check, for the stage directory. checkedS 0 = none yet; state as portCheckState.
+    struct PortReport { int64_t checkedS = 0; std::string closed; int state = 0; };
+    PortReport portCheckReport() const;
+    // Running totals since the hub started, for the stage directory. Gathered by the stats thread and on the
+    // control path; never by the tick, send, receive or listener threads.
+    struct DirectoryStats {
+        bool valid = false;                    // the stats thread has published once
+        int64_t run = 0, upSeconds = 0;        // start id (start time in s) and seconds since the start
+        uint64_t rxBytes = 0, txBytes = 0;     // audio socket, with IP and UDP headers
+        uint64_t playerMs = 0;                 // player time
+        uint64_t upBlocks = 0, upLost = 0, upLate = 0;   // player to hub: blocks expected, given up on, arrival gaps over the hold
+        uint64_t rxConceal = 0, rxReportMs = 0;          // what players reported hearing, and the time of players that report
+        uint64_t ticks = 0, tickMiss = 0;
+    };
+    DirectoryStats directoryStats() const;
+    int takePeakPlayers() { return mPeakPeers.exchange(0, std::memory_order_relaxed); }   // most players at once since the last call
     // Connection/security log — every join attempt and every rejection, with a wall-clock stamp:
     // "[HUB-CONN] 05 join-refused addr=192.0.2.11:5 user='x' group='g' wrong password" to stdout
     // (hub.log) AND an in-memory ring of the last 2000 lines for the web page's Log tab. rateLimited = at most one
@@ -850,6 +889,8 @@ public:
         std::string clientVersion, clientOs;   // Player's version and system; empty when the player does not report it
         std::string clientInstrument;          // Player's instrument; empty when not given
         std::string clientPlugin;              // Plugin format and host; empty for the app
+        std::string shownName;                 // Name changed to while on the stage; empty = userName (which stays the key)
+        const std::string& shown() const { return shownName.empty() ? userName : shownName; }
         int clientDevBuf = -1, clientDevSr = -1;   // Player's audio buffer + sample rate
         float clientIfaceMs = -1.0f;               // Player's audio interface latency, input + output (ms); -1 = not reported
         bool  isLan = false;
@@ -982,6 +1023,8 @@ private:
     bool mPortCheckBlocked = false;                   // under mPortCheckMutex: verdict from outside, required port closed
     std::string mPortCheckFailed;                     // under mPortCheckMutex
     std::string mPortFailScratch;                     // port check thread only: closed required ports of the running check
+    std::string mPortOptScratch;                      // port check thread only: the optional audio port when it is closed
+    PortReport mPortReport;                           // under mPortCheckMutex: the last finished check
     std::atomic<int64_t> mPortProbeResultToken{0};    // token of the last /sb/fwprobe/result that reached the hub socket
     std::atomic<int> mPortProbeResultTcp{-1};
     std::string localPortCheckText() const;
@@ -1015,6 +1058,8 @@ private:
     // to stats.csv in the hub data dir by a separate writer thread, to correlate per-block budget compression with audible degradation.
     void statsWriterThread();
     void latencyBroadcastTick();   // /sb/ping + /sb/hxlat every 10 s from statsWriterThread
+    void applyShownName(const std::shared_ptr<HubPeer>& who, const std::string& want);   // receive thread: a player renames itself
+    void sendShownName(const std::string& user, const std::string& shown, bool announce, const std::vector<std::shared_ptr<HubPeer>>& to);
     void welcomeTick(const std::vector<std::shared_ptr<HubPeer>>& peers);   // statsWriterThread: the welcome message, once per join
     std::unique_ptr<std::thread> mStatsThread;
 
@@ -1606,6 +1651,15 @@ private:
     void* mClientEndpoint = nullptr;
 
     int64_t mHubStartedAtMs = 0;
+    // Stage directory totals. A leaving player's counts move to the retired sums (removePeer, exclusive peer lock),
+    // so live players + retired never falls.
+    std::atomic<uint64_t> mRetiredBytesIn{0}, mRetiredBytesOut{0}, mRetiredLost{0}, mRetiredConceal{0}, mRetiredPlayerMs{0}, mRetiredReportMs{0};
+    std::atomic<int> mPeakPeers{0};
+    mutable std::mutex mDirStatsMutex;                // stats thread writes, directory thread reads
+    DirectoryStats mDirStats;
+    std::chrono::steady_clock::time_point mDirStartedAt {};
+    void retirePeerTotalsLocked(HubPeer& p);
+    void notePeakPlayers(int n) { int was = mPeakPeers.load(std::memory_order_relaxed); while (n > was && !mPeakPeers.compare_exchange_weak(was, n, std::memory_order_relaxed)) {} }
 
     // Aggregate bandwidth counters. Updated
     // from networkRecvThread (in) and hub_endpoint_send_impl (out) via
@@ -1633,6 +1687,10 @@ private:
     void removedPlayersSave();                 // permanent removals to the file; control threads only
     std::string mGatewayIp;                    // this computer's default gateway, found at start; under mStageMutex
     // A player on this network who connects through the public address is told the local one (/sb/hxlanhint).
+    std::mutex mColorMemoryMutex;              // leaf lock: chat colours remembered for this run, by install id and by name
+    std::map<std::string, int> mColorByKey;    // "id:<install id>" / "name:<join name>" -> colour index
+    void sendColorNote(const HubPeer& to, const HubPeer& about);   // "/sb/hxcolor s:userName i:index", twice
+    int colorPick(const std::string& id, const std::string& joinName, unsigned presentUsed);   // the player's colour of this run, or a new one
     std::mutex mHairpinMutex;                  // leaf lock for the three members below
     std::string mHairpinGatewayIp, mHairpinPublicIp;
     std::map<std::string, std::string> mJoinIpByUser;   // address each member's server connection came from

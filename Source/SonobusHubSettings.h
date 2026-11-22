@@ -278,6 +278,9 @@ bool deleteStage(const juce::File& settingsFile, std::string& err);
 // What the operator opens for players, one line for the main stage and every listed stage: the port ranges to
 // forward on the router, or the firewall command on Linux.
 std::string stagesForwardHelp();
+// A random id shared by every hub this user runs on this computer (host_id.txt in the default data folder, made
+// on first use). Empty when the file cannot be written.
+std::string hostId();
 // Moves a listed stage to the lowest free pair of the port row (main stage's ports + 2, + 4, ...); a running stage restarts.
 bool moveStagePorts(const juce::File& settingsFile, std::string& err);
 int stageCores();                    // processor cores of this computer

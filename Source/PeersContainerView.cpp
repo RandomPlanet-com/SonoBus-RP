@@ -2507,7 +2507,7 @@ void PeersContainerView::updatePeerViews(int specific)
                 if (processor.isRecordingToFile()) recs.add(TRANS("you"));
                 for (int pi = 0; pi < npeers; ++pi) {
                     if (processor.isHubPeer(processor.getRemotePeerUserName(pi))) continue;
-                    if (processor.isRemotePeerRecording(pi)) recs.add(processor.getRemotePeerUserName(pi));
+                    if (processor.isRemotePeerRecording(pi)) recs.add(processor.getRemotePeerShownName(pi));
                 }
                 if (recs.size() > 0) recPart << hsep << String::fromUTF8("\xe2\x97\x8f ") << TRANS("REC") << ": " << recs.joinIntoString(", ");
             }

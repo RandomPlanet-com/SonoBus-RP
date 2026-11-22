@@ -42,6 +42,7 @@ public:
     void addNewChatMessages(const Array<SBChatEvent> & mesgs, bool refresh=false);
     void refreshMessages(); // only new ones not yet rendered
     void refreshAllMessages(); // re-render all messages
+    void sendTextForTest(const String & text) { mChatSendTextEditor->setText(text, false); commitChatMessage(); }   // test aid (SB_UI_CMD)
 
     void clearAll();
     void resetView();        // the view starts over, the lines stay
@@ -77,6 +78,7 @@ protected:
     void updatePrivateChatMap();
     void appendPrivateChatTab(const String & name, bool setcurrent=false);
     void deletePrivateChatTab(int index);
+    String ourChatName() const;
     void setMesgUnreadForTab(int index, bool flag);
     void setMesgUnreadForTab(const String & name, bool flag);
 

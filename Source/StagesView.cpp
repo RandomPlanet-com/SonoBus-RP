@@ -741,28 +741,9 @@ StagesView::StagesView()
     mStatus.setColour(juce::Label::textColourId, kDim);
     addAndMakeVisible(mStatus);
 
-    // One Connect button for the selected row, top right.
-    mConnect.setButtonText(TRANS("Connect"));
-    mConnect.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1f8f86));
-    mConnect.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    mConnect.onClick = [this] { connectSelected(); };
-    mConnect.setEnabled(false);
-    addAndMakeVisible(mConnect);
-    mSelected.setJustificationType(juce::Justification::centredRight);
-    mSelected.setFont(juce::Font(14.0f * fontScale()));
-    mSelected.setColour(juce::Label::textColourId, juce::Colour(0xffcfcfcf));
-    mSelected.setMinimumHorizontalScale(1.0f);
-    addAndMakeVisible(mSelected);
-    mHint.setJustificationType(juce::Justification::centredRight);
-    mHint.setFont(juce::Font(12.5f * fontScale()));
-    mHint.setColour(juce::Label::textColourId, kDim);
-    mHint.setText(TRANS("Double-click a stage to connect"), juce::dontSendNotification);
-    addAndMakeVisible(mHint);
-    mNotice.setJustificationType(juce::Justification::centredLeft);
-    mNotice.setFont(juce::Font(14.0f * fontScale()));
-    mNotice.setColour(juce::Label::textColourId, kWarn);
-    mNotice.setMinimumHorizontalScale(1.0f);
-    addAndMakeVisible(mNotice);
+    mBar.onConnect = [this] { connectSelected(); };
+    mBar.onHeightChanged = [this] { resized(); };
+    addAndMakeVisible(mBar);
 
     const int fixed = juce::TableHeaderComponent::visible;
     const int normal = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::sortable | juce::TableHeaderComponent::resizable;
@@ -908,14 +889,6 @@ void StagesView::paint(juce::Graphics& g)
     const juce::Font font(12.5f * fontScale());
     g.setFont(font);
 
-    juce::String me = userName ? userName() : juce::String();
-    const juce::String inst = userInstrument ? userInstrument() : juce::String();
-    if (me.isNotEmpty() && f.getWidth() > 700) {
-        const juce::String t = TRANS("You join as") + " " + me + (inst.isNotEmpty() ? " (" + inst + ")" : juce::String());
-        g.setColour(kDim);
-        g.drawText(t, f.removeFromRight(font.getStringWidth(t) + 10), juce::Justification::centredRight, true);
-    }
-
     auto put = [&](const juce::String& t, juce::Colour c, bool withDot) {
         const int w = font.getStringWidth(t) + 14 + (withDot ? 14 : 0);
         if (f.getWidth() < w) { f.setWidth(0); return; }
@@ -946,8 +919,7 @@ void StagesView::resized()
     mHeader.setColumnVisible(colGenre, w >= 680);
     mHeader.setColumnVisible(colCity, w >= 560);
 
-    mConnectRow = r.removeFromTop(46);
-    layoutConnectRow();
+    mBar.setBounds(r.removeFromTop(mBar.heightFor(w)));
 
     const bool oneRow = w >= (mKind.isVisible() ? 1400 : 1180);
     auto top = r.removeFromTop(oneRow ? 44 : 80).reduced(10, 7);
@@ -1005,7 +977,7 @@ void StagesView::timerCallback()
         mWorker->idle = true;
     }
     updateStatus();
-    if (mNotice.getText().isNotEmpty() && juce::Time::getMillisecondCounter() - mNoticeAt > 60000u) showNotice({});
+    if (mBar.getNotice().isNotEmpty() && juce::Time::getMillisecondCounter() - mNoticeAt > 60000u) showNotice({});
     const juce::String here = currentStage ? currentStage() : juce::String();
     if (here != mHereShown) {   // joined or left: the tags and the Connect button follow
         mHereShown = here;
@@ -1050,43 +1022,13 @@ StagesView::PlayerColumns StagesView::playerColumns(int fullWidth) const
     return c;
 }
 
-void StagesView::layoutConnectRow()
-{
-    auto bar = mConnectRow.reduced(10, 7);
-    if (bar.isEmpty()) return;
-    mConnect.setBounds(bar.removeFromRight(juce::roundToInt(130.0f * fontScale())));
-    bar.removeFromRight(12);
-    const int selW = mSelected.getText().isEmpty() ? 0
-                   : juce::jmin(juce::jmax(0, bar.getWidth() - 10), mSelected.getFont().getStringWidth(mSelected.getText()) + 16);
-    mSelected.setBounds(bar.removeFromRight(selW));
-    const int hintW = mHint.getFont().getStringWidth(mHint.getText()) + 16;
-    const bool showHint = bar.getWidth() >= hintW + (mNotice.getText().isNotEmpty() ? 420 : 8);   // the notice comes first
-    mHint.setVisible(showHint);
-    if (showHint) { bar.removeFromRight(6); mHint.setBounds(bar.removeFromRight(hintW)); }
-    mNotice.setBounds(bar);
-
-    // The full text in the hover when a label has to wrap past its lines or end in "..."
-    auto tipIfCut = [](juce::Label& l) {
-        const auto font = l.getFont();
-        const int lines = juce::jmax(1, (int) ((float) (l.getHeight() - 2) / font.getHeight()));
-        const int room = lines * (l.getWidth() - 10) - (lines > 1 ? juce::roundToInt(font.getHeight() * 3.0f) : 0);   // wrapping loses some at word ends
-        l.setTooltip(SbTextFit::textWidth(font, l.getText()) > room ? l.getText() : juce::String());
-    };
-    tipIfCut(mSelected);
-    tipIfCut(mNotice);
-}
-
 // Connect follows the selected row: off with nothing selected and on the stage this player is on.
 void StagesView::updateConnect()
 {
     const Stage* sel = nullptr;
     for (const auto& s : mRows) if (s.id == mSelectedId) { sel = &s; break; }
-    const juce::String t = sel != nullptr ? TRANS("Selected:") + " " + sel->name : juce::String();
-    if (mSelected.getText() != t) {
-        mSelected.setText(t, juce::dontSendNotification);
-        layoutConnectRow();
-    }
-    mConnect.setEnabled(sel != nullptr && ! isHere(*sel));
+    mBar.setSelected(sel != nullptr ? TRANS("Selected:") + " " + sel->name : juce::String());
+    mBar.setCanConnect(sel != nullptr && ! isHere(*sel));
 }
 
 void StagesView::connectSelected()
@@ -1297,9 +1239,8 @@ void StagesView::flash(const juce::String& note)
 
 void StagesView::showNotice(const juce::String& text)
 {
-    mNotice.setText(text, juce::dontSendNotification);
     mNoticeAt = juce::Time::getMillisecondCounter();
-    layoutConnectRow();
+    mBar.setNotice(text);
 }
 
 void StagesView::updateStatus()
@@ -1334,7 +1275,7 @@ void StagesView::requestJoin(const Stage& s)
     if (isHere(s)) { flash(TRANS("You are on this stage.")); return; }
     if (s.test)    { flash(TRANS("That is a made-up test stage. It cannot be joined.")); return; }
     if (isFull(s)) { flash(TRANS("That stage is full.")); return; }
-    if (userName && userName().isEmpty()) { flash(TRANS("Enter your name in the Connect window first.")); return; }
+    if (mBar.getPlayerName().isEmpty()) { mBar.setNameMissing(true); flash(TRANS("Enter your name first.")); return; }
 
     JoinRequest req;
     req.host = s.host;

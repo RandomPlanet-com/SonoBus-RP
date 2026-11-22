@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jason Buecker (Random Planet)
 #include "SonobusHubDirectory.h"
 #include "SonobusHubServer.h"
+#include "SonobusHubSettings.h"
 #include <iostream>
 #if JUCE_LINUX || JUCE_MAC
 #include <sys/stat.h>
@@ -88,7 +89,7 @@ std::string HubStageDirectory::checkinJson() {
     const int64_t nowMs = juce::Time::currentTimeMillis();
     for (const auto& p : snap.peers) {
         const char* sep = players.empty() ? "" : ",";
-        players += sep + jsonText(juce::String::fromUTF8(p.userName.c_str()).substring(0, 30).toStdString());
+        players += sep + jsonText(juce::String::fromUTF8(p.shown().c_str()).substring(0, 30).toStdString());
         instruments += sep + jsonText(p.clientInstrument);
         const float rtt = p.smoothedRttMs > 0.0f ? p.smoothedRttMs : p.smoothedRttUpMs;   // the round trip the player's own header shows
         // Unknown is "null": the directory keeps only real numbers and would turn a -1 into 0.
@@ -117,6 +118,21 @@ std::string HubStageDirectory::checkinJson() {
     j += std::string(",\"names_public\":") + (showNames ? "true" : "false");
     j += ",\"max_players\":" + std::to_string(st.maxPlayers) + ",\"max_channels\":" + std::to_string(st.maxChannels);
     j += ",\"version\":" + jsonText(SONOBUS_HUB_VERSION) + ",\"os\":" + jsonText(os);
+    // Totals since the start and the last port check. A directory that does not know these fields ignores them.
+    if (!mHostId.empty()) j += ",\"host_id\":" + jsonText(mHostId);
+    if (const auto d = mHub.directoryStats(); d.valid) {
+        auto n = [](uint64_t v) { return std::to_string((unsigned long long) v); };
+        j += ",\"stats\":{\"v\":1,\"run\":" + std::to_string((long long) d.run) + ",\"up_s\":" + std::to_string((long long) d.upSeconds);
+        j += ",\"rx_bytes\":" + n(d.rxBytes) + ",\"tx_bytes\":" + n(d.txBytes);
+        j += ",\"player_s\":" + n(d.playerMs / 1000) + ",\"peak\":" + std::to_string(juce::jmax(mPendingPeak, (int) snap.peers.size()));
+        j += ",\"up_blocks\":" + n(d.upBlocks) + ",\"up_lost\":" + n(d.upLost) + ",\"up_late\":" + n(d.upLate);
+        j += ",\"rx_conceal\":" + n(d.rxConceal) + ",\"rx_report_s\":" + n(d.rxReportMs / 1000);
+        j += ",\"ticks\":" + n(d.ticks) + ",\"tick_miss\":" + n(d.tickMiss) + "}";
+    }
+    {
+        const auto pr = mHub.portCheckReport();
+        j += ",\"ports\":{\"checked\":" + std::to_string((long long) pr.checkedS) + ",\"closed\":" + jsonText(pr.closed) + ",\"state\":" + std::to_string(pr.state) + "}";
+    }
     j += "}";
     return j;
 }
@@ -137,12 +153,14 @@ void HubStageDirectory::run() {
     int64_t nextAt = 0;
     std::string heldWhy;   // the hold last acted on
     std::string lastOutcome;   // the check-in outcome last logged
+    mHostId = sb_hub_gui::hub_settings::hostId();
     while (!threadShouldExit()) {
         const auto st = mHub.stageSettings();
         const uint64_t gen = mHub.stageSettingsGeneration();
         const int64_t now = juce::Time::currentTimeMillis();
         if (!mListed && lastOutcome == "listed") lastOutcome.clear();   // the listing was taken down: the next outcome is news
         if (!st.list) {
+            mHub.takePeakPlayers(); mPendingPeak = 0;   // nothing is reported while the stage is not listed
             if (mListed) leave();
             seenGen = gen;
             wait(1000);
@@ -173,6 +191,7 @@ void HubStageDirectory::run() {
         if (gen != seenGen || now >= nextAt) {
             seenGen = gen;
             int status = 0; std::string reply;
+            mPendingPeak = juce::jmax(mPendingPeak, mHub.takePeakPlayers());
             const bool reached = post("hub/checkin", checkinJson(), status, reply);
             auto v = juce::JSON::parse(juce::String::fromUTF8(reply.c_str()));
             auto* o = v.getDynamicObject();
@@ -182,6 +201,7 @@ void HubStageDirectory::run() {
                 if (outcome != lastOutcome) { lastOutcome = outcome; std::cout << "[HUB-STAGES] check-in failed: " << outcome << ", next try in 60 s\n"; }
                 intervalS = 60;
             } else {
+                mPendingPeak = 0;   // answered: the peak was taken
                 const bool listed = (bool) o->getProperty("listed");
                 const std::string reason = o->getProperty("reason").toString().toStdString();
                 const juce::String host = juce::String(mBase).fromFirstOccurrenceOf("://", false, false).upToFirstOccurrenceOf("/", false, false);

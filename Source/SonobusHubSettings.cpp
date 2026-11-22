@@ -189,7 +189,9 @@ const std::vector<FormSpec>& formSpecs() {
         { 0, "max_players",        "Most players",                      0, nullptr },
         { 0, "max_channels",       "Most channels per player",          0, nullptr },
         { 0, "forget_players_days", "Forget players not seen for (days)", 0, nullptr },
-        { 0, nullptr,              "Stage directory",                   0, nullptr },
+        { 0, nullptr,              "Stage directory",                   0, nullptr,
+          "A listed stage reports its player count and its own SonoBus traffic and audio-quality totals to the stage directory. "
+          "It never reports other traffic of the computer, player addresses or chat." },
         { 0, "list_stage",         "List this stage",                   1, nullptr },
         { 0, "location_city",      "City",                              0, nullptr },
         { 0, "location_region",    "State / Province / Region",         0, nullptr },
@@ -293,6 +295,27 @@ juce::File stageMainFolder() { return stageOwnerRef(); }
 static juce::File mainDataDir() { return isStage() ? stageOwnerRef() : dataDir(); }
 
 juce::File defaultFile() { return dataDir().getChildFile("hub_settings.json"); }
+
+std::string hostId() {
+    const juce::File file = defaultDataDir().getChildFile("host_id.txt");
+    auto read = [&file]() -> std::string {
+        const juce::String t = file.loadFileAsString().trim();
+        return t.length() >= 8 && t.length() <= 64 && t.containsOnly("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-") ? t.toStdString() : std::string();
+    };
+    // Stages that start together must agree on one id: one of them at a time looks and writes.
+    juce::InterProcessLock gate("SonoBusRPHub-host-id");
+    const bool held = gate.enter(3000);
+    std::string id = read();
+    if (id.empty()) {
+        defaultDataDir().createDirectory();
+        const juce::File tmp = file.getSiblingFile("host_id." + juce::Uuid().toString().substring(0, 8) + ".tmp");
+        if (tmp.replaceWithText(juce::Uuid().toDashedString())) tmp.moveFileTo(file);
+        tmp.deleteFile();
+        id = read();
+    }
+    if (held) gate.exit();
+    return id;
+}
 
 static juce::File machineLogFile() {
 #if JUCE_MAC
@@ -1462,6 +1485,7 @@ std::string stagesForwardHelp() {
         out += "sudo ufw allow " + span(r) + "/tcp && sudo ufw allow " + span(r) + "/udp";
     }
     out = "Open in this server's firewall (and in the provider's, if there is one), for players: " + out + ".";
+    out += " If this server sits behind a router, forward the same ports on the router to this server.";
     if (!webRanges.empty()) {
         std::string w;
         for (const auto& r : webRanges) { if (!w.empty()) w += " && "; w += "sudo ufw allow " + span(r) + "/tcp"; }

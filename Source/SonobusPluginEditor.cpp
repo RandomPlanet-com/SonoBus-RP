@@ -4,6 +4,7 @@
 
 
 
+#include "SbChooserCombo.h"
 #include "SonobusPluginProcessor.h"
 #include "SonobusPluginEditor.h"
 #include "SonobusPlusVersion.h"
@@ -388,7 +389,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
         currConnectionInfo.serverPort = DEFAULT_HUB_SERVER_PORT;
     }
 
-    String lastusername = processor.getCurrentUsername().trim();
+    String lastusername = processor.getShownUsername().trim();
     if (lastusername.isNotEmpty()) {
         currConnectionInfo.userName = lastusername;
     }
@@ -418,9 +419,15 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainUserLabel->setTitle(TRANS("Your Name"));
     mMainUserLabel->setFont(17);
     mMainUserLabel->setEnabled(false);
+    // A click edits the name in place (same box, same type); Enter or leaving the field renames live on the stage
+    mMainUserLabel->setEditable(true, false, false);
+    mMainUserLabel->setMouseCursor(MouseCursor::IBeamCursor);
+    mMainUserLabel->onTextChange = [this] { mainNameEdited(); };
+    // The stage name only shows; the stage menu opens from its arrow
+    mMainGroupLabel->setInterceptsMouseClicks(true, false);
 
     // What this player plays, in reach at all times; same stored value as the Connect panel's field
-    mMainInstrumentCombo = std::make_unique<ComboBox>("maininstrument");
+    mMainInstrumentCombo = std::make_unique<SbChooserCombo>("maininstrument");
     mMainInstrumentCombo->setEditableText(true);   // the list is a help; anything can be typed
     mMainInstrumentCombo->addItemList(ConnectView::instrumentChoices(), 1);
     mMainInstrumentCombo->setTextWhenNothingSelected(TRANS("Your instrument"));
@@ -449,8 +456,8 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mMainPersonImage->setImage(ImageCache::getFromMemory(BinaryData::person_png, BinaryData::person_pngSize));
     mMainGroupImage = std::make_unique<ImageComponent>();
     mMainGroupImage->setImage(ImageCache::getFromMemory(BinaryData::people_png, BinaryData::people_pngSize));
-    mMainPersonImage->setInterceptsMouseClicks(false, false);
-    mMainGroupImage->setInterceptsMouseClicks(false, false);
+    mMainPersonImage->setInterceptsMouseClicks(true, false);   // not a way into the stage menu: its arrow is
+    mMainGroupImage->setInterceptsMouseClicks(true, false);
     mMainPersonImage->setAccessible(false);
     mMainGroupImage->setAccessible(false);
 
@@ -983,6 +990,14 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mConnectView->updateServerFieldsFromConnectionInfo();
     mConnectView->addComponentListener(this);
     mConnectView->onInstrumentChanged = [this] { refreshMainInstrument(); };
+    mConnectView->onStageNameChanged = [this] {
+        currConnectionInfo.userName = processor.getShownUsername();
+        mMainUserLabel->setText(currConnectionInfo.userName, dontSendNotification);
+        fitTopBandToText();
+    };
+    mConnectView->onStageNameRefused = [this] (const String & why) {
+        showPopTip(why, 4000, mMainUserLabel.get(), 260);
+    };
 
     // effects
     
@@ -1243,7 +1258,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     // transport), ImageComponents/Drawables, and the child views (PeersContainerView etc.).
     for (Component* c : std::initializer_list<Component*>{
             // labels
-            mTitleLabel.get(), mMainGroupLabel.get(), mMainUserLabel.get(),
+            mTitleLabel.get(), mMainGroupLabel.get(),
             mMainPeerLabel.get(), mMainMessageLabel.get(),
             mMetLevelSliderLabel.get(), mMetTempoSliderLabel.get(),
             mInGainLabel.get(), mDryLabel.get(), mOutGainLabel.get(),
@@ -2106,6 +2121,10 @@ String SonobusAudioProcessorEditor::inputMeterChannelName(int ch, int n)
 void SonobusAudioProcessorEditor::timerCallback(int timerid)
 {
     if (timerid == PeriodicUpdateTimerId) {
+        {   // the hub named a player's chat colour (or changed it): the chat is drawn again, so every line agrees
+            const int gen = processor.getHubColorGen();
+            if (gen != mSeenHubColorGen) { mSeenHubColorGen = gen; if (mChatView) mChatView->refreshAllMessages(); }
+        }
         if (!JUCEApplicationBase::isStandaloneApp()) sbResizeStatsFlush(false);
         if (!JUCEApplicationBase::isStandaloneApp() && getLocalBounds() != mUiLogSize) {   // The size a resize ended at
             mUiLogMs = Time::getMillisecondCounter(); mUiLogSize = getLocalBounds();
@@ -3370,7 +3389,7 @@ void SonobusAudioProcessorEditor::showLatencyMatchView(bool show)
         mLatMatchView->startLatMatchProcess();
 
 
-        Rectangle<int> bounds =  dw->getLocalArea(nullptr, mMainLinkButton->getScreenBounds());
+        Rectangle<int> bounds =  dw->getLocalArea(nullptr, linkArrowScreenBounds());
         DBG("callout bounds: " << bounds.toString());
         latmatchCalloutBox = & SonoCallOutBox::launchAsynchronously (std::move(wrap), bounds , dw, false, [this](const Component * comp) {
             if (comp == mMainLinkButton.get()) return false;
@@ -3426,7 +3445,7 @@ void SonobusAudioProcessorEditor::showVDONinjaView(bool show, bool fromVideoButt
 
         wrap->setSize(usewidth, jmin(useheight, dw->getHeight() - 24));
 
-        Rectangle<int> bounds =  dw->getLocalArea(nullptr, fromVideoButton ? mVideoButton->getScreenBounds() : mMainLinkButton->getScreenBounds());
+        Rectangle<int> bounds =  dw->getLocalArea(nullptr, fromVideoButton ? mVideoButton->getScreenBounds() : linkArrowScreenBounds());
         DBG("callout bounds: " << bounds.toString());
         vdoninjaViewCalloutBox = & CallOutBox::launchAsynchronously (std::move(wrap), bounds , dw, false);
         if (CallOutBox * box = dynamic_cast<CallOutBox*>(vdoninjaViewCalloutBox.get())) {
@@ -3480,7 +3499,7 @@ void SonobusAudioProcessorEditor::showSuggestGroupView(bool show)
 
         mSuggestNewGroupView->updatePeerRows(true);
 
-        Rectangle<int> bounds =  dw->getLocalArea(nullptr, mMainLinkButton->getScreenBounds());
+        Rectangle<int> bounds =  dw->getLocalArea(nullptr, linkArrowScreenBounds());
         DBG("callout bounds: " << bounds.toString());
         suggestNewGroupViewCalloutBox = & SonoCallOutBox::launchAsynchronously (std::move(wrap), bounds , dw, false, [this](const Component * comp) {
             if (comp == mMainLinkButton.get()) return false;
@@ -3524,6 +3543,12 @@ void SonobusAudioProcessorEditor::runUiCommand()
     else if (verb == "password") { auto * aw = dynamic_cast<AlertWindow*>(modal); if (aw != nullptr && aw->getTextEditor("pw") != nullptr) aw->getTextEditor("pw")->setText(arg); else out = "no password dialog"; }
     else if (verb == "answer") { if (modal != nullptr) modal->exitModalState(arg.getIntValue()); else out = "no dialog"; }
     else if (verb == "touch") list->touched();
+    else if (verb == "tab") { showConnectPopup(true); mConnectView->showTabForTest(arg.getIntValue()); }
+    else if (verb == "size") { if (auto * top = getTopLevelComponent()) top->setSize(arg.upToFirstOccurrenceOf(" ", false, false).getIntValue(), arg.fromFirstOccurrenceOf(" ", false, false).getIntValue()); }
+    else if (verb == "leave") { if (processor.isConnectedToServer()) buttonClicked(mConnectButton.get()); }
+    else if (verb == "rename") { mMainUserLabel->setText(arg, dontSendNotification); mainNameEdited(); out = "now " + processor.getShownUsername(); }
+    else if (verb == "say") { if (mChatView) mChatView->sendTextForTest(arg); }
+    else if (verb == "chatshot") { if (mChatView) save(*mChatView, arg); }
     else if (verb != "stat") out = "unknown command";
     mUiCmdDir.getChildFile("log.txt").appendText(Time::getCurrentTime().toString(false, true) + " | " + line + " | " + out
         + " | stage '" + processor.getCurrentJoinedGroup() + "' port " + String(processor.getServerPortAsTyped())
@@ -3558,6 +3583,22 @@ void SonobusAudioProcessorEditor::refreshMainInstrument()
         mMainInstrumentCombo->setText(processor.getCurrentInstrument(), dontSendNotification);
         fitTopBandToText();
     }
+}
+
+// Your name under the stage name, typed in place like the instrument: on a stage it renames live, same as the
+// Connect panel's name field; an empty or unchanged entry puts the shown name back.
+void SonobusAudioProcessorEditor::mainNameEdited()
+{
+    const String typed = mMainUserLabel->getText().trim().substring(0, SonobusAudioProcessor::kMaxUserNameLength).trim();
+    const String shown = processor.getShownUsername();
+    if (typed.isEmpty() || typed == shown || mConnectView == nullptr || !processor.isConnectedToServer()) {
+        mMainUserLabel->setText(shown, dontSendNotification);
+        return;
+    }
+    mConnectView->nameCommitted(typed);
+    currConnectionInfo.userName = processor.getShownUsername();
+    mMainUserLabel->setText(currConnectionInfo.userName, dontSendNotification);
+    fitTopBandToText();
 }
 
 void SonobusAudioProcessorEditor::fitTopBandToText()
@@ -3709,8 +3750,8 @@ void SonobusAudioProcessorEditor::componentMovedOrResized (Component& component,
 {
     if (&component == mChatView.get()) {
         if (mChatView->isVisible()) {
-            processor.setLastChatWidth(mChatView->getWidth());
             if (!mIgnoreResize) {
+                processor.setLastChatWidth(mChatView->getWidth());   // set by the user, not by the layout
                 resized();
             }
         }
@@ -4054,7 +4095,7 @@ void SonobusAudioProcessorEditor::updateState(bool rebuildInputChannels)
         }
 
         mMainPeerLabel->setText(userstr, dontSendNotification);
-        mMainUserLabel->setText(currConnectionInfo.userName, dontSendNotification);
+        if (! mMainUserLabel->isBeingEdited()) mMainUserLabel->setText(currConnectionInfo.userName, dontSendNotification);   // never under the user's typing
         fitTopBandToText();
 
         mMainUserLabel->setEnabled(true);
@@ -4278,9 +4319,10 @@ void SonobusAudioProcessorEditor::flushJoinHold(bool welcomeCame)
 void SonobusAudioProcessorEditor::rosterPost(const String & group, const String & user, bool joined)
 {
     if (currConnectionInfo.groupIsPublic) return;
+    const String name = processor.getShownNameForUser(user);
     String mesg;
-    mesg << user << (joined ? TRANS(" - joined stage") : TRANS(" - left stage"));
-    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, group, user, "", "", mesg));
+    mesg << name << (joined ? TRANS(" - joined stage") : TRANS(" - left stage"));
+    mChatView->addNewChatMessage(SBChatEvent(SBChatEvent::SystemType, group, name, "", "", mesg));
 }
 
 void SonobusAudioProcessorEditor::handleAsyncUpdate()
@@ -4360,7 +4402,7 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             else {
                 DBG("Already joined a group, update currConnectionInfo");
                 currConnectionInfo.groupName = processor.getCurrentJoinedGroup();
-                currConnectionInfo.userName = processor.getCurrentUsername();
+                currConnectionInfo.userName = processor.getShownUsername();
             }
             
             updateServerStatusLabel(statstr, false);
@@ -4409,6 +4451,12 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
 
                 // A second confirmation of the stage we are already on (a double join at launch) adds nothing.
                 const bool alreadyConfirmed = mRosterGroup == ev.group && !mRosterKept;
+                // A new join opens the chat, where the stage's welcome and the players are told. Closed by the
+                // user, it stays closed until the next join; a connection that came back does not open it.
+                if (mRosterGroup != ev.group && !mChatView->isVisible()) {
+                    showChatPanel(true, false);   // the window keeps its size
+                    resized();
+                }
                 if (!alreadyConfirmed) {
                     flushJoinHold(false);
                     mJoinHold.add(SBChatEvent(SBChatEvent::SystemType, ev.group, "", "", "joinedstage", statstr));
@@ -4638,6 +4686,12 @@ void SonobusAudioProcessorEditor::copyGroupLink()
 #endif
 }
 
+// The stage menu and what it opens point at the menu's arrow, in its own column at the right of the names
+juce::Rectangle<int> SonobusAudioProcessorEditor::linkArrowScreenBounds() const
+{
+    return mMainLinkButton->getScreenBounds().removeFromRight(26);
+}
+
 void SonobusAudioProcessorEditor::showGroupMenu(bool show)
 {
     Array<GenericItemChooserItem> items;
@@ -4671,7 +4725,7 @@ void SonobusAudioProcessorEditor::showGroupMenu(bool show)
 
     Component* dw = mMainLinkButton->findParentComponentOfClass<AudioProcessorEditor>();
     if (!dw) dw = mMainLinkButton->findParentComponentOfClass<Component>();
-    Rectangle<int> bounds =  dw->getLocalArea(nullptr, mMainLinkButton->getScreenBounds());
+    Rectangle<int> bounds =  dw->getLocalArea(nullptr, linkArrowScreenBounds());
 
     SafePointer<SonobusAudioProcessorEditor> safeThis(this);
 
@@ -4788,7 +4842,7 @@ void SonobusAudioProcessorEditor::showLatencyMatchPrompt(const String & name, fl
             }
         };
 
-        Rectangle<int> bounds =  dw->getLocalArea(nullptr, mMainLinkButton->getScreenBounds());
+        Rectangle<int> bounds =  dw->getLocalArea(nullptr, linkArrowScreenBounds());
         DBG("callout bounds: " << bounds.toString());
         latmatchCalloutBox = & CallOutBox::launchAsynchronously (std::move(wrap), bounds , dw, false);
         if (CallOutBox * box = dynamic_cast<CallOutBox*>(latmatchCalloutBox.get())) {
@@ -4861,7 +4915,7 @@ void SonobusAudioProcessorEditor::showSuggestedGroupPrompt(const String &name, c
             }
         };
 
-        Rectangle<int> bounds =  dw->getLocalArea(nullptr, mMainLinkButton->getScreenBounds());
+        Rectangle<int> bounds =  dw->getLocalArea(nullptr, linkArrowScreenBounds());
         DBG("callout bounds: " << bounds.toString());
         suggestedGroupCalloutBox = & SonoCallOutBox::launchAsynchronously (std::move(wrap), bounds , dw, false, [this](const Component * comp) {
             if (comp == mMainLinkButton.get()) return false;
@@ -5078,6 +5132,8 @@ void SonobusAudioProcessorEditor::resized()
     int chatwidth = processor.getLastChatWidth();
 
     mChatOverlay = mainBounds.getWidth() - chatwidth < 340;
+    // Laid over a small window, the chat leaves a strip of the window in view (the remembered width is kept)
+    if (mChatOverlay) chatwidth = jmin(chatwidth, jmax(180, getWidth() - 120));
 
     mIgnoreResize = true; // important!
  
@@ -5167,13 +5223,14 @@ void SonobusAudioProcessorEditor::resized()
 
     //auto grouptextbounds = Rectangle<int>(mMainPeerLabel->getX(), mMainGroupImage->getY(), mMainUserLabel->getRight() - mMainPeerLabel->getX(),  mMainGroupImage->getHeight()).expanded(2, 2);
     //auto grouptextbounds = Rectangle<int>(mMainPeerLabel->getX(), mMainGroupImage->getY(), mMainUserLabel->getRight() - mMainPeerLabel->getX(),  mMainUserLabel->getBottom() - mMainGroupImage->getY());
-    auto grouptextbounds = Rectangle<int>(mMainPeerLabel->getX(), mPeerLayoutFullButton->getY(), mMainUserLabel->getRight() - mMainPeerLabel->getX(),  mPeerLayoutFullButton->getHeight());
+    const int linkArrowColW = 26;   // same as the layout's arrow column
+    auto grouptextbounds = Rectangle<int>(mMainPeerLabel->getX(), mPeerLayoutFullButton->getY(), mMainUserLabel->getRight() + linkArrowColW - mMainPeerLabel->getX(),  mPeerLayoutFullButton->getHeight());
     mMainLinkButton->setBounds(grouptextbounds);
 
     auto triwidth = 12;
     auto triheight = 8;
     //auto linkarrowrect = Rectangle<int>(mMainLinkButton->getRight() - triwidth - 4, mMainLinkButton->getBottom() - mMainLinkButton->getHeight()/2 - triheight + 2, triwidth, triheight);
-    auto linkarrowrect = Rectangle<int>(mMainLinkButton->getRight() - triwidth - 4, mMainLinkButton->getBottom() - triheight - 4, triwidth, triheight);
+    auto linkarrowrect = Rectangle<int>(mMainLinkButton->getRight() - triwidth - 7, mMainLinkButton->getY() + (mMainLinkButton->getHeight() - triheight) / 2, triwidth, triheight);
     mMainLinkArrow->setTransformToFit(linkarrowrect.toFloat(), RectanglePlacement::stretchToFit);
 
 
@@ -5209,7 +5266,12 @@ void SonobusAudioProcessorEditor::resized()
         const String linkTip = TRANS("Press for stage action menu");
         const bool namesCut = mMainGroupLabel->isVisible() && (mMainGroupLabel->getWidth() < SbTextFit::labelWidth(*mMainGroupLabel)
                                                                || mMainUserLabel->getWidth() < SbTextFit::labelWidth(*mMainUserLabel));
-        mMainLinkButton->setTooltip(namesCut ? mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n\n" + linkTip : linkTip);
+        juce::ignoreUnused(namesCut);
+        mMainLinkButton->setTooltip(linkTip);
+        const bool groupCut = mMainGroupLabel->getWidth() < SbTextFit::labelWidth(*mMainGroupLabel);
+        const bool userCut = mMainUserLabel->getWidth() < SbTextFit::labelWidth(*mMainUserLabel);
+        mMainGroupLabel->setTooltip(groupCut ? mMainGroupLabel->getText() : String());
+        mMainUserLabel->setTooltip((userCut ? mMainUserLabel->getText() + "\n\n" : String()) + TRANS("Click to change your name"));
 
         const String instrumentTip = TRANS("What you play. Others see it in the player list and the Stages Directory.");
         const String shown = mMainInstrumentCombo->getText().isNotEmpty() ? mMainInstrumentCombo->getText() : mMainInstrumentCombo->getTextWhenNothingSelected();
@@ -5393,7 +5455,8 @@ void SonobusAudioProcessorEditor::updateLayout()
     mTopBandText = mMainGroupLabel->getText() + "\n" + mMainUserLabel->getText() + "\n" + mMainInstrumentCombo->getText()
                    + "\n" + String(mMainPeerLabel->getText().length());
     const auto labelNeed = [] (Label & l) { return (int) std::ceil (l.getFont().getStringWidthFloat (l.getText())) + 11; };
-    const int stageBlockNeed = jmax(stageBlockMin, iconwidth + 2 + jmax(labelNeed(*mMainGroupLabel), labelNeed(*mMainUserLabel)));
+    const int linkArrowCol = 26;   // the stage menu arrow's own column, right of both names
+    const int stageBlockNeed = jmax(stageBlockMin, iconwidth + 2 + jmax(labelNeed(*mMainGroupLabel), labelNeed(*mMainUserLabel)) + linkArrowCol);
     const String instrumentText = mMainInstrumentCombo->getText().isNotEmpty() ? mMainInstrumentCombo->getText()
                                                                                : mMainInstrumentCombo->getTextWhenNothingSelected();
     const int instrumentNeed = jmax(instrumentMinWidth, (int) std::ceil (Font (15.0f).getStringWidthFloat (instrumentText)) + 24);
@@ -5405,6 +5468,7 @@ void SonobusAudioProcessorEditor::updateLayout()
     mainGroupBox.items.add(FlexItem(iconwidth, iconheight, *mMainGroupImage).withMargin(0).withFlex(0));
     mainGroupBox.items.add(FlexItem(2, 4));
     mainGroupBox.items.add(FlexItem(stageLabelMin, minitemheight/2 + 4, *mMainGroupLabel).withMargin(0).withFlex(1));   // Taller rows for the bigger type
+    mainGroupBox.items.add(FlexItem(linkArrowCol, 4).withFlex(0));
 
 
     mainUserBox.items.clear();
@@ -5413,6 +5477,7 @@ void SonobusAudioProcessorEditor::updateLayout()
     mainUserBox.items.add(FlexItem(iconwidth, iconheight, *mMainPersonImage).withMargin(0).withFlex(0));
     mainUserBox.items.add(FlexItem(2, 4));
     mainUserBox.items.add(FlexItem(stageLabelMin, minitemheight/2 + 2, *mMainUserLabel).withMargin(0).withFlex(1));
+    mainUserBox.items.add(FlexItem(linkArrowCol, 4).withFlex(0));
 
     mainGroupUserBox.items.clear();
     mainGroupUserBox.flexDirection = FlexBox::Direction::column;

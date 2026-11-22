@@ -100,17 +100,19 @@ void SonobusHubWeb::threadMain() {
         if (fd < 0) continue;
         struct timeval tv; tv.tv_sec = 3; tv.tv_usec = 0;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        handleClient(fd);
+        handleClient(fd, (size_t) cl >= sizeof(ca) && ca.sin_family == AF_INET ? (uint32_t) ca.sin_addr.s_addr : 0u);
         hub_close(fd);
     }
 }
 
-bool SonobusHubWeb::authorised(const std::string& headers) const {
+bool SonobusHubWeb::authorised(const std::string& headers, bool* offered) const {
+    if (offered) *offered = false;
     if (mPassword.empty()) return true;
     const std::string key = "authorization: basic ";
     std::string low; low.reserve(headers.size());
     for (char c : headers) low.push_back((char) tolower((unsigned char) c));
     size_t p = low.find(key); if (p == std::string::npos) return false;
+    if (offered) *offered = true;
     size_t e = headers.find("\r\n", p); if (e == std::string::npos) e = headers.size();
     const std::string cred = b64decode(headers.substr(p + key.size(), e - p - key.size()));
     const size_t colon = cred.find(':'); if (colon == std::string::npos) return false;
@@ -118,6 +120,47 @@ bool SonobusHubWeb::authorised(const std::string& headers) const {
     if (pw.size() != mPassword.size()) return false;
     unsigned diff = 0; for (size_t i = 0; i < pw.size(); ++i) diff |= (unsigned)(pw[i] ^ mPassword[i]);
     return diff == 0;
+}
+
+// Sign-in lockout: kLoginMaxWrong wrong passwords from one address inside kLoginWindowMs refuse that address for
+// kLoginBlockMs. The table is capped; the address heard from longest ago makes room.
+static constexpr int kLoginMaxWrong = 5;
+static constexpr long long kLoginWindowMs = 15LL * 60 * 1000, kLoginBlockMs = 15LL * 60 * 1000;
+static constexpr size_t kLoginTableMax = 1024;
+
+long long SonobusHubWeb::loginBlockedForMs(uint32_t ip, long long nowMs) {
+    const auto it = mLogins.find(ip);
+    if (it == mLogins.end() || it->second.blockedUntilMs == 0) return 0;
+    if (nowMs < it->second.blockedUntilMs) return it->second.blockedUntilMs - nowMs;
+    mLogins.erase(it);   // the block is over: a clean start
+    return 0;
+}
+
+void SonobusHubWeb::loginWrong(uint32_t ip, long long nowMs) {
+    auto it = mLogins.find(ip);
+    if (it == mLogins.end()) {
+        if (mLogins.size() >= kLoginTableMax) {
+            // Blocked addresses stay while any other can go.
+            auto oldest = mLogins.end();
+            for (auto i = mLogins.begin(); i != mLogins.end(); ++i) {
+                const bool iBlocked = i->second.blockedUntilMs > nowMs;
+                if (oldest == mLogins.end()) { oldest = i; continue; }
+                const bool oBlocked = oldest->second.blockedUntilMs > nowMs;
+                if (iBlocked != oBlocked ? oBlocked : i->second.lastMs < oldest->second.lastMs) oldest = i;
+            }
+            if (oldest != mLogins.end()) mLogins.erase(oldest);
+        }
+        it = mLogins.emplace(ip, LoginTrack()).first;
+    }
+    LoginTrack& t = it->second;
+    if (t.wrong == 0 || nowMs - t.firstWrongMs > kLoginWindowMs) { t.wrong = 0; t.firstWrongMs = nowMs; }
+    t.lastMs = nowMs;
+    if (++t.wrong < kLoginMaxWrong) return;
+    t.blockedUntilMs = nowMs + kLoginBlockMs;
+    char text[INET_ADDRSTRLEN] = {};
+    struct in_addr a; a.s_addr = ip;
+    inet_ntop(AF_INET, &a, text, sizeof(text));
+    std::cout << "[HUB-WEB] sign-in refused for 15 minutes for " + std::string(text) + ": " + std::to_string(kLoginMaxWrong) + " wrong passwords within 15 minutes\n";
 }
 
 static void sendAll(int fd, const char* data, size_t size) {
@@ -430,7 +473,7 @@ async function tick(){
    const lf=(p.latFeedAgeS===undefined||p.latFeedAgeS<0)?'<span class="d">–</span>':(p.latFeedAgeS<=35?`<span class="g">${p.latFeedAgeS}s</span>`:`<span class="r">dark ${p.latFeedAgeS}s</span>`);
    const loc=p.location===''?'<span class="d">…</span>':esc(p.location);
    const dev=p.devBuf>0?`${p.devBuf} @ ${Math.round(p.devSr/1000)}k`:'–';
-   const name=(p.recording?'<span class="rec">● </span>':'')+esc(p.user);
+   const name=(p.recording?'<span class="rec">● </span>':'')+esc(p.name||p.user);
    const inputs=`${p.inputs}`;
    const hb=(p.sinkBufMs<0)?'<span class="d">–</span>':`${p.sinkBufMs.toFixed(1)}<span class="u">ms</span>${p.holdAtCeiling?' ⚠':''}`;
    const pbm=(p.recvBufMode===1)?' <span class="d">A</span>':(p.recvBufMode===0)?' <span class="d">M</span>':'';
@@ -442,7 +485,7 @@ async function tick(){
    const verShort=p.ver?`${esc(p.ver.split(' (')[0])}${p.ver.includes('-dev')?' dev':''}${p.os?' · '+esc(p.os):''}${p.plug&&bare?' · '+esc(p.plug):''}${host?'<span class="vh">'+esc(host)+'</span>':''}`:'<span class="d">–</span>';
    const cells=[`${name}<span class="tip">${esc(p.addr)}</span>`,esc(p.inst||''),loc,inputs,sig,pair(mb(up),mb(dn)),`<span class="${dc}">${p.drops}</span>`,pair(lat(p.toHubMs),lat(p.fromHubMs)),jb,nj,pair(hb,pb),gl,lf,dev,dur((now-p.joinedAtMs)/1000),verShort];
 
-   rowKeys.set(p.id,[p.user.toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
+   rowKeys.set(p.id,[(p.name||p.user).toLowerCase(),(p.inst||'').toLowerCase(),p.location||'',p.inputs,p.muted?'muted':(p.blocksNonZero>0?'sending':'silent'),up,p.drops,p.toHubMs,p.jitBufPct,p.jitP99,p.sinkBufMs,(p.rxUnderruns<0)?-1:(p.rxUnderrunsTotal+p.rxPopsTotal),(p.latFeedAgeS===undefined?-1:p.latFeedAgeS),p.devBuf,(now-p.joinedAtMs),(p.ver||'')]);
    let tr=rowMap.get(p.id);
    if(!tr){tr=document.createElement('tr');tr.dataset.id=p.id;for(let i=0;i<COLS;i++){const td=document.createElement('td');if([3,6,8,9,12].includes(i))td.className='num';if([5,7,10,11].includes(i))td.className='ctr';if(i===7)td.className='ctr ifc';if(i===0)td.className='user';if(i===1)td.className='ins';if(i===VERC)td.className='ver';tr.appendChild(td);}$('rows').appendChild(tr);rowMap.set(p.id,tr);}
    cells.forEach((c,i)=>setH(tr.children[i],c));
@@ -766,7 +809,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
         float toHub = -1.0f, fromHub = -1.0f;
         const bool have = SonobusHubServer::computeHubLatency(p.smoothedRttUpMs, p.smoothedRttMs, p.sinkBufMs, toHub, fromHub, p.clientRecvBufMs);
         if (!first) o << ","; first = false;
-        o << "{\"id\":" << p.id << ",\"user\":\"" << jsonEscape(p.userName) << "\",\"inputs\":" << p.recvChannels
+        o << "{\"id\":" << p.id << ",\"user\":\"" << jsonEscape(p.userName) << "\",\"name\":\"" << jsonEscape(p.shown()) << "\",\"inputs\":" << p.recvChannels
           << ",\"addr\":\"" << jsonEscape(p.ipAddr) << ":" << p.port << "\",\"lan\":" << (p.isLan ? "true" : "false")
           << ",\"blocks\":" << p.lastBlocks << ",\"blocksNonZero\":" << p.lastBlocksNonZero << ",\"drops\":" << p.lostBlocks
           << ",\"bytesIn\":" << p.bytesIn << ",\"bytesOut\":" << p.bytesOut
@@ -794,7 +837,7 @@ std::string SonobusHubWeb::buildStatusJson() const {
     return o.str();
 }
 
-void SonobusHubWeb::handleClient(int fd) {
+void SonobusHubWeb::handleClient(int fd, uint32_t fromIp) {
     std::string req; char buf[2048];
     while (req.size() < 16384) {
         const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
@@ -814,7 +857,23 @@ void SonobusHubWeb::handleClient(int fd) {
         sendAll(fd, httpResponse(200, "OK", "image/png", std::string((const char*) kHubWebIconPng, kHubWebIconPngSize), "", "public, max-age=86400"));
         return;
     }
-    if (!authorised(req)) { sendAll(fd, httpResponse(401, "Unauthorized", "text/plain", "password required\n", "WWW-Authenticate: Basic realm=\"SonoBus RP Hub\"\r\n")); return; }
+    if (!mPassword.empty()) {
+        const long long nowMs = webNowMs();
+        // A refused address gets no password check at all.
+        if (const long long leftMs = loginBlockedForMs(fromIp, nowMs)) {
+            const long long leftS = (leftMs + 999) / 1000;
+            sendAll(fd, httpResponse(429, "Too Many Requests", "text/plain", "Too many wrong passwords. Try again in " + std::to_string((leftS + 59) / 60) + " min.\n",
+                                     "Retry-After: " + std::to_string(leftS) + "\r\n"));
+            return;
+        }
+        bool offered = false;
+        if (!authorised(req, &offered)) {
+            if (offered) loginWrong(fromIp, nowMs);   // a request without a password is the browser asking, not a guess
+            sendAll(fd, httpResponse(401, "Unauthorized", "text/plain", "password required\n", "WWW-Authenticate: Basic realm=\"SonoBus RP Hub\"\r\n"));
+            return;
+        }
+        if (!mLogins.empty()) mLogins.erase(fromIp);
+    }
     if (method == "POST") {
         // Settings + port-check actions. Both need a configured password: an open status
         // page must never let the internet change the hub.

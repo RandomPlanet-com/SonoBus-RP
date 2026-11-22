@@ -2,6 +2,31 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-22
+
+### SonoBus RP 1.3.8
+
+- Your name and instrument are at the top of the Stages, Recents and Private Stage tabs, so you see and can change them before you join.
+- Change your name while on a stage: click your name under the stage name, type the new one and press Enter. Everyone on the stage sees it at once.
+- Chat opens when you join a stage, so you see the stage's welcome message.
+- Each player has one chat color, the same on everyone's screen, kept through a name change or a rejoin.
+- At your own hub server's site, the player app connects to the hub server through your local network by itself, even when you use the public stage link.
+- Connect window: tabs and content stay better aligned in the window; Recents is a list with columns; one click selects, double-click or Connect joins.
+- All drop-down lists open in the same pop-up style.
+
+### SonoBus RP Plugins 1.3.8
+
+- The changes of SonoBus RP 1.3.8.
+
+### SonoBus RP Hub 1.3.7
+
+- Players can change their name while on the stage; the hub window, the web page and the stages list show the new name.
+- The hub gives each player one chat color for everyone on the stage.
+- A player at the hub's own site is sent to the local network by itself; the old chat hint is gone.
+- The web page refuses an address for 15 minutes after 5 wrong passwords.
+- A player name AND  instrument name can contain special characters '&#$' etc
+- Linux: the port help also says to forward the ports on the router.
+
 ## 2026-11-21
 
 ### SonoBus RP 1.3.7
@@ -12,7 +37,6 @@ What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the 
 - Chat: the stage's welcome message comes first when you join, then the players on the stage.
 - Chat: player joins and leaves are quiet grey lines.
 - Player rows show each player's instrument: "Name (Instrument)".
-- At home, the app connects to your own hub through your local network instead of looping out through the router.
 - Stages list: Copy invite link is a button, and "Link copied" shows right beside it.
 - Clicking a player's name no longer hides that player's details; clicks next to the "SonoBus RP" title no longer open Settings.
 

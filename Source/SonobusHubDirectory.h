@@ -26,5 +26,7 @@ private:
     std::string mBase, mHubId, mHubKey;
     juce::File mDataDir;
     bool mListed = false;
+    std::string mHostId;     // directory thread only
+    int mPendingPeak = 0;    // most players at once since the last answered check-in; directory thread only
     std::atomic<bool> mLeaveOnStop{true};
 };

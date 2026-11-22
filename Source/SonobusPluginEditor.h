@@ -293,6 +293,9 @@ private:
     std::unique_ptr<ComboBox> mMainInstrumentCombo;   // next to the own name, always shown
     void refreshMainInstrument();
     void fitTopBandToText();   // the stage, name and instrument boxes follow their text
+    void mainNameEdited();     // the own name typed in place under the stage name
+    int mSeenHubColorGen = 0;
+    juce::Rectangle<int> linkArrowScreenBounds() const;   // where the stage menu points
     std::unique_ptr<Label> mMainPeerLabel;
     std::unique_ptr<ImageComponent> mMainGroupImage;
     std::unique_ptr<ImageComponent> mMainPersonImage;

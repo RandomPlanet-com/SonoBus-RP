@@ -393,7 +393,7 @@ static double peerSortNumber(const SonobusHubServer::UiPeerSnapshot& p, int col,
 }
 static juce::String peerSortText(const SonobusHubServer::UiPeerSnapshot& p, int col) {
     switch (col) {
-        case 0: return juce::String::fromUTF8(p.userName.c_str());
+        case 0: return juce::String::fromUTF8(p.shown().c_str());
         case 1: return juce::String::fromUTF8(p.clientInstrument.c_str());
         case 2: return juce::String::fromUTF8(p.location.c_str());
         case 4: return p.isSendMuted ? "muted" : p.lastBlocksNonZero > 0 ? "sending" : "silent";
@@ -482,7 +482,7 @@ void PeerTable::layoutColumns() {
         partsWidth({ "99.9", " ms", " !", " / ", "999.9", " ms", " A" }),
         partsWidth({ "9999", " (+99)", " x99" }), textW("999s"), textW("1024 @ 44.1k"), textW("999h 59m"), 0 };
     for (auto& p : mPeers) {
-        cell[0] = std::max(cell[0], textW(juce::String::fromUTF8("\xe2\x97\x8f ") + juce::String::fromUTF8(p.userName.c_str())));   // with the record dot
+        cell[0] = std::max(cell[0], textW(juce::String::fromUTF8("\xe2\x97\x8f ") + juce::String::fromUTF8(p.shown().c_str())));   // with the record dot
         cell[1] = std::max(cell[1], textW(juce::String::fromUTF8(p.clientInstrument.c_str())));
         cell[2] = std::max(cell[2], textW(juce::String::fromUTF8(p.location.c_str())));
         const juce::String full = juce::String::fromUTF8(p.clientVersion.c_str());
@@ -565,7 +565,7 @@ void PeerTable::paint(juce::Graphics& g) {
         };
 
         {
-            juce::String name = (p.isRecording ? juce::String::fromUTF8("\xe2\x97\x8f ") : juce::String()) + juce::String::fromUTF8(p.userName.c_str());
+            juce::String name = (p.isRecording ? juce::String::fromUTF8("\xe2\x97\x8f ") : juce::String()) + juce::String::fromUTF8(p.shown().c_str());
             cell(name, p.isRecording ? juce::Colours::red : pal::text);
         }
         cell(juce::String::fromUTF8(p.clientInstrument.c_str()), pal::text);   // empty when the player has not set one
@@ -2325,7 +2325,10 @@ void SettingsPanel::layoutForm() {
                 y[sp.col] += kSectionH + 2;
                 if (si < mSectionHints.size() && mSectionHints[si]) {
                     auto& h = *mSectionHints[si];
-                    const int hintH = h.getFont().getStringWidth(h.getText()) + 12 > colW ? 38 : 22;   // two lines in a narrow column
+                    // As many lines as the text needs in this column (word wrap needs some room to spare).
+                    const int textW = h.getFont().getStringWidth(h.getText());
+                    const int lines = textW + 12 <= colW ? 1 : juce::jlimit(2, 6, (int) std::ceil(textW * 1.1 / (double) std::max(1, colW - 12)));
+                    const int hintH = 6 + 16 * lines;
                     h.setBounds(x, y[sp.col] - 4, colW, hintH);
                     y[sp.col] += hintH;
                 }

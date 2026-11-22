@@ -3501,7 +3501,7 @@ void ChannelGroupsView::updatePeerModeChannelViews(int specific)
     // deal with main strip
 
     bool connected = processor.getRemotePeerConnected(mPeerIndex);
-    String username = processor.getRemotePeerUserName(mPeerIndex);
+    String username = processor.getRemotePeerShownName(mPeerIndex);
 
     // On a stage the player's instrument follows the name, as in the stages list: "Name (Instrument)"
     String shownName = username;

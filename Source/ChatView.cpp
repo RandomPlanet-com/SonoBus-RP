@@ -793,8 +793,13 @@ bool ChatView::keyPressed (const KeyPress & key)
     return false;
 }
 
-Colour ChatView::getOrGenerateUserColor(const String & name)
+Colour ChatView::getOrGenerateUserColor(const String & nameAsShown)
 {
+    const String name = processor.getJoinNameForShown(nameAsShown);   // a player keeps one colour through a rename
+    static const uint32 kStagePalette[] = { 0xff7ee08a, 0xffb49cf0, 0xfff0a04b, 0xffe3c141, 0xff6fb7ff,
+                                            0xffc9d46a, 0xff8fa0ff, 0xffd9c39a, 0xfff4b183, 0xff8ee3ef };
+    const int hubIdx = processor.getHubColorIndex(name);   // the hub's choice: the same colour on every screen
+    if (hubIdx >= 0) return Colour (kStagePalette[hubIdx % 10]);
     // One colour per player from a palette that suits the dark theme. A name starts at the colour its spelling points
     // to (so it is mostly the same on every screen) and takes the next free one when another player has it here.
     auto found = mChatUserColors.find(name);
@@ -859,11 +864,17 @@ void ChatView::appendPrivateChatTab(const String & name, bool setcurrent)
     updateTabTips();
 }
 
+// Chat goes by the name the stage was joined with, also after a change of the shown name
+String ChatView::ourChatName() const
+{
+    return processor.isConnectedToServer() ? processor.getCurrentUsername() : currConnectionInfo.userName;
+}
+
 void ChatView::deletePrivateChatTab(int index)
 {
     if (index > 0 && index < mChatTabs->getNumTabs()) {
         auto othername = mChatTabs->getTabNames().getReference(index);
-        auto ourname = currConnectionInfo.userName;
+        auto ourname = ourChatName();
         mChatTabs->removeTab(index);
         
         // also remove all private events to/from them
@@ -926,7 +937,7 @@ void ChatView::processNewChatMessages(int index, int count)
     auto & allChatEvents = processor.getAllChatEvents();
     auto privateChat = mChatTabs->getCurrentTabIndex() > 0;
     auto privateUser = privateChat ? mChatTabs->getCurrentTabName() : "";
-    auto ourName = currConnectionInfo.userName;
+    auto ourName = ourChatName();
     
     for (int i=index; i < index+count && i < allChatEvents.size(); ++i) {
         auto & event = allChatEvents.getReference(i);
@@ -1000,7 +1011,7 @@ void ChatView::processNewChatMessages(int index, int count)
         Colour usecolor;
 
         if (event.type == SBChatEvent::SelfType) {
-            usecolor = selfTextColour;
+            usecolor = getOrGenerateUserColor(ourName);   // our own lines in our own colour, as the others see them
             doscroll = true;
             mChatTextEditor->setScrollToShowCursor(doscroll);
         }
@@ -1035,7 +1046,7 @@ void ChatView::processNewChatMessages(int index, int count)
                     if (name.isEmpty()) continue;
                     mChatTextEditor->insertTextAtCaret("\n");
                     mChatTextEditor->setColour(TextEditor::textColourId, getOrGenerateUserColor(name));
-                    mChatTextEditor->insertTextAtCaret(name);
+                    mChatTextEditor->insertTextAtCaret(processor.getShownNameForUser(name));   // the name they have now
                 }
             }
             else {
@@ -1043,20 +1054,32 @@ void ChatView::processNewChatMessages(int index, int count)
                 const bool failed = event.message.startsWith(TRANS("Failed"));
                 mChatTextEditor->setFont(mChatNameFont);
                 String rest = event.message;
-                if (event.from.isNotEmpty() && rest.startsWith(event.from)) {
+                const bool rename = event.tags == "rename";   // "<old> is now <new>": all in that player's colour
+                if (rename) {
+                    // its sender is the name the player joined with, so the colour is the player's; the old name in bold
+                    const int at = rest.indexOf(" " + TRANS("is now") + " ");
                     mChatTextEditor->setColour(TextEditor::textColourId, getOrGenerateUserColor(event.from));
                     mChatTextEditor->setFont(mChatNameFont.boldened());
-                    mChatTextEditor->insertTextAtCaret(event.from);
+                    mChatTextEditor->insertTextAtCaret(at > 0 ? rest.substring(0, at) : String());
+                    mChatTextEditor->setFont(mChatNameFont);
+                    if (at > 0) rest = rest.substring(at);
+                }
+                else if (event.from.isNotEmpty() && rest.startsWith(event.from)) {
+                    mChatTextEditor->setColour(TextEditor::textColourId, getOrGenerateUserColor(event.from));
+                    mChatTextEditor->setFont(mChatNameFont.boldened());
+                    mChatTextEditor->insertTextAtCaret(processor.getShownNameForUser(event.from));   // as the player is called now
                     mChatTextEditor->setFont(mChatNameFont);
                     rest = " " + rest.substring(event.from.length()).trimCharactersAtStart(" -");
                 }
-                mChatTextEditor->setColour(TextEditor::textColourId, failed ? sysAlertColour : sysTextColour);
+                mChatTextEditor->setColour(TextEditor::textColourId, failed ? sysAlertColour
+                                                                    : rename ? getOrGenerateUserColor(event.from) : sysTextColour);
                 mChatTextEditor->insertTextAtCaret(rest);
                 mChatTextEditor->setColour(TextEditor::textColourId, sysTextColour);
                 mChatTextEditor->insertTextAtCaret(String(CharPointer_UTF8("   \xc2\xb7   ")) + event.stamp.toString(false, true, false));
             }
             mLastChatShowTimeStamp = nowtime;
             mLastShownEventSec = evsec;
+            mLastChatEventFrom = String();   // after a notice the next message names its sender again
 
             mChatTextEditor->insertTextAtCaret("\n");
         }
@@ -1075,7 +1098,7 @@ void ChatView::processNewChatMessages(int index, int count)
             else if (event.from != mLastChatEventFrom || showtime) {
                 mChatTextEditor->setColour(TextEditor::textColourId, namecolor);
                 mChatTextEditor->setFont(mChatNameFont.boldened());
-                mChatTextEditor->insertTextAtCaret(event.from == "Hub" ? TRANS("Stage Admin (host)") : event.from);
+                mChatTextEditor->insertTextAtCaret(event.from == "Hub" ? TRANS("Stage Admin (host)") : processor.getShownNameForUser(event.from));
                 mChatTextEditor->setFont(mChatNameFont);
 
                 mChatTextEditor->insertTextAtCaret("      ");
@@ -1244,7 +1267,7 @@ void ChatView::commitChatMessage()
     SBChatEvent event;
     auto privateChat = mChatTabs->getCurrentTabIndex() > 0;
     
-    event.from = currConnectionInfo.userName;
+    event.from = ourChatName();
     event.group = currConnectionInfo.groupName;
     event.message = text;
     // TODO tags

@@ -3,7 +3,9 @@
 // The player's list of public stages from the stage directory, with a ping to each one.
 // Control path only: the list and the pings run on their own thread and never touch audio.
 #pragma once
+#include "SbChooserCombo.h"
 #include "JuceHeader.h"
+#include "SbConnectBar.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -36,9 +38,9 @@ public:
     std::function<void()> showMe;                                    // brings the Stages tab to the front
     std::function<juce::String()> currentStage;   // the stage this player is in, empty when in none
     std::function<int()> currentPort;             // the connection port of that stage, 0 when unknown
-    std::function<juce::String()> userName;
     std::function<juce::String()> stageUserName;  // the name this player has on the stage it is in
-    std::function<juce::String()> userInstrument;
+
+    SbConnectBar& connectBar() { return mBar; }   // name, instrument, the selected stage and Connect
 
     void setActive(bool active);   // the list refreshes only while it is showing
     void setDirectoryMemory(const juce::File& file);   // where a moved directory address is kept between runs
@@ -87,7 +89,6 @@ private:
     bool mSavedTryActive = false;
     struct PlayerColumns { int name = 0, nameW = 0, inst = 0, instW = 0, since = 0, ping = 0, send = 0, numW = 0, right = 0; };
     PlayerColumns playerColumns(int fullWidth) const;
-    void layoutConnectRow();
     void updateConnect();
     void connectSelected();
     bool wantOpen(const Stage& s) const;   // stages open by default; the user's choices hold for this viewing
@@ -96,12 +97,11 @@ private:
     void updateExpandAll();
 
     juce::TextEditor mSearch;
-    juce::ComboBox mGenre, mCountry, mKind;
+    SbChooserCombo mGenre, mCountry, mKind;   // lists open in the app's pop-up chooser
     juce::ToggleButton mOpenOnly, mHideFull;
     juce::TextButton mRefresh;
-    juce::Label mStatus, mSelected, mHint, mNotice;
-    juce::TextButton mConnect;
-    juce::Rectangle<int> mConnectRow;
+    juce::Label mStatus;
+    SbConnectBar mBar { TRANS("Double-click a stage to connect") };
     juce::uint32 mNoticeAt = 0;
     juce::String mHereShown;
     juce::TableHeaderComponent mHeader;
