@@ -2,6 +2,12 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-23
+
+### SonoBus RP Plugins 1.3.9
+
+- The Soundboard meter in the Input Mixer no longer shows full level when nothing is playing (seen in some DAWs). The file playback and metronome meters had the same fault and are fixed too.
+
 ## 2026-11-22
 
 ### SonoBus RP 1.3.8

@@ -19136,7 +19136,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
         mTransportSource.getNextAudioBlock (info);
         hasfiledata = true;
 
-        filePlaybackMeterSource.measureBlock(fileBuffer);
+        filePlaybackMeterSource.measureBlock(fileBuffer, 0, numSamples);
 
         int srcchans = fileChannels;
         mFilePlaybackChannelGroup.params.numChannels = srcchans;
@@ -19239,7 +19239,7 @@ void SonobusAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer
 
         //
 
-        metMeterSource.measureBlock(metBuffer);
+        metMeterSource.measureBlock(metBuffer, 0, numSamples);
 
         if (sendmet) {
 

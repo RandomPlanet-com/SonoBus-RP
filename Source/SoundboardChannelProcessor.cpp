@@ -351,7 +351,7 @@ void SoundboardChannelProcessor::ensureBuffers(const int numSamples, const int m
     }
 
     if (buffer.getNumSamples() < numSamples || buffer.getNumChannels() != realMaxChannels) {
-        buffer.setSize(realMaxChannels, numSamples, false, false, true);
+        buffer.setSize(realMaxChannels, numSamples, false, true, true);   // never leave unwritten samples behind
     }
 }
 
@@ -370,11 +370,12 @@ bool SoundboardChannelProcessor::processAudioBlock(int numSamples)
     mixer.getNextAudioBlock(info);
 
     if (buffer.hasBeenCleared() && !channelGroup.params.monitorDelayParams.enabled ) {
-        meterSource.measureBlock(buffer);   // Feed the meter the silence too, else the Soundboard VU sticks at the last clip's level
+        meterSource.measureBlock(buffer, 0, numSamples);   // Feed the meter the silence too, else the Soundboard VU sticks at the last clip's level
         return false;
     }
 
-    meterSource.measureBlock(buffer);
+    // Only this block's samples: a plugin host often passes blocks shorter than the buffer it prepared.
+    meterSource.measureBlock(buffer, 0, numSamples);
 
     int sourceChannels = getFileSourceNumberOfChannels();
     channelGroup.params.numChannels = sourceChannels;
