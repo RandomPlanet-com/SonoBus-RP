@@ -133,6 +133,7 @@ protected:
     std::unique_ptr<ToggleButton> mOptionsDynamicResamplingButton;
     std::unique_ptr<ToggleButton> mOptionsOverrideSamplerateButton;
     std::unique_ptr<ToggleButton> mOptionsShouldCheckForUpdateButton;
+    std::unique_ptr<ToggleButton> mOptionsWarnWifiButton;
     std::unique_ptr<ToggleButton> mOptionsAutoReconnectButton;
     std::unique_ptr<ToggleButton> mOptionsSliderSnapToMouseButton;
     std::unique_ptr<ToggleButton> mOptionsAllowBluetoothInput;
@@ -178,6 +179,7 @@ protected:
     FlexBox optionsDynResampleBox;
     FlexBox optionsOverrideSamplerateBox;
     FlexBox optionsCheckForUpdateBox;
+    FlexBox optionsWarnWifiBox;
     FlexBox optionsChangeAllQualBox;
     FlexBox optionsInputLimitBox;
     FlexBox optionsAutoReconnectBox;

@@ -2,6 +2,25 @@
 
 What changed in each release of SonoBus RP (the player) and SonoBus RP Hub (the server). Newest first.
 
+## 2026-11-24
+
+### SonoBus RP 1.4.0
+
+- New look for all tooltips. The latency hover shows where your delay comes from, with a bar, and your audio buffer and converters on one line.
+- Invite links are now web links (stages.randomplanet.com/join/...) that open SonoBus RP, so they are clickable in messages, email and Discord.
+- At start, one short notice if something will cost you latency or cause dropouts: Wi-Fi, an audio buffer above 128 samples, or an interface not at 48 kHz. You can turn it off in Options.
+- New installs start with a 32-sample audio buffer; the buffer list stops at 512.
+- The Stages list uses the room on wide screens, so you see more of each stage's description.
+- The chat opens when you join a stage, not when the app starts.
+- Windows: clicking a stage link opens SonoBus RP and joins the stage.
+- At your hub's own site, if your Mac blocks the app (or your DAW, for the plugins) from the local network, a notice says where to allow it, instead of quietly connecting through the internet.
+- Fixed: when the last stage you were on does not answer, you can still join any other stage at once, and the window no longer jumps to the Private Stage tab.
+- Fixed: Soundboard, file playback and metronome meters no longer stick at a high level.
+
+### SonoBus RP Plugins 1.4.0
+
+- The changes of SonoBus RP 1.4.0 that apply inside a DAW: the new tooltips, and the latency hover shows your DAW's buffer with a hint when it is above 64 samples.
+
 ## 2026-11-23
 
 ### SonoBus RP Plugins 1.3.9

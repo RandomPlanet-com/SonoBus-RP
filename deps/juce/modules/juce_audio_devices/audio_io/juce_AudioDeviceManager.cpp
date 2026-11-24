@@ -863,6 +863,17 @@ int AudioDeviceManager::chooseBestBufferSize (int bufferSize) const
     if (bufferSize > 0 && currentAudioDevice->getAvailableBufferSizes().contains (bufferSize))
         return bufferSize;
 
+   #if SONOBUSPLUS_BUILD
+    // A size the device does not offer: the next size up, not the device default (often 512 or more).
+    if (bufferSize > 0)
+    {
+        int next = 0;
+        for (auto bs : currentAudioDevice->getAvailableBufferSizes())
+            if (bs > bufferSize && (next == 0 || bs < next)) next = bs;
+        if (next > 0) return next;
+    }
+   #endif
+
     return currentAudioDevice->getDefaultBufferSize();
 }
 

@@ -35,6 +35,9 @@
 #include <iostream>
 #include "JuceHeader.h"
 #include "SbDataPaths.h"
+#if SONOBUSPLUS_BUILD
+bool sbDefaultRouteIsWifi (std::string& name);   // SbNetCheck.cpp
+#endif
 // System headers for the unhandled-exception breadcrumb MUST be at global scope
 #ifdef __GNUG__
 #include <cxxabi.h>   // GCC/Clang only; MSVC has no abi::
@@ -272,11 +275,14 @@ public:
 
         AudioDeviceManager::AudioDeviceSetup setupOptions;
         setupOptions.sampleRate = 48000;
-#if JUCE_MAC
-        setupOptions.bufferSize = 128;
-#elif JUCE_ANDROID
+#if JUCE_ANDROID
         setupOptions.bufferSize = 192;
         setupOptions.sampleRate = AndroidHighPerformanceAudioHelpers::getNativeSampleRate();
+#elif SONOBUSPLUS_BUILD
+        // First run asks for 32 samples; a device that cannot do 32 gets its next size up.
+        setupOptions.bufferSize = 32;
+#elif JUCE_MAC
+        setupOptions.bufferSize = 128;
 #else
         setupOptions.bufferSize = 256;
 #endif
@@ -342,11 +348,14 @@ public:
 
         AudioDeviceManager::AudioDeviceSetup setupOptions;
         setupOptions.sampleRate = 48000;
-#if JUCE_MAC
-        setupOptions.bufferSize = 128;
-#elif JUCE_ANDROID
+#if JUCE_ANDROID
         setupOptions.bufferSize = 192;
         setupOptions.sampleRate = AndroidHighPerformanceAudioHelpers::getNativeSampleRate();
+#elif SONOBUSPLUS_BUILD
+        // First run asks for 32 samples; a device that cannot do 32 gets its next size up.
+        setupOptions.bufferSize = 32;
+#elif JUCE_MAC
+        setupOptions.bufferSize = 128;
 #else
         setupOptions.bufferSize = 256;
 #endif
@@ -624,6 +633,56 @@ public:
         sbLogUnhandled("UNHANDLED", e ? e->what() : "(non-std exception)", sourceFilename.toRawUTF8(), lineNumber);
     }
 
+   #if SONOBUSPLUS_BUILD
+    // Once at start: one quiet notice listing what would cost latency or cause dropouts (Wi-Fi, a large audio
+    // buffer, an interface rate other than the stage rate). Options can turn it off.
+    void sbStartupCheck (SonobusAudioProcessor* sonoproc)
+    {
+        if (sonoproc == nullptr || ! sonoproc->getWarnWifiAtStart()) return;
+        std::string ifc;
+        const bool wifi = sbDefaultRouteIsWifi (ifc);
+        Timer::callAfterDelay (1500, [this, sonoproc, wifi, ifc]() {
+            if (mainWindow == nullptr) return;
+            StringArray lines;
+            if (wifi) lines.add (TRANS ("You're on Wi-Fi. Plug in a network cable: Wi-Fi adds dropouts and delay."));
+            if (auto* dev = mainWindow->pluginHolder->deviceManager.getCurrentAudioDevice())
+            {
+                const int bs = dev->getCurrentBufferSizeSamples();
+                const double sr = dev->getCurrentSampleRate();
+                if (bs > 128)
+                    lines.add (TRANS ("Your audio buffer is") + " " + String (bs) + " " + TRANS ("samples. Set it to the lowest size your setup supports, for less latency."));
+                if (sr > 0.0 && std::abs (sr - 48000.0) > 1.0)
+                    lines.add (TRANS ("Your interface runs at") + " " + String (sr / 1000.0, 1) + " kHz. " + TRANS ("Running at 48 kHz is currently highly recommended."));
+            }
+            std::cout << "[SB-NET] start check: wifi=" << (wifi ? 1 : 0) << " (" << ifc << ") notes=" << lines.size() << std::endl;
+            if (lines.isEmpty()) return;
+            String msg; for (auto& l : lines) msg << String::fromUTF8 ("\xe2\x80\xa2 ") << l << "\n";
+            AlertWindow::showOkCancelBox (AlertWindow::WarningIcon, TRANS ("Before you play"), msg.trimEnd(),
+                TRANS ("OK"), TRANS ("Don't remind me again"), nullptr,
+                ModalCallbackFunction::create ([sonoproc] (int result) { if (result == 0) sonoproc->setWarnWifiAtStart (false); }));
+        });
+    }
+   #endif
+
+   #if JUCE_WINDOWS && SONOBUSPLUS_BUILD
+    // Stage links (sonobusrp://host:port/...) open this copy of the app: the link type is registered for the
+    // current user (no admin rights), pointing at this exe, and rewritten only when the path changed.
+    static void sbRegisterUrlScheme()
+    {
+        const String exe = File::getSpecialLocation (File::currentExecutableFile).getFullPathName();
+        const String key = "HKEY_CURRENT_USER\\Software\\Classes\\sonobusrp\\";
+        const String command = "\"" + exe + "\" \"%1\"";
+        if (WindowsRegistry::getValue (key + "shell\\open\\command\\") == command
+            && WindowsRegistry::valueExists (key + "URL Protocol"))
+            return;
+        bool ok = WindowsRegistry::setValue (key, String ("URL:SonoBus RP"));
+        ok = WindowsRegistry::setValue (key + "URL Protocol", String()) && ok;
+        ok = WindowsRegistry::setValue (key + "DefaultIcon\\", "\"" + exe + "\",0") && ok;
+        ok = WindowsRegistry::setValue (key + "shell\\open\\command\\", command) && ok;
+        std::cout << "[SB-URL] sonobusrp links " << (ok ? "now open " : "could not be registered for ") << exe << std::endl;
+    }
+   #endif
+
     void initialise (const String&) override
     {
         sbMoveOldDataFolder();
@@ -652,6 +711,10 @@ public:
         }
 #endif
         ::std::set_terminate(sbTerminateHandler);
+
+       #if JUCE_WINDOWS && SONOBUSPLUS_BUILD
+        sbRegisterUrlScheme();
+       #endif
 
         handleCommandLine();
 
@@ -693,6 +756,9 @@ public:
            #endif
 
             Desktop::getInstance().setScreenSaverEnabled(false);
+           #if SONOBUSPLUS_BUILD
+            sbStartupCheck (dynamic_cast<SonobusAudioProcessor*> (mainWindow->pluginHolder->processor.get()));
+           #endif
 
 
             if (auto * sonoproc = dynamic_cast<SonobusAudioProcessor*>(mainWindow->pluginHolder->processor.get())) {
@@ -718,10 +784,10 @@ public:
                             sonoeditor->connectWithInfo(cmdlineConnInfo, false, true);
                         }
                         else if (cmdlineArgUrl.isNotEmpty()) {
-#if JUCE_LINUX
-                            // Linux only, as this is handled through other means on other platforms
-                            // handle the last arg as a connect URL
-                            sonoeditor->handleURL(cmdlineArgUrl);
+#if JUCE_LINUX || JUCE_WINDOWS
+                            // Linux and Windows: a link opened from a browser arrives as the last argument
+                            // (the Mac gets it through the system's URL handler instead)
+                            sonoeditor->handleURL(cmdlineArgUrl.trim().unquoted());
 #endif
                         }
 
@@ -971,7 +1037,7 @@ public:
             if (auto * sonoproc = dynamic_cast<SonobusAudioProcessor*>(mainWindow->pluginHolder->processor.get())) {
                 if (sonoproc->hasEditor()) {
                     if (auto * sonoeditor = dynamic_cast<SonobusAudioProcessorEditor*>(sonoproc->createEditorIfNeeded())) {
-                        sonoeditor->handleURL(url);
+                        sonoeditor->handleURL(url.trim().unquoted());
                         mainWindow->toFront(true);
                     }
                 }

@@ -126,6 +126,9 @@ public:
     // disconnect AOO client from AOO server (always thread safe)
     virtual int32_t disconnect() = 0;
 
+    // abandon a connect that has not completed yet; no event is sent for it
+    virtual int32_t cancel_connect() = 0;
+
     // join an AOO group
     virtual int32_t group_join(const char *group, const char *pwd, bool is_public=false) = 0;
 

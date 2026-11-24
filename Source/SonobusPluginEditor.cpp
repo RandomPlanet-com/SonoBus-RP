@@ -918,8 +918,8 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     mChatView->setVisible(false);
     mChatView->addComponentListener(this);
 #if !(JUCE_IOS || JUCE_ANDROID)
-    // The standalone app opens with the chat panel shown; a plugin keeps its remembered state.
-    if (JUCEApplicationBase::isStandaloneApp()) processor.setLastChatShown(true);
+    // The standalone app opens with the chat closed; joining a stage opens it. A plugin keeps its remembered state.
+    if (JUCEApplicationBase::isStandaloneApp()) processor.setLastChatShown(false);
 #endif
 
     mChatButton = std::make_unique<SonoDrawableButton>("chat", DrawableButton::ButtonStyle::ImageOnButtonBackground);
@@ -1758,7 +1758,9 @@ void SonobusAudioProcessorEditor::aooClientConnected(SonobusAudioProcessor *comp
     DBG("Client connect success: " <<  (int) success << "  mesg: " << errmesg);
     {
         const ScopedLock sl (clientStateLock);        
-        clientEvents.add(ClientEvent(ClientEvent::ConnectEvent, success, errmesg));
+        ClientEvent ev(ClientEvent::ConnectEvent, success, errmesg);
+        ev.connectKind = comp ? comp->sbConnectEventKind() : 0;
+        clientEvents.add(ev);
     }
     triggerAsyncUpdate();
 }
@@ -4346,6 +4348,11 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
             //});
         }
         else if (ev.type == ClientEvent::ConnectEvent) {
+            // A failed automatic attempt leaves the window alone: no tab change, no form. Only giving up is told.
+            if (!ev.success && ev.connectKind != 0 && !String(ev.message).contains("access denied")) {
+                if (ev.connectKind == 2) updateServerStatusLabel(ev.message, false);
+                continue;
+            }
             String statstr;
             mStageNotice.clear();   // A new try: the last refusal is no longer the news
             if (ev.success) {
@@ -4634,6 +4641,18 @@ void SonobusAudioProcessorEditor::handleAsyncUpdate()
     if (haveNewChatEvents.compareAndSetBool(false, true))
     {
         mChatView->refreshMessages();
+    }
+
+    // At the hub's own site but its local address does not answer: on a Mac that is almost always the
+    // Local Network permission of this app or of the DAW hosting the plugin.
+    if (processor.takeLanBlockedHint() && !mLanHintShown) {
+       #if JUCE_MAC
+        mLanHintShown = true;
+        const String app = JUCEApplicationBase::isStandaloneApp() ? String("SonoBus RP") : String(PluginHostType().getHostDescription());
+        AlertWindow::showMessageBoxAsync(AlertWindow::InfoIcon, TRANS("Your hub is on this network"),
+            TRANS("The hub is on your local network, but") + " " + app + " " + TRANS("cannot reach it there, so you are connected through the internet (more delay).")
+            + "\n\n" + TRANS("On a Mac: System Settings > Privacy & Security > Local Network > turn on") + " " + app + ", " + TRANS("then restart") + " " + app + ".");
+       #endif
     }
 
     // The stage's welcome message opens the chat panel, without a change of the window size.

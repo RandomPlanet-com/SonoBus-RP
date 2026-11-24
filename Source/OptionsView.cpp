@@ -287,6 +287,8 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
 
     mOptionsShouldCheckForUpdateButton = std::make_unique<ToggleButton>(TRANS("Automatically check for updates"));
     mOptionsShouldCheckForUpdateButton->addListener(this);
+    mOptionsWarnWifiButton = std::make_unique<ToggleButton>(TRANS("Warn me at start about my setup (Wi-Fi, audio buffer, sample rate)"));
+    mOptionsWarnWifiButton->addListener(this);
 
     mOptionsSliderSnapToMouseButton = std::make_unique<ToggleButton>(TRANS("Sliders Snap to Clicked Position"));
     mOptionsSliderSnapToMouseButton->addListener(this);
@@ -434,6 +436,7 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
     if (JUCEApplicationBase::isStandaloneApp()) {
         mOptionsComponent->addAndMakeVisible(mOptionsOverrideSamplerateButton.get());
         mOptionsComponent->addAndMakeVisible(mOptionsShouldCheckForUpdateButton.get());   // Checks the project's server
+        mOptionsComponent->addAndMakeVisible(mOptionsWarnWifiButton.get());
         if (mOptionsAllowBluetoothInput) {
             mOptionsComponent->addAndMakeVisible(mOptionsAllowBluetoothInput.get());
         }
@@ -688,6 +691,7 @@ void OptionsView::updateState(bool ignorecheck)
     mOptionsUnivFontButton->setToggleState(processor.getUseUniversalFont(), dontSendNotification);
 
     mOptionsSliderSnapToMouseButton->setToggleState(processor.getSlidersSnapToMousePosition(), dontSendNotification);
+    mOptionsWarnWifiButton->setToggleState(processor.getWarnWifiAtStart(), dontSendNotification);
     mOptionsDisableShortcutButton->setToggleState(processor.getDisableKeyboardShortcuts(), dontSendNotification);
 #if SONOBUSPLUS_BUILD
     if (mOptionsConfirmQuitSessionButton) {
@@ -842,6 +846,11 @@ void OptionsView::updateLayout()
     optionsCheckForUpdateBox.items.add(FlexItem(10, 12).withFlex(0));
     optionsCheckForUpdateBox.items.add(FlexItem(180, minpassheight, *mOptionsShouldCheckForUpdateButton).withMargin(0).withFlex(1));
 
+    optionsWarnWifiBox.items.clear();
+    optionsWarnWifiBox.flexDirection = FlexBox::Direction::row;
+    optionsWarnWifiBox.items.add(FlexItem(10, 12).withFlex(0));
+    optionsWarnWifiBox.items.add(FlexItem(180, minpassheight, *mOptionsWarnWifiButton).withMargin(0).withFlex(1));
+
     optionsSnapToMouseBox.items.clear();
     optionsSnapToMouseBox.flexDirection = FlexBox::Direction::row;
     optionsSnapToMouseBox.items.add(FlexItem(10, 12).withFlex(0));
@@ -920,6 +929,7 @@ void OptionsView::updateLayout()
             optionsBox.items.add(FlexItem(100, minpassheight, optionsAllowBluetoothBox).withMargin(2).withFlex(0));
         }
         optionsBox.items.add(FlexItem(100, minpassheight, optionsCheckForUpdateBox).withMargin(2).withFlex(0));
+        optionsBox.items.add(FlexItem(100, minpassheight, optionsWarnWifiBox).withMargin(2).withFlex(0));
     }
     optionsBox.items.add(FlexItem(100, minpassheight, optionsDisableShortcutsBox).withMargin(2).withFlex(0));
 #if SONOBUSPLUS_BUILD
@@ -1273,6 +1283,9 @@ void OptionsView::buttonClicked (Button* buttonThatWasClicked)
             //    startTimer(CheckForNewVersionTimerId, 3000);
             //}
         }
+    }
+    else if (buttonThatWasClicked == mOptionsWarnWifiButton.get()) {
+        processor.setWarnWifiAtStart(mOptionsWarnWifiButton->getToggleState());
     }
     else if (buttonThatWasClicked == mOptionsSliderSnapToMouseButton.get()) {
         bool newval = mOptionsSliderSnapToMouseButton->getToggleState();

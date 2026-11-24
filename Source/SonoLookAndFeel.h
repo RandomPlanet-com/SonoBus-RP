@@ -127,6 +127,9 @@ public:
     // Rectangle(), and a Mac header defines a Point macro in this TU — so the point type is taken from Rectangle.
     using SbTipPoint = decltype(::juce::Rectangle<int>().getPosition());
     ::juce::Rectangle<int> getTooltipBounds (const ::juce::String& tipText, SbTipPoint screenPos, ::juce::Rectangle<int> parentArea) override;
+    // Rich tooltip markup (see SonoLookAndFeel.cpp): the leading mark, the field divider, and the same tip as plain text
+    static constexpr juce_wchar sbTipMark = 0x01, sbTipSep = 0x1f;
+    static String tipPlainText (const String& tip);
 
 
     Justification sliderTextJustification = Justification::centred;

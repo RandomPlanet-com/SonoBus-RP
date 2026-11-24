@@ -54,7 +54,8 @@ int socket_set_nonblocking(int socket, int nonblocking)
 }
 
 // kudos to https://stackoverflow.com/a/46062474/6063908
-int socket_connect(int socket, const ip_address& addr, float timeout)
+int socket_connect(int socket, const ip_address& addr, float timeout,
+                   const std::atomic<bool> *cancel)
 {
     // set nonblocking and connect
     socket_set_nonblocking(socket, 1);
@@ -71,16 +72,30 @@ int socket_connect(int socket, const ip_address& addr, float timeout)
     #endif
             return -1; // break on "real" error
 
-        // block with select using timeout
+        // block with select using timeout, in short slices so that
+        // the wait can be ended from another thread
         if (timeout < 0) timeout = 0;
-        timeoutval.tv_sec = (int)timeout;
-        timeoutval.tv_usec = (timeout - timeoutval.tv_sec) * 1000000;
-        FD_ZERO(&writefds);
-        FD_SET(socket, &writefds); // socket is connected when writable
-        FD_ZERO(&errfds);
-        FD_SET(socket, &errfds); // catch exceptions
+        const float slice = 0.05f;
+        float waited = 0;
+        do {
+            if (cancel && cancel->load()){
+                status = 0; // reported like a timeout
+                break;
+            }
+            float wait = timeout - waited;
+            if (wait > slice) wait = slice;
+            if (wait < 0) wait = 0;
+            timeoutval.tv_sec = 0;
+            timeoutval.tv_usec = (int)(wait * 1000000);
+            FD_ZERO(&writefds);
+            FD_SET(socket, &writefds); // socket is connected when writable
+            FD_ZERO(&errfds);
+            FD_SET(socket, &errfds); // catch exceptions
 
-        status = select(socket+1, NULL, &writefds, &errfds, &timeoutval);
+            status = select(socket+1, NULL, &writefds, &errfds, &timeoutval);
+            waited += slice;
+        } while (status == 0 && waited < timeout);
+
         if (status < 0) // select failed
         {
             fprintf(stderr, "socket_connect: select failed");

@@ -294,6 +294,8 @@ int32_t aoo::net::client::connect(const char *host, int port,
     username_ = username;
     password_ = encrypt(pwd);
 
+    cancel_connect_.store(false); // an earlier cancel is not meant for this one
+
     state_ = client_state::connecting;
 
     push_command(std::make_unique<connect_cmd>(host, port));
@@ -315,6 +317,23 @@ int32_t aoo::net::client::disconnect(){
     }
 
     push_command(std::make_unique<disconnect_cmd>(command_reason::user));
+
+    signal();
+
+    return 1;
+}
+
+// Abandon a connect that is still under way (TCP connect, handshake or login).
+// The client returns to 'disconnected' without sending an event for it.
+int32_t aoo::net::client::cancel_connect(){
+    auto state = state_.load();
+    if (state == client_state::disconnected || state == client_state::connected){
+        return 0;
+    }
+
+    cancel_connect_.store(true);
+
+    push_command(std::make_unique<cancel_cmd>());
 
     signal();
 
@@ -556,7 +575,17 @@ void client::do_connect(const std::string &host, int port)
         return;
     }
 
+    if (cancel_connect_.load()){
+        do_disconnect();
+        return;
+    }
+
     int err = try_connect(host, port);
+    if (cancel_connect_.load()){
+        // abandoned by the caller: no event
+        do_disconnect();
+        return;
+    }
     if (err != 0){
         // event
         std::string errmsg = socket_strerror(err);
@@ -572,6 +601,16 @@ void client::do_connect(const std::string &host, int port)
     first_udp_ping_time_ = 0;
     state_ = client_state::handshake;
 
+}
+
+void client::do_cancel_connect(){
+    if (!cancel_connect_.exchange(false)){
+        return; // a newer connect() has taken over
+    }
+    auto state = state_.load();
+    if (state == client_state::handshake || state == client_state::login){
+        do_disconnect();
+    }
 }
 
 void client::do_disconnect(command_reason reason, int error){
@@ -649,7 +688,7 @@ int client::try_connect(const std::string &host, int port){
     }
 
     // try to connect (LATER make timeout configurable)
-    if (socket_connect(tcpsocket_, remote_addr_, 5) < 0){
+    if (socket_connect(tcpsocket_, remote_addr_, 5, &cancel_connect_) < 0){
         int err = socket_errno();
         LOG_ERROR("aoo_client: couldn't connect (" << err << ")");
         return err;

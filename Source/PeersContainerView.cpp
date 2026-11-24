@@ -2313,6 +2313,66 @@ static String sbFormatMs(float ms)
     return v + " ms";
 }
 
+// Builds a rich tooltip (markup: SonoLookAndFeel.cpp)
+namespace {
+struct SbTip {
+    String s { String::charToString(SonoLookAndFeel::sbTipMark) };
+    static String clean(const String& t) { return t.removeCharacters("\x01\x1f\r\n"); }
+    static String hex(Colour c) { return String::toHexString((int) (c.getARGB() & 0xffffff)).paddedLeft('0', 6); }
+    static String join(const StringArray& f) { return f.joinIntoString(String::charToString(SonoLookAndFeel::sbTipSep)); }
+    void add(const StringArray& f) { if (s.length() > 1) s << "\n"; s << join(f); }
+    void total(const String& figure, Colour c, const String& caption) { add({ "T", clean(figure), hex(c), clean(caption) }); }
+    void bar() { add({ "B" }); }
+    void row(const String& label, const String& value) { add({ "R", clean(label), clean(value) }); }
+    void row(const String& label, const String& value, uint32 rgb, float weight) { add({ "R", clean(label), clean(value), hex(Colour(rgb)), String(jmax(0.0f, weight), 3) }); }
+    void sub(const String& text) { add({ "S", clean(text) }); }
+    void divider() { add({ "D" }); }
+    void foot(const String& text) { add({ "F", String(), clean(text) }); }
+    void dot(Colour c, const String& text) { add({ "F", hex(c), clean(text) }); }
+    void para(const String& text) { add({ "P", clean(text) }); }
+    static String footLine(const String& text) { return "\n" + join({ "F", String(), clean(text) }); }
+};
+// Part colours of the latency bar
+const uint32 kTipNet = 0x5b8def, kTipHubBuf = 0x3fb8af, kTipRecvBuf = 0x2c8a83, kTipPacket = 0x7d8789, kTipIface = 0xc9a93a, kTipTheirIface = 0x9a7fd1;
+const Identifier kSbRichTip ("sbRichTip");
+// The card goes to the tooltip window, the same words as plain text everywhere else (screen readers)
+bool sbSetRichTip(Label& l, const String& rich)
+{
+    if (l.getProperties()[kSbRichTip].toString() == rich) return false;
+    l.getProperties().set(kSbRichTip, rich);
+    l.setTooltip(SonoLookAndFeel::tipPlainText(rich));
+    return true;
+}
+String sbMs1(float ms) { return String(ms, 1) + " ms"; }
+}
+
+bool PeersContainerView::ownInterfaceDetail(float totalMs, String & sub, String & hint) const
+{
+    // The interface figure counts the buffer once each way; what is left over is the converters
+    const String mid = String::fromUTF8(" \xc2\xb7 ");
+    auto converters = [&](int buf, double sr, bool known) {
+        const float conv = (known && sr > 0.0 && totalMs >= 0.0f) ? totalMs - (float) (2000.0 * buf / sr) : -1.0f;
+        return conv > 0.05f ? "converters " + String(conv, 1) + " ms" : String("converters not reported by the driver");
+    };
+    if (!JUCEApplicationBase::isStandaloneApp()) {
+        const int bs = processor.getHostCallbackBlock();
+        if (bs <= 0) return false;
+        float in = 0.0f, out = 0.0f; bool exact = false;
+        const bool have = processor.getHostInterfaceMs(in, out, exact);
+        sub = "DAW buffer " + String(bs) + " samples";
+        if (have) sub << mid << converters(bs, processor.getSampleRate(), exact);
+        if (bs > 64) hint = "Set 32 or 64 in your DAW for less delay.";
+        return true;
+    }
+    if (!getAudioDeviceManager || !getAudioDeviceManager()) return false;
+    auto* ad = getAudioDeviceManager()->getCurrentAudioDevice();
+    if (ad == nullptr) return false;
+    const int buf = ad->getCurrentBufferSizeSamples();
+    if (buf <= 0) return false;
+    sub = "Buffer " + String(buf) + " samples" + mid + converters(buf, ad->getCurrentSampleRate(), true);
+    return true;
+}
+
 bool PeersContainerView::ownInterfaceMs(float & inMs, float & outMs, bool * exact) const
 {
     if (exact) *exact = true;
@@ -2391,12 +2451,11 @@ void PeersContainerView::fitHubHeader()
     for (auto& run : runs(s)) as.append(run.first, f, run.second);
     rl->setRich(as);
 
-    // What the line left out goes first in the hover: the whole address, and who is recording
-    String tip;
-    if (s.addr != h.addr) tip << h.addr << "\n";
-    if (!s.recNames && h.rec.isNotEmpty()) tip << h.rec << "\n";
-    tip << h.tip;
-    if (mHubStatusLabel->getTooltip() != tip) mHubStatusLabel->setTooltip(tip);
+    // What the line left out closes the hover: the whole address, and who is recording
+    String tip = h.tip;
+    if (s.addr != h.addr) tip << SbTip::footLine(h.addr);
+    if (!s.recNames && h.rec.isNotEmpty()) tip << SbTip::footLine(h.rec);
+    sbSetRichTip(*mHubStatusLabel, tip);
 }
 
 void PeersContainerView::updatePeerViews(int specific)
@@ -2531,35 +2590,43 @@ void PeersContainerView::updatePeerViews(int specific)
                     const int age = processor.getSelfHubLatencyAgeS();
                     // Hover: what the Latency is made of, then the drops behind the light. The '~' note is appended
                     // when the hub's feed is dark.
-                    String tip;
+                    SbTip card;
                     if (delayMs >= 0.0f) {
-                        tip << "Latency " << String(delayMs, 1) << " ms\n"
-                            << "Round trip\n"
-                            << "Network round trip " << String(netMs, 1) << " ms\n";
+                        card.total((!haveSelf && hubconn ? "~" : "") + sbMs1(delayMs), (haveSelf && hubconn ? delaycol(delayMs) : mutedTextColor).withAlpha(1.0f), "LATENCY, ROUND TRIP");
+                        card.bar();
+                        card.row("Network round trip", sbMs1(netMs), kTipNet, netMs);
                         const float packetMs = 1000.0f * 32.0f / 48000.0f;
                         const float myRecvMs = processor.getHostedFeedDepthMs();
                         const float hubBufMs = bufMs - packetMs - myRecvMs;
-                        if (myRecvMs >= 0.0f && hubBufMs >= 0.0f)
-                            tip << "Hub buffer for you " << String(hubBufMs, 1) << " ms\nYour receive buffer " << String(myRecvMs, 1) << " ms\n"
-                                << "One packet " << String(packetMs, 1) << " ms\n";
-                        else
-                            tip << "Buffering " << String(bufMs, 1) << " ms\n";
-                        tip << (ifaceMs < 0.0f ? String("Audio interface: not known")
-                                : ifaceExact ? "Audio interface " + String(ifaceMs, 1) + " ms"
-                                             : "Audio interface: about " + String(ifaceMs, 1) + " ms (buffer only)");
+                        if (myRecvMs >= 0.0f && hubBufMs >= 0.0f) {
+                            card.row("Hub buffer for you", sbMs1(hubBufMs), kTipHubBuf, hubBufMs);
+                            card.row("Your receive buffer", sbMs1(myRecvMs), kTipRecvBuf, myRecvMs);
+                            card.row("One packet", sbMs1(packetMs), kTipPacket, packetMs);
+                        } else {
+                            card.row("Buffering", sbMs1(bufMs), kTipHubBuf, bufMs);
+                        }
+                        String ifSub, ifHint;
+                        const bool ifDetail = ownInterfaceDetail(ifaceMs, ifSub, ifHint);
+                        if (ifaceMs >= 0.0f)   card.row("Audio interface", sbMs1(ifaceMs), kTipIface, ifaceMs);
+                        else if (ifDetail)     card.row("Audio interface", String::fromUTF8("\xe2\x80\x94"), kTipIface, 0.0f);
+                        else                   card.row("Audio interface", "not known", kTipIface, 0.0f);
+                        if (ifDetail) card.sub(ifSub);
+                        if (ifHint.isNotEmpty()) card.sub(ifHint);
                     } else {
-                        tip << "Latency = network + buffering + audio interface, round trip";
+                        card.para("Latency = network + buffering + audio interface, round trip");
                     }
-                    tip << "\nLink: " << String(recent) << " drops from the hub in the last minute, " << String(linkdrops) << " since you joined";
-                    tip = String::fromUTF8(tip.toRawUTF8());
+                    card.divider();
+                    card.dot((hubconn && ! linkSettling ? dropcol : mutedTextColor).withAlpha(1.0f),
+                             "Link: " + String(recent) + " drops from the hub in the last minute, " + String(linkdrops) + " since you joined");
                     if (!(haveSelf || !hubconn))
-                        tip << "\n" << (age < 0 ? TRANS("~ = local estimate: no latency report from the hub yet")
-                                             : TRANS("~ = local estimate: no latency report from the hub for ") + String(age) + " s");
+                        card.foot(age < 0 ? TRANS("~ = local estimate: no latency report from the hub yet")
+                                          : TRANS("~ = local estimate: no latency report from the hub for ") + String(age) + " s");
+                    const String& tip = card.s;
                     if (mHubHdr.tip != tip) {
                         mHubHdr.tip = tip;   // fitHubHeader sets the hover (with what the line had to leave out)
                         // Test aid (SB_UI_SHOTS=<folder>): the header line and its hover text, as text
                         static const String shots = SystemStats::getEnvironmentVariable("SB_UI_SHOTS", {});
-                        if (shots.isNotEmpty()) File(shots).getChildFile("header.txt").replaceWithText(htext + "\n---\n" + tip + "\n");
+                        if (shots.isNotEmpty()) File(shots).getChildFile("header.txt").replaceWithText(htext + "\n---\n" + SonoLookAndFeel::tipPlainText(tip) + "\n");
                     }
                 }
                 {   // The coloured line is fitted to the label's width (fitHubHeader), here and on every resize
@@ -2806,6 +2873,7 @@ void PeersContainerView::updatePeerViews(int specific)
                 {   // Hover explains the rate + drops fields
                     const String tip = String::fromUTF8("\xe2\x86\x91 Uploading to hub\n\xe2\x86\x93 Downloading from hub\ndrops = lost on the way to you");   // One per line
                     pvf->recvActualBitrateLabel->setInterceptsMouseClicks(true, false);
+                    pvf->recvActualBitrateLabel->getProperties().remove(kSbRichTip);   // this row shows no card
                     if (pvf->recvActualBitrateLabel->getTooltip() != tip) pvf->recvActualBitrateLabel->setTooltip(tip);
                 }
                 const Colour dropcol = recent < 5 ? latGoodColor : recent <= 20 ? latWarnColor : latBadColor;   // per-minute rate — <5 green, 5-20 yellow, >20 red
@@ -2907,7 +2975,7 @@ void PeersContainerView::updatePeerViews(int specific)
             float prtt = -1.0f, pup = -1.0f; processor.getRemotePeerHubStats(i, prtt, pup);
             String figText = "-";
             Colour figCol = dimTextColor;
-            String tip;
+            SbTip card;
             if (havePeer && haveSelf) {
                 const float e2eUp = sTo + fromHub, e2eDn = toHub + sFrom;
                 // One way each: our side splits exactly (input / output); theirs is relayed as one sum, split evenly.
@@ -2916,25 +2984,40 @@ void PeersContainerView::updatePeerViews(int specific)
                 const float rowLat = oneUp + oneDn;
                 figText = String((int) std::lround(rowLat)) + " ms";   // Whole milliseconds on the row, tenths in the hover
                 figCol = rowLat < sbplus::kLatE2ERttGreenMs ? latGoodColor : rowLat < sbplus::kLatE2ERttYellowMs ? latWarnColor : latBadColor;
-                tip << "Latency to " << peerName << " and back: " << String(rowLat, 1) << " ms\n"
-                    << "Your audio reaches them in " << String(oneUp, 1) << " ms, theirs reaches you in " << String(oneDn, 1) << " ms\n";
+                card.total(sbMs1(rowLat), figCol.withAlpha(1.0f), "LATENCY TO " + peerName.toUpperCase() + " AND BACK");
+                card.row("Your audio reaches them in", sbMs1(oneUp));
+                card.row("Theirs reaches you in", sbMs1(oneDn));
+                card.bar();
                 const float netMs = (sRtt >= 0.0f && prtt >= 0.0f) ? sRtt + prtt : -1.0f;   // Both links to the hub, there and back
-                if (netMs >= 0.0f && e2eUp + e2eDn >= netMs)
-                    tip << "Network " << String(netMs, 1) << " ms\nHub and receive buffers " << String(e2eUp + e2eDn - netMs, 1) << " ms\n";
-                else
-                    tip << "Network and buffers " << String(e2eUp + e2eDn, 1) << " ms\n";
-                tip << (!haveMine ? String("Your audio interface not known")
-                        : myExact ? "Your audio interface " + String(myIn + myOut, 1) + " ms"
-                                  : "Your audio interface about " + String(myIn + myOut, 1) + " ms (buffer only)") << "\n"
-                    << (haveTheirs ? "Their audio interface " + String(theirIface, 1) + " ms" : String("Their audio interface not known")) << "\n";
+                if (netMs >= 0.0f && e2eUp + e2eDn >= netMs) {
+                    card.row("Network", sbMs1(netMs), kTipNet, netMs);
+                    card.row("Hub and receive buffers", sbMs1(e2eUp + e2eDn - netMs), kTipHubBuf, e2eUp + e2eDn - netMs);
+                } else {
+                    card.row("Network and buffers", sbMs1(e2eUp + e2eDn), kTipNet, e2eUp + e2eDn);
+                }
+                String ifSub, ifHint;
+                const bool ifDetail = ownInterfaceDetail(haveMine ? myIn + myOut : -1.0f, ifSub, ifHint);
+                if (haveMine)        card.row("Your audio interface", sbMs1(myIn + myOut), kTipIface, myIn + myOut);
+                else if (ifDetail)   card.row("Your audio interface", String::fromUTF8("\xe2\x80\x94"), kTipIface, 0.0f);
+                else                 card.row("Your audio interface", "not known", kTipIface, 0.0f);
+                if (ifDetail) card.sub(ifSub);
+                if (ifHint.isNotEmpty()) card.sub(ifHint);
+                if (haveTheirs) card.row("Their audio interface", sbMs1(theirIface), kTipTheirIface, theirIface);
+                else            card.row("Their audio interface", "not known", kTipTheirIface, 0.0f);
             } else {
-                tip << TRANS("Waiting for the hub's latency report") << "\n";
+                card.para(TRANS("Waiting for the hub's latency report"));
             }
-            tip << "Drops: " << String(rowRecent) << " in the last minute, " << String(rowDropped) << " since they joined\n"
-                << "Their audio to you " << sbplus::rateText(recvrate * 8.0);
-            if (pup >= 0.0f) tip << ", they send " << sbplus::rateText(pup * 1.0e3) << " to the hub";
+            card.divider();
+            card.dot((rowRecent < 5 ? latGoodColor : rowRecent <= 20 ? latWarnColor : latBadColor).withAlpha(1.0f),
+                     "Drops: " + String(rowRecent) + " in the last minute, " + String(rowDropped) + " since they joined");
+            {
+                String rates = "Their audio to you " + sbplus::rateText(recvrate * 8.0);
+                if (pup >= 0.0f) rates << ", they send " << sbplus::rateText(pup * 1.0e3) << " to the hub";
+                card.foot(rates);
+            }
             if (payloadrate >= 0.0 && recvrate > 0.0 && payloadrate < 0.5 * recvrate)
-                tip << "\nMostly packet headers: their channels are silent";
+                card.foot("Mostly packet headers: their channels are silent");
+            const String& tip = card.s;
             auto* rlab = pvf->recvActualBitrateLabel.get();
             const String dot = String::fromUTF8("\xe2\x97\x8f");
             const String latWord = "  " + TRANS("Latency") + " ";
@@ -2956,12 +3039,11 @@ void PeersContainerView::updatePeerViews(int specific)
                 }
                 pvf->statusNoteLabel->setVisible(rowMuteText.isNotEmpty() && rlab->isVisible());
             }
-            if (rlab->getTooltip() != tip) {
+            if (sbSetRichTip(*rlab, tip)) {
                 rlab->setInterceptsMouseClicks(true, false);
-                rlab->setTooltip(tip);
                 // Test aid (SB_UI_SHOTS=<folder>): the row line and its hover text, as text
                 static const String shots = SystemStats::getEnvironmentVariable("SB_UI_SHOTS", {});
-                if (shots.isNotEmpty()) File(shots).getChildFile("row-" + File::createLegalFileName(peerName) + ".txt").replaceWithText(plain + (rowMuteText.isNotEmpty() ? String::fromUTF8("  \xc2\xb7  ") + rowMuteText : String()) + "\n---\n" + tip + "\n");
+                if (shots.isNotEmpty()) File(shots).getChildFile("row-" + File::createLegalFileName(peerName) + ".txt").replaceWithText(plain + (rowMuteText.isNotEmpty() ? String::fromUTF8("  \xc2\xb7  ") + rowMuteText : String()) + "\n---\n" + SonoLookAndFeel::tipPlainText(tip) + "\n");
             }
         }
         else if (latinfo.legacy && !latinfo.isreal) {

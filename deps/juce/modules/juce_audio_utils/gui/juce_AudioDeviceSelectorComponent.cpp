@@ -881,10 +881,19 @@ private:
         const int hubMin = sonobusPlusHubMinBlockSize();
         int greyed = 0;
        #endif
+       #if SONOBUSPLUS_BUILD
+        // Sizes above 512 samples are not offered (too much delay to play together); a device whose smallest
+        // size is larger still shows that one, and the size in use is always listed.
+        const auto sizes = currentDevice->getAvailableBufferSizes();
+        int smallest = 0;
+        for (auto bs : sizes) if (bs >= 16 && (smallest == 0 || bs < smallest)) smallest = bs;
+        const int inUse = currentDevice->getCurrentBufferSizeSamples();
+       #endif
         for (auto bs : currentDevice->getAvailableBufferSizes())
         {
            #if SONOBUSPLUS_BUILD
             if (bs < 16) continue;
+            if (bs > 512 && bs != smallest && bs != inUse) continue;
            #endif
             bufferSizeDropDown->addItem (String (bs) + " samples (" + String (bs * 1000.0 / currentRate, 1) + " ms)", bs);
            #if SONOBUSPLUS_BUILD

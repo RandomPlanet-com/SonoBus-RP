@@ -21,6 +21,7 @@ typedef int socklen_t;
 #include <errno.h>
 #endif
 
+#include <atomic>
 #include <cstring>
 #include <string>
 
@@ -114,7 +115,9 @@ int socket_errno();
 
 int socket_set_nonblocking(int socket, int nonblocking);
 
-int socket_connect(int socket, const ip_address& addr, float timeout);
+// the optional flag ends the wait early when it becomes true
+int socket_connect(int socket, const ip_address& addr, float timeout,
+                   const std::atomic<bool> *cancel = nullptr);
 
 } // net
 } // aoo

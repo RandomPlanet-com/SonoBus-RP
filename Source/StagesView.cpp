@@ -679,7 +679,9 @@ public:
 
     void itemClicked(const juce::MouseEvent& e) override {
         if (kind != info || stage.test || ! link.contains(e.getPosition())) return;
-        const juce::URL url = juce::URL("sonobusrp://" + stage.host + ":" + juce::String(stage.port) + "/").withParameter("g", stage.name);
+        // A web link is clickable everywhere; its page hands the stage to the app.
+        const juce::URL url = juce::URL("https://stages.randomplanet.com/join")
+                                  .withParameter("s", stage.host + ":" + juce::String(stage.port)).withParameter("g", stage.name);
         juce::SystemClipboard::copyTextToClipboard(url.toString(true));
         owner.mCopiedKey = copyKey();
         owner.mCopiedUntil = juce::Time::getMillisecondCounter() + 2500;
@@ -753,14 +755,15 @@ StagesView::StagesView()
     auto minFor = [&headFont](const juce::String& title, int base) { return juce::jmax(base, SbTextFit::textWidth(headFont, title) + 8 + 14 + 2); };
     const int pingMin = juce::jmax(minFor(TRANS("Ping"), 66), SbTextFit::textWidth(juce::Font(14.5f * fontScale()), TRANS("no answer")) + 10 + 2);
     mHeader.addColumn({}, colOpen, kIndent, kIndent, kIndent, fixed);
-    mHeader.addColumn(TRANS("Stage"), colStage, 280, minFor(TRANS("Stage"), 130), -1, normal);
+    // In a wide window the extra width goes to About, then Stage; the short columns stop at a sensible width.
+    mHeader.addColumn(TRANS("Stage"), colStage, 280, minFor(TRANS("Stage"), 130), 400, normal);
     mHeader.addColumn(TRANS("About"), colAbout, 300, minFor(TRANS("About"), 80), -1, normal);
-    mHeader.addColumn(TRANS("City"), colCity, 150, minFor(TRANS("City"), 70), -1, normal);
-    mHeader.addColumn(TRANS("Country"), colCountry, 80, minFor(TRANS("Country"), 60), -1, normal);
-    mHeader.addColumn(TRANS("Genre"), colGenre, 130, minFor(TRANS("Genre"), 70), -1, normal);
-    mHeader.addColumn(TRANS("Players"), colPlayers, 84, minFor(TRANS("Players"), 66), -1, normal);
-    mHeader.addColumn(TRANS("Ping"), colPing, 90, pingMin, -1, normal);
-    mHeader.addColumn(TRANS("Version"), colVersion, 140, minFor(TRANS("Version"), 80), -1, normal);
+    mHeader.addColumn(TRANS("City"), colCity, 150, minFor(TRANS("City"), 70), 190, normal);
+    mHeader.addColumn(TRANS("Country"), colCountry, 80, minFor(TRANS("Country"), 60), 100, normal);
+    mHeader.addColumn(TRANS("Genre"), colGenre, 130, minFor(TRANS("Genre"), 70), 160, normal);
+    mHeader.addColumn(TRANS("Players"), colPlayers, 84, minFor(TRANS("Players"), 66), 100, normal);
+    mHeader.addColumn(TRANS("Ping"), colPing, 90, pingMin, juce::jmax(pingMin, 110), normal);
+    mHeader.addColumn(TRANS("Version"), colVersion, 140, minFor(TRANS("Version"), 80), 170, normal);
 
     // Player table: number columns as wide as their widest caption or value, the instrument column at least its caption
     {

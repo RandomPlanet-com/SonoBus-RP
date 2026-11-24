@@ -504,6 +504,7 @@ private:
             Error
         };
         
+        int connectKind = 0;   // ConnectEvent: 0 = the user's connect, 1 = an automatic attempt, 2 = its last one
         ClientEvent() : type(None) {}
         ClientEvent(Type type_, const String & mesg) : type(type_), success(true), message(mesg) {}
         ClientEvent(Type type_, bool success_, const String & mesg) : type(type_), success(success_), message(mesg) {}
@@ -537,6 +538,7 @@ private:
     Array<SBChatEvent> newChatEvents;
     Atomic<bool>  haveNewChatEvents  { false };
     Atomic<bool>  mWelcomeArrived  { false };
+    bool mLanHintShown = false;   // the Local Network hint is shown once per run
     // The join lines wait a few seconds for the stage's welcome, which then goes first and replaces "Joined Stage"
     Array<SBChatEvent> mJoinHold;
     uint32 mJoinHoldGen = 0;
@@ -722,7 +724,10 @@ private:
     class CustomTooltipWindow : public TooltipWindow
     {
     public:
-        CustomTooltipWindow(SonobusAudioProcessorEditor * parent_, Component * viewparent) : TooltipWindow(viewparent), parent(parent_) {}
+        CustomTooltipWindow(SonobusAudioProcessorEditor * parent_, Component * viewparent) : TooltipWindow(viewparent), parent(parent_)
+        {
+            setOpaque(false);   // rounded card with a shadow
+        }
         virtual ~CustomTooltipWindow() {
             if (parent) {
                 // reset our smart pointer without a delete! someone else is deleting it
@@ -735,7 +740,13 @@ private:
             if (parent->popTip && parent->popTip->isShowing()) {
                 return {};
             }
-            return TooltipWindow::getTipFor(c);
+            const String tip = TooltipWindow::getTipFor(c);
+            // A component may carry a rich card for its tooltip (its own tooltip text stays plain)
+            if (tip.isNotEmpty()) {
+                const String rich = c.getProperties()["sbRichTip"].toString();
+                if (rich.isNotEmpty()) return rich;
+            }
+            return tip;
         }
                 
         SonobusAudioProcessorEditor * parent;

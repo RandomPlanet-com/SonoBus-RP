@@ -354,7 +354,7 @@ public:
     void setHubPeerUsername(const String& name) { mHubPeerUsername = name; sbApplyPeerFilter(); sbRefreshRelayedFlags(); }
     void sbApplyPeerFilter();
     void sbRefreshRelayedFlags();   // Recompute RemotePeer::relayedViaHub after a hub-name change
-    void sbScheduleLaunchRetry();   // Retry the last connection every 30 s until it succeeds
+    void sbScheduleLaunchRetry();   // Retry the last connection until it succeeds or the rejoin gives up
     // Launch connect race: set by the app when -c/-g asks for a connect at launch; every
     // auto-reconnect-to-most-recent launch attempt bails while set. Cleared by sbLaunchConnectFailed().
     void setLaunchConnectRequested(bool flag) { mLaunchConnectRequested.store(flag); }
@@ -366,7 +366,24 @@ public:
     // Auto paths keep their own chains.
     bool connectToServerUser(const String & host, int port, const String & username, const String & passwd);
     int mUserConnectRetriesLeft = 0;
+    // The user always wins: a user connect ends any automatic rejoin (the attempt under way and its retries).
+    // Returns true when an automatic attempt was under way.
+    bool sbCancelAutoConnect();
+    // A failed automatic attempt of the launch rejoin; true when it has now given up (about 3 minutes of failures).
+    bool sbAutoRejoinGaveUp();
+    String sbAutoRejoinGaveUpText() const;
+    // What the connect result being reported belongs to: 0 = a user connect, 1 = an automatic attempt,
+    // 2 = an automatic attempt that was the last one (the message says so). Valid inside aooClientConnected().
+    int sbConnectEventKind() const { return mConnectEventKind.load(); }
+    bool mAutoConnectCall = false;                         // message thread: the connect being started is automatic
+    std::atomic<bool> mConnectIsAuto { false };            // the last connect the library accepted was automatic
+    std::atomic<bool> mAutoAttemptActive { false };        // ... and has no result yet
+    std::atomic<bool> mDropStaleConnectResults { false }; // between a cancel and the next accepted connect
+    std::atomic<int> mConnectEventKind { 0 };
+    std::atomic<double> mAutoFirstFailMs { 0.0 };          // first failure of the launch rejoin, 0 = none
+    std::atomic<uint32_t> mConnectStartMs { 0 };
     std::atomic<bool> mLaunchConnectRequested { false };
+    std::atomic<bool> mLanHintPending { false };
     bool mLaunchRetryArmed = false;   // Hosted mode = UDP-peer only with the hub (see aoo iclient::set_peer_filter)
     String getHubPeerUsername() const { return mHubPeerUsername; }
     // The address the hub told us to share
@@ -871,6 +888,11 @@ public:
     // misc settings
     bool getSlidersSnapToMousePosition() const { return mSliderSnapToMouse; }
     void setSlidersSnapToMousePosition(bool flag) {  mSliderSnapToMouse = flag; }
+    int getHostCallbackBlock() const;   // The host's real callback size: stable (30 equal callbacks), else the last one
+    // The hub is at this site but its local address did not answer (on a Mac: the app or the DAW lacks Local Network access)
+    bool takeLanBlockedHint() { return mLanHintPending.exchange(false); }
+    bool getWarnWifiAtStart() const { return mWarnWifiAtStart; }   // the app checks its setup once at launch (Wi-Fi, buffer, rate)
+    void setWarnWifiAtStart(bool flag) { mWarnWifiAtStart = flag; }
 
     bool getDisableKeyboardShortcuts() const { return mDisableKeyboardShortcuts; }
     void setDisableKeyboardShortcuts(bool flag) {  mDisableKeyboardShortcuts = flag; }
@@ -1752,7 +1774,6 @@ private:
     mutable String mPluginHostText; mutable bool mPluginHostTextDone = false;
     mutable String mPluginOsText;   // "Mac AU": the /sb/hxver system field in a plugin (platform + format)
     String mInstallId;              // random anonymous id of this install (32 hex), sent to a hub with /sb/hxver
-    int getHostCallbackBlock() const;   // The host's real callback size: stable (30 equal callbacks), else the last one
     std::atomic<int> mSbStableBlock{0}, mSbLastBlock{0};   // Written on the audio thread, relaxed
     float mHostIfaceInMs = -1.0f, mHostIfaceOutMs = -1.0f;
     int mHostIfaceMethod = 0;   // 0 none, 1 the devices of this process, 2 the one matching running device, 3 host buffer only
@@ -1924,6 +1945,7 @@ private:
    
     // misc
     bool mSliderSnapToMouse = true;
+    bool mWarnWifiAtStart = true;
     bool mDisableKeyboardShortcuts = false;
     bool mConfirmQuitDuringSession = true;
     VideoLinkInfo mVideoLinkInfo;

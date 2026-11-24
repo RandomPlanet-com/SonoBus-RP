@@ -362,6 +362,7 @@ static String defRecordDirKey("DefaultRecordDir");
 static String defRecordDirURLKey("DefaultRecordDirURL");
 static String lastBrowseDirKey("LastBrowseDir");
 static String sliderSnapKey("SliderSnapToMouse");
+static String warnWifiKey("WarnWifiAtStart");
 static String disableShortcutsKey("DisableKeyShortcuts");
 static String confirmQuitDuringSessionKey("ConfirmQuitDuringSession");
 static String peerDisplayModeKey("PeerDisplayMode");
@@ -2308,6 +2309,7 @@ bool SonobusAudioProcessor::connectToServer(const String & hostAsAsked, int port
         if (sbLanRouteFor(hostAsAsked, portAsAsked, lanHost, lanPort)) {
             StreamingSocket probe;
             if (probe.connect(lanHost, lanPort, 300)) { host = lanHost; port = lanPort; }
+            else mLanHintPending = true;   // at the hub's site, but the local address does not answer
             probe.close();
             if (sbDiagOn()) fprintf(stderr, "[SB-LANROUTE] %s -> %s:%d %s\n", mRouteTypedKey.toRawUTF8(), lanHost.toRawUTF8(), lanPort,
                                     host == lanHost ? "(local)" : "(no answer: public address)");
@@ -2337,6 +2339,10 @@ bool SonobusAudioProcessor::connectToServer(const String & hostAsAsked, int port
 
     if (retval >= 0) {
         mServerConnectInFlight = 1;
+        mConnectStartMs = Time::getMillisecondCounter();
+        mConnectIsAuto = mAutoConnectCall;
+        mAutoAttemptActive = mAutoConnectCall;
+        mDropStaleConnectResults = false;
     } else {
         if (!connectWasInFlight) mServerConnectInFlight = 0;   // a refused second call leaves the first one in flight
         DBG("Error connecting to server: " << retval);
@@ -2373,12 +2379,55 @@ bool SonobusAudioProcessor::connectToServerUser(const String & host, int port, c
     mUserConnectRetriesLeft = 10;
     mRemovedByHost = false;
     if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] user connect %s:%d as '%s' (connected=%d inflight=%d)\n", host.toRawUTF8(), port, username.toRawUTF8(), mIsConnectedToServer ? 1 : 0, mServerConnectInFlight.get());
+    if (sbCancelAutoConnect()) {
+        // The cancelled attempt needs a moment to unwind; the user's connect follows it (and retries as usual).
+        sbAfter(150, [this, host, port, username, passwd]() { if (!mIsConnectedToServer) connectToServer(host, port, username, passwd); });
+        return true;
+    }
     return connectToServer(host, port, username, passwd);
+}
+
+bool SonobusAudioProcessor::sbCancelAutoConnect()
+{
+    const bool wasActive = mAutoAttemptActive.exchange(false);
+    // The launch rejoin stands down for good, unless a command-line connect owns the launch (it may still fall back).
+    if (!mLaunchConnectRequested.load()) mInitialAutoReconnectDone = true;
+    mReconnectTimer.stopTimer();
+    mRecoveringFromServerLoss = false;
+    mPendingReconnect = false;
+    mAutoFirstFailMs = 0.0;
+    if (wasActive) {
+        mDropStaleConnectResults = true;   // a result of the cancelled attempt that is already on its way
+        mServerConnectInFlight = 0;
+        if (mAooClient) mAooClient->cancel_connect();
+        if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] user connect cancelled the automatic attempt in flight\n");
+    }
+    return wasActive;
+}
+
+bool SonobusAudioProcessor::sbAutoRejoinGaveUp()
+{
+    const double giveUpAfterMs = 180000.0;
+    const double now = Time::getMillisecondCounterHiRes();
+    const double first = mAutoFirstFailMs.load();
+    if (first <= 0.0) { mAutoFirstFailMs = now; return false; }
+    if (now - first < giveUpAfterMs) return false;
+    mInitialAutoReconnectDone = true;   // every queued launch retry bails; the setting stays, the next launch tries again
+    mAutoFirstFailMs = 0.0;
+    if (sbDiagOn()) fprintf(stderr, "[SB-CONNECT] automatic rejoin gave up after %.0f s of failures\n", (now - first) * 1e-3);
+    return true;
 }
 
 // Launch connect race — the command-line -c/-g connect marks itself (setLaunchConnectRequested)
 // and every auto-reconnect-to-most-recent launch attempt bails while the mark is set (and after it succeeded, via
 // mInitialAutoReconnectDone). If the command-line connect fails, clear the mark so reconnect-last can proceed.
+String SonobusAudioProcessor::sbAutoRejoinGaveUpText() const
+{
+    String stage = mPendingReconnectInfo.groupName;
+    if (stage.isEmpty()) stage = mPendingReconnectInfo.serverHost + ":" + String(mPendingReconnectInfo.serverPort);
+    return TRANS("Could not reach STAGENAME; stopped trying to reconnect.").replace("STAGENAME", stage);
+}
+
 void SonobusAudioProcessor::sbLaunchConnectFailed(const char* why)
 {
     if (!mLaunchConnectRequested.exchange(false)) return;
@@ -13539,8 +13588,18 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
         {
             aoonet_client_group_event *e = (aoonet_client_group_event *)events[i];
 
+            if (mDropStaleConnectResults.load()) {   // the attempt the user's connect replaced
+                if (e->result > 0 && mAooClient) mAooClient->disconnect();   // it got through after all: not wanted
+                break;
+            }
+            const bool wasAuto = mConnectIsAuto.load();
+            mAutoAttemptActive = false;
+            int eventKind = wasAuto ? 1 : 0;
+            String eventMsg = String::fromUTF8(e->errormsg);
+
             if (e->result > 0){
                 DBG("Connected to server!");
+                mAutoFirstFailMs = 0.0;
                 mIsConnectedToServer = true;
                 mSessionConnectionStamp = Time::getMillisecondCounterHiRes();
                 // Latch initial auto-reconnect success so any queued retry
@@ -13566,6 +13625,11 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 // mInitialAutoReconnectDone so we don't keep retrying after a
                 // successful connect that subsequently dropped (those are
                 // handled by mReconnectTimer / reconnect-after-server-loss).
+                // A stage that never answers is given up on after a while, with one quiet line.
+                if (wasAuto && !mInitialAutoReconnectDone.load() && sbAutoRejoinGaveUp()) {
+                    eventKind = 2;
+                    eventMsg = sbAutoRejoinGaveUpText();
+                }
                 if (mPendingReconnect && getAutoReconnectToLast()
                     && !mInitialAutoReconnectDone.load()) {
                     for (int delayMs : {5000, 10000, 20000, 40000}) {
@@ -13580,9 +13644,9 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                             reconnectToMostRecent();
                         });
                     }
-                    // A player launched while the hub is down keeps trying every 30 s until
-                    // connected or the user turns auto-reconnect off; a hub that is late, rebooting
-                    // or power-cycled is normal.
+                    // A player launched while the hub is down keeps trying until connected, until the
+                    // user connects somewhere or turns auto-reconnect off, or until the rejoin gives up;
+                    // a hub that is late or rebooting is normal.
                     if (!mLaunchRetryArmed) {
                         mLaunchRetryArmed = true;
                         sbScheduleLaunchRetry();
@@ -13610,13 +13674,17 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 mRecoveringFromServerLoss = false;
             }
             
-            clientListeners.call(&SonobusAudioProcessor::ClientListener::aooClientConnected, this, e->result > 0, String::fromUTF8(e->errormsg));
+            mConnectEventKind = eventKind;
+            clientListeners.call(&SonobusAudioProcessor::ClientListener::aooClientConnected, this, e->result > 0, eventMsg);
             
             break;
         }
         case AOONET_CLIENT_DISCONNECT_EVENT:
         {
             aoonet_client_group_event *e = (aoonet_client_group_event *)events[i];
+            if (e->result == 0 && mDropStaleConnectResults.load()) break;   // the attempt the user's connect replaced
+            const bool wasAuto = mConnectIsAuto.load();
+            mAutoAttemptActive = false;
             if (e->result == 0){
                 DBG("Disconnected from server - " << String::fromUTF8(e->errormsg));
                 
@@ -13643,6 +13711,12 @@ int32_t SonobusAudioProcessor::handleClientEvents(const aoo_event ** events, int
                 String why = String::fromUTF8(e->errormsg);
                 String msg = TRANS("could not reach ") + (mServerEndpoint ? mServerEndpoint->ipaddr + ":" + String(mServerEndpoint->port) : String("the server"));
                 if (why.isNotEmpty()) msg << " (" << why << ")";
+                int eventKind = wasAuto ? 1 : 0;
+                if (wasAuto && !mInitialAutoReconnectDone.load() && sbAutoRejoinGaveUp()) {
+                    eventKind = 2;
+                    msg = sbAutoRejoinGaveUpText();
+                }
+                mConnectEventKind = eventKind;
                 clientListeners.call(&SonobusAudioProcessor::ClientListener::aooClientConnected, this, false, msg);
             }
 
@@ -20161,6 +20235,7 @@ void SonobusAudioProcessor::getStateInformationWithOptions(MemoryBlock& destData
 
     extraTree.setProperty(lastBrowseDirKey, mLastBrowseDir, nullptr);
     extraTree.setProperty(sliderSnapKey, mSliderSnapToMouse, nullptr);
+    extraTree.setProperty(warnWifiKey, mWarnWifiAtStart, nullptr);
     extraTree.setProperty(disableShortcutsKey, mDisableKeyboardShortcuts, nullptr);
     extraTree.setProperty(confirmQuitDuringSessionKey, mConfirmQuitDuringSession, nullptr);
     extraTree.setProperty(peerDisplayModeKey, var((int)mPeerDisplayMode), nullptr);
@@ -20448,6 +20523,7 @@ void SonobusAudioProcessor::setStateInformationWithOptions (const void* data, in
             setLastBrowseDirectory(extraTree.getProperty(lastBrowseDirKey, mLastBrowseDir));
 #endif
             setSlidersSnapToMousePosition(extraTree.getProperty(sliderSnapKey, mSliderSnapToMouse));
+            setWarnWifiAtStart(extraTree.getProperty(warnWifiKey, mWarnWifiAtStart));
             setDisableKeyboardShortcuts(extraTree.getProperty(disableShortcutsKey, mDisableKeyboardShortcuts));
             setConfirmQuitDuringSession(extraTree.getProperty(confirmQuitDuringSessionKey, mConfirmQuitDuringSession));
             setPeerDisplayMode((PeerDisplayMode)(int)extraTree.getProperty(peerDisplayModeKey, (int)mPeerDisplayMode));
@@ -20910,6 +20986,9 @@ bool SonobusAudioProcessor::reconnectToMostRecent()
             recents.size() ? recents.getReference(0).userName.toRawUTF8() : "-", getAutoReconnectToLast() ? 1 : 0, isConnectedToServer() ? 1 : 0,
             mServerConnectInFlight.get(), mPendingReconnect ? 1 : 0);
 
+    // Never on top of a connect that is under way (an attempt with no result after 30 s counts as lost).
+    if (mServerConnectInFlight.get() != 0 && Time::getMillisecondCounter() - mConnectStartMs.load() < 30000u) return false;
+
     if (recents.size() > 0) {
         const auto & info = recents.getReference(0);
 
@@ -20917,7 +20996,9 @@ bool SonobusAudioProcessor::reconnectToMostRecent()
             DBG("Reconnecting to server and group: " << info.groupName);
             mPendingReconnectInfo = info;
             mPendingReconnect = true;
+            mAutoConnectCall = true;
             bool started = connectToServer(info.serverHost, info.serverPort, info.userName, info.userPassword);
+            mAutoConnectCall = false;
             if (!started) {
                 // No attempt is in flight, so no CONNECT
                 // event will clear this flag — leaving it set gates the

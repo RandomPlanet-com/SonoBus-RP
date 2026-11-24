@@ -120,6 +120,7 @@ publicGroupsListModel(this)
     mConnectTab->setOutline(0);
     mConnectTab->setTabBarDepth(36);
     mConnectTab->getTabbedButtonBar().setMinimumTabScaleFactor(0.1f);
+    mConnectTab->getTabbedButtonBar().getProperties().set("sbFillTabs", true);   // the tabs span the column evenly
     mConnectTab->getTabbedButtonBar().setColour(TabbedButtonBar::frontTextColourId, Colour::fromFloatRGBA(0.4, 0.8, 1.0, 1.0));
     mConnectTab->getTabbedButtonBar().setColour(TabbedButtonBar::frontOutlineColourId, Colour::fromFloatRGBA(0.4, 0.8, 1.0, 0.5));
 
@@ -1181,7 +1182,7 @@ void ConnectView::resized()  {
     mainBox.performLayout(getLocalBounds().reduced(2, 2));
     {   // In a wide window the tabs and what they show share one centred column
         const auto b = mConnectTab->getBounds();
-        const int maxW = roundToInt(1100.0f * SonoLookAndFeel::getFontScale());
+        const int maxW = roundToInt(1600.0f * SonoLookAndFeel::getFontScale());   // wide screens show more of each row
         if (b.getWidth() > maxW) mConnectTab->setBounds(b.withSizeKeepingCentre(maxW, b.getHeight()));
     }
 
@@ -1375,7 +1376,7 @@ bool ConnectView::copyInfoToClipboard(bool singleURL, String * retmessage)
     String hostport = mServerHostEditor->getText().trim();
 
     // In hub mode the link carries the hub's shareable address (public host + server port, from the hub hello), not
-    // the path this machine happened to dial, in the direct sonobus:// form, never the go.sonobus.net redirector.
+    // the path this machine happened to dial.
     const bool hosted = processor.isHostedMixModeEnabled();
     if (hosted && processor.isConnectedToServer()) {
         const String lh = processor.getHubLinkHost();
@@ -1397,38 +1398,25 @@ bool ConnectView::copyInfoToClipboard(bool singleURL, String * retmessage)
         groupPassword = currConnectionInfo.groupPassword;
     }
 
-    String urlstr1;
-    urlstr1 << String("sonobusrp://") << hostport << String("/");   // Our own URL scheme, so a link never opens the stock app
-    URL url(urlstr1);
-    URL url2("http://go.sonobus.net/sblaunch");
-
-    if (url.isWellFormed() && groupName.isNotEmpty()) {
-
-        url2 = url2.withParameter("s", hostport);
-
-        url = url.withParameter("g", groupName);
-        url2 = url2.withParameter("g", groupName);
-
-        if (groupPassword.isNotEmpty()) {
-            url = url.withParameter("p", groupPassword);
-            url2 = url2.withParameter("p", groupPassword);
-        }
+    // The invite is a web link, clickable everywhere; its page hands the stage to the app.
+    // A password goes after '#', which browsers do not send to the web server.
+    if (groupName.isNotEmpty()) {
+        URL url = URL("https://stages.randomplanet.com/join").withParameter("s", hostport).withParameter("g", groupName);
 
         if (processor.isConnectedToServer() && currConnectionInfo.groupIsPublic) {
             url = url.withParameter("public", "1");
-            url2 = url2.withParameter("public", "1");
         }
 
-        //message += url.toString(true);
-        //message += "\n\n";
+        String link = url.toString(true);
+        if (groupPassword.isNotEmpty()) {
+            link << "#p=" << URL::addEscapeChars(groupPassword, true);
+        }
 
-        //message += TRANS("Or share this link:") + "\n";
-        const URL& shareUrl = hosted ? url : url2;   // Direct link in hub mode
-        message += shareUrl.toString(true);
+        message += link;
         message += "\n";
 
         if (singleURL) {
-            message = shareUrl.toString(true);
+            message = link;
         }
         SystemClipboard::copyTextToClipboard(message);
 
@@ -2672,8 +2660,10 @@ bool ConnectView::attemptToPasteConnectionFromClipboard()
             }
         }
         else {
-            // look for go.sonobus.net/sblaunch  url
-            urlpart = clip.fromFirstOccurrenceOf("http://go.sonobus.net/sblaunch?", true, false);
+            // a web invite link, ours first
+            urlpart = clip.fromFirstOccurrenceOf("https://stages.randomplanet.com/join?", true, true);
+            if (urlpart.isEmpty()) urlpart = clip.fromFirstOccurrenceOf("https://stages.randomplanet.com/join/?", true, true);
+            if (urlpart.isEmpty()) urlpart = clip.fromFirstOccurrenceOf("http://go.sonobus.net/sblaunch?", true, false);
             if (urlpart.isEmpty()) urlpart = clip.fromFirstOccurrenceOf("https://go.sonobus.net/sblaunch?", true, false);
 
             if (urlpart.isNotEmpty()) {
@@ -2697,8 +2687,7 @@ bool ConnectView::attemptToPasteConnectionFromClipboard()
 
 bool ConnectView::handleSonobusURL(const URL & url)
 {
-    // look for either  http://go.sonobus.net/sblaunch?  style url
-    // or sonobus://host:port/? style
+    // Either a web invite link (host:port in "s") or the scheme://host:port/? form
 
     auto & pnames = url.getParameterNames();
     auto & pvals = url.getParameterValues();
@@ -2712,6 +2701,8 @@ bool ConnectView::handleSonobusURL(const URL & url)
 
         if ((ind = pnames.indexOf("p", true)) >= 0) {
             currConnectionInfo.groupPassword = pvals[ind];
+        } else if (URL::removeEscapeChars(url.getAnchorString()).startsWith("#p=")) {
+            currConnectionInfo.groupPassword = URL::removeEscapeChars(url.getAnchorString()).substring(3);   // web invite: the password follows '#'
         } else {
             currConnectionInfo.groupPassword = "";
         }
@@ -2747,6 +2738,12 @@ bool ConnectView::handleSonobusURL(const URL & url)
                 currConnectionInfo.serverPort = DEFAULT_SERVER_PORT;
             }
         }
+    }
+
+    // A link without a password (a shared stage link) uses the one remembered for that stage, as the Stages list does
+    if (currConnectionInfo.groupPassword.isEmpty() && currConnectionInfo.groupName.isNotEmpty()) {
+        const String saved = processor.getSavedStagePassword(currConnectionInfo.serverHost, currConnectionInfo.serverPort, currConnectionInfo.groupName);
+        if (saved.isNotEmpty()) currConnectionInfo.groupPassword = saved;
     }
 
     return true;

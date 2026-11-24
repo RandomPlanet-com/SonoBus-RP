@@ -29,18 +29,200 @@ float SonoLookAndFeel::fontScale = 1.0f;
 
 //==============================================================================
 
-static TextLayout sonoLayoutTooltipText (const String& text, Colour colour) noexcept
+// Tooltips are one dark card. A tip that starts with sbTipMark is a rich card: one element per line,
+// fields split by sbTipSep:
+//   T|total|colour|caption        big figure and a small caption on the right
+//   B                             bar, built from the rows that carry a weight
+//   R|label|value|colour|weight   row: label left, value right; a colour draws a swatch, a weight joins the bar
+//   S|text                        dim line under the row above
+//   D                             divider
+//   F|colour|text                 dim line, led by a dot when a colour is given
+//   P|text                        paragraph
+// Colours are hex rgb. Anything without the mark is plain text.
+namespace
 {
-    const float tooltipFontSize = 13.0f;
-    const int maxToolTipWidth = 900;   // Wide enough that a player-row hover never wraps
+    const float sbTipFontSize = 14.0f;
+    const int sbTipShadow = 5;          // room around the card for its shadow
+    const int sbTipPlainMaxText = 314;  // 340 px card less its padding
+    const int sbTipPadX = 13, sbTipPadY = 9;
+    const int sbTipRichPadX = 18, sbTipRichPadY = 14;
+    const int sbTipRichMinW = 360, sbTipRichMaxW = 420;
 
-    AttributedString s;
-    s.setJustification (Justification::centred);
-    s.append (text, Font (tooltipFontSize, Font::bold), colour);
+    const Colour sbTipEdge (0xff2e3638), sbTipText (0xffdfe5e6), sbTipDim (0xff8a9496), sbTipFoot (0xffaab3b5);
 
-    TextLayout tl;
-    tl.createLayout (s, (float) maxToolTipWidth);   // Explicit line breaks only, no balancing
-    return tl;
+    bool sbTipIsRich (const String& text)   { return text.isNotEmpty() && text[0] == SonoLookAndFeel::sbTipMark; }
+
+    Colour sbTipColour (const String& hex, Colour fallback)
+    {
+        return hex.isEmpty() ? fallback : Colour ((uint32) hex.getHexValue32() | 0xff000000u);
+    }
+
+    TextLayout sbTipWrapped (const String& text, const Font& font, Colour colour, float maxWidth)
+    {
+        AttributedString s;
+        s.setJustification (Justification::topLeft);
+        s.setWordWrap (AttributedString::byWord);
+        s.append (text, font, colour);
+        TextLayout tl;
+        tl.createLayout (s, jmax (20.0f, maxWidth));
+        return tl;
+    }
+
+    // Lays a rich tip out; draws it when g is given. innerW <= 0: the width is found from the content.
+    // Returns the size of the content (without padding).
+    ::juce::Rectangle<float> sbTipRichLayout (const String& text, Graphics* g, float innerW, float x0, float y0)
+    {
+        StringArray lines;
+        lines.addLines (text.substring (1));
+
+        const Font rowFont (sbTipFontSize), totalFont (26.0f, Font::bold), footFont (13.0f), subFont (12.5f);
+        const Font capFont = Font (11.5f).withExtraKerningFactor (0.06f);
+        const float rowH = 23.0f, swatch = 8.0f, indentSw = 17.0f, gap = 24.0f, dotW = 15.0f;
+        const String sep = String::charToString (SonoLookAndFeel::sbTipSep);
+
+        struct Seg { Colour c; float w; };
+        Array<Seg> segs;
+        Array<StringArray> rows;
+        bool anySwatch = false;
+        float natural = 0.0f, segSum = 0.0f;
+        for (auto& l : lines)
+        {
+            StringArray f;
+            f.addTokens (l, sep, "");
+            while (f.size() < 5) f.add ({});
+            rows.add (f);
+            if (f[0] == "R" && f[3].isNotEmpty()) anySwatch = true;
+        }
+        for (auto& f : rows)
+        {
+            const String& k = f[0];
+            if (k == "T")       natural = jmax (natural, totalFont.getStringWidthFloat (f[1]) + gap + jmin (200.0f, capFont.getStringWidthFloat (f[3])));
+            else if (k == "R")
+            {
+                natural = jmax (natural, (f[3].isNotEmpty() ? indentSw : 0.0f) + rowFont.getStringWidthFloat (f[1]) + gap + rowFont.getStringWidthFloat (f[2]));
+                const float w = f[4].getFloatValue();
+                if (w > 0.0f) { segs.add ({ sbTipColour (f[3], sbTipDim), w }); segSum += w; }
+            }
+            else if (k == "S")  natural = jmax (natural, (anySwatch ? indentSw : 0.0f) + subFont.getStringWidthFloat (f[1]));
+            else if (k == "F")  natural = jmax (natural, (f[1].isNotEmpty() ? dotW : 0.0f) + footFont.getStringWidthFloat (f[2]));
+            else if (k == "P")  natural = jmax (natural, rowFont.getStringWidthFloat (f[1]));
+        }
+        const float W = innerW > 0.0f ? innerW
+                                      : jlimit ((float) (sbTipRichMinW - 2 * sbTipRichPadX), (float) (sbTipRichMaxW - 2 * sbTipRichPadX), std::ceil (natural));
+
+        float y = y0;
+        for (auto& f : rows)
+        {
+            const String& k = f[0];
+            if (k == "T")
+            {
+                const float h = 32.0f;
+                if (g != nullptr)
+                {
+                    const float tw = totalFont.getStringWidthFloat (f[1]);
+                    g->setFont (totalFont);
+                    g->setColour (sbTipColour (f[2], sbTipText));
+                    g->drawText (f[1], ::juce::Rectangle<float> (x0, y, W, h), Justification::bottomLeft, true);
+                    g->setFont (capFont);
+                    g->setColour (sbTipDim);
+                    g->drawText (f[3], ::juce::Rectangle<float> (x0 + tw + 12.0f, y, jmax (0.0f, W - tw - 12.0f), h - 4.0f), Justification::bottomRight, true);
+                }
+                y += h + 8.0f;
+            }
+            else if (k == "B")
+            {
+                if (segs.size() < 2 || segSum <= 0.0f) continue;
+                const float h = 9.0f;
+                if (g != nullptr)
+                {
+                    const ::juce::Rectangle<float> bar (x0, y, W, h);
+                    Path clip;
+                    clip.addRoundedRectangle (bar, h * 0.5f);
+                    Graphics::ScopedSaveState save (*g);
+                    g->reduceClipRegion (clip);
+                    float x = x0;
+                    for (auto& sgm : segs)
+                    {
+                        const float w = W * sgm.w / segSum;
+                        g->setColour (sgm.c);
+                        g->fillRect (::juce::Rectangle<float> (x, y, w + 0.5f, h));
+                        x += w;
+                    }
+                }
+                y += h + 10.0f;
+            }
+            else if (k == "R")
+            {
+                if (g != nullptr)
+                {
+                    const bool sw = f[3].isNotEmpty();
+                    if (sw)
+                    {
+                        g->setColour (sbTipColour (f[3], sbTipDim));
+                        g->fillRoundedRectangle (x0, y + (rowH - swatch) * 0.5f, swatch, swatch, 2.0f);
+                    }
+                    const float lx = x0 + (sw ? indentSw : 0.0f);
+                    const float vw = rowFont.getStringWidthFloat (f[2]) + 1.0f;
+                    g->setFont (rowFont);
+                    g->setColour (sbTipText);
+                    g->drawText (f[2], ::juce::Rectangle<float> (x0 + W - vw, y, vw, rowH), Justification::centredRight, false);
+                    g->drawText (f[1], ::juce::Rectangle<float> (lx, y, jmax (0.0f, x0 + W - vw - 8.0f - lx), rowH), Justification::centredLeft, true);
+                }
+                y += rowH;
+            }
+            else if (k == "S")
+            {
+                const float ind = anySwatch ? indentSw : 0.0f;
+                const TextLayout tl (sbTipWrapped (f[1], subFont, sbTipDim, W - ind));
+                if (g != nullptr) tl.draw (*g, ::juce::Rectangle<float> (x0 + ind, y - 2.0f, W - ind, tl.getHeight()));
+                y += tl.getHeight() + 2.0f;
+            }
+            else if (k == "D")
+            {
+                y += 7.0f;
+                if (g != nullptr) { g->setColour (sbTipEdge); g->fillRect (::juce::Rectangle<float> (x0, y, W, 1.0f)); }
+                y += 8.0f;
+            }
+            else if (k == "F")
+            {
+                const bool dot = f[1].isNotEmpty();
+                const float ind = dot ? dotW : 0.0f;
+                const TextLayout tl (sbTipWrapped (f[2], footFont, sbTipFoot, W - ind));
+                if (g != nullptr)
+                {
+                    if (dot) { g->setColour (sbTipColour (f[1], sbTipDim)); g->fillEllipse (x0, y + 5.0f, 8.0f, 8.0f); }
+                    tl.draw (*g, ::juce::Rectangle<float> (x0 + ind, y, W - ind, tl.getHeight()));
+                }
+                y += tl.getHeight() + 3.0f;
+            }
+            else if (k == "P")
+            {
+                const TextLayout tl (sbTipWrapped (f[1], rowFont, sbTipText, W));
+                if (g != nullptr) tl.draw (*g, ::juce::Rectangle<float> (x0, y, W, tl.getHeight()));
+                y += tl.getHeight() + 3.0f;
+            }
+        }
+        return { x0, y0, W, jmax (0.0f, y - y0 - 3.0f) };
+    }
+}
+
+String SonoLookAndFeel::tipPlainText (const String& tip)
+{
+    if (! sbTipIsRich (tip)) return tip;
+    StringArray lines, out;
+    lines.addLines (tip.substring (1));
+    const String sep = String::charToString (sbTipSep);
+    for (auto& l : lines)
+    {
+        StringArray f;
+        f.addTokens (l, sep, "");
+        while (f.size() < 4) f.add ({});
+        if (f[0] == "T")       out.add ((f[1] + "  " + f[3]).trim());
+        else if (f[0] == "R")  out.add ((f[1] + " " + f[2]).trim());
+        else if (f[0] == "S" || f[0] == "P") out.add (f[1]);
+        else if (f[0] == "F")  out.add (f[2]);
+    }
+    return out.joinIntoString ("\n");
 }
 
 static String sbElideEnd (const Font& f, const String& in, float w)
@@ -218,8 +400,9 @@ SonoLookAndFeel::SonoLookAndFeel(bool useUniversalFont) : mUseUniversalFont(useU
     setColour (BubbleComponent::backgroundColourId, Colour::fromFloatRGBA(0.25, 0.25, 0.25, 1.0));
     setColour (BubbleComponent::outlineColourId, Colour::fromFloatRGBA(0.4, 0.4, 0.4, 0.5));
     //setColour (TooltipWindow::textColourId, Colour(0xeecccccc));
-    setColour (TooltipWindow::textColourId, Colour(0xee222222));
-    setColour (TooltipWindow::backgroundColourId, Colour(0xeeffff99));
+    setColour (TooltipWindow::textColourId, Colour(0xffdfe5e6));
+    setColour (TooltipWindow::backgroundColourId, Colour(0xff1d2122));
+    setColour (TooltipWindow::outlineColourId, Colour(0xff2e3638));
 
     setColour (PopupMenu::backgroundColourId, Colour::fromFloatRGBA(0.2, 0.2, 0.2, 1.0));
     setColour (PopupMenu::highlightedBackgroundColourId, Colour::fromFloatRGBA(0.35, 0.35, 0.4, 1.0));
@@ -393,26 +576,51 @@ Typeface::Ptr SonoLookAndFeel::getTypefaceForFont (const Font& font)
 
 //==============================================================================
 ::juce::Rectangle<int> SonoLookAndFeel::getTooltipBounds (const ::juce::String& tipText, SbTipPoint screenPos, ::juce::Rectangle<int> parentArea)
-{   // Size the tooltip window from our own layout (JUCE's helper wraps at 400 px)
-    const TextLayout tl (sonoLayoutTooltipText (tipText, Colours::black));
-    const int w = (int) (tl.getWidth() + 16.0f), h = (int) (tl.getHeight() + 8.0f);
+{   // The card plus the room for its shadow
+    int w = 0, h = 0;
+    if (sbTipIsRich (tipText))
+    {
+        const auto r = sbTipRichLayout (tipText, nullptr, 0.0f, 0.0f, 0.0f);
+        w = (int) std::ceil (r.getWidth()) + 2 * sbTipRichPadX;
+        h = (int) std::ceil (r.getHeight()) + 2 * sbTipRichPadY;
+    }
+    else
+    {
+        const TextLayout tl (sbTipWrapped (tipText, Font (sbTipFontSize), sbTipText, (float) sbTipPlainMaxText));
+        w = (int) std::ceil (tl.getWidth()) + 2 * sbTipPadX;
+        h = (int) std::ceil (tl.getHeight()) + 2 * sbTipPadY;
+    }
+    w += 2 * sbTipShadow; h += 2 * sbTipShadow;
     return ::juce::Rectangle<int> (screenPos.x > parentArea.getCentreX() ? screenPos.x - (w + 12) : screenPos.x + 24,
                            screenPos.y > parentArea.getCentreY() ? screenPos.y - (h + 6)  : screenPos.y + 6, w, h).constrainedWithin (parentArea);
 }
 
 void SonoLookAndFeel::drawTooltip (Graphics& g, const String& text, int width, int height)
 {
-    Rectangle<int> bounds (width, height);
-    auto cornerSize = 5.0f;
+    const auto card = ::juce::Rectangle<int> (width, height).reduced (sbTipShadow).toFloat();
+    const float corner = 10.0f;
+
+    for (int i = sbTipShadow; i >= 1; --i)   // soft shadow, a little below the card
+    {
+        g.setColour (Colours::black.withAlpha (0.07f));
+        g.fillRoundedRectangle (card.expanded ((float) i - 1.0f).translated (0.0f, 1.5f), corner + (float) i - 1.0f);
+    }
 
     g.setColour (findColour (TooltipWindow::backgroundColourId));
-    g.fillRoundedRectangle (bounds.toFloat(), cornerSize);
-
+    g.fillRoundedRectangle (card, corner);
     g.setColour (findColour (TooltipWindow::outlineColourId));
-    g.drawRoundedRectangle (bounds.toFloat().reduced (0.5f, 0.5f), cornerSize, 1.0f);
+    g.drawRoundedRectangle (card.reduced (0.5f), corner, 1.0f);
 
-    sonoLayoutTooltipText (text, findColour (TooltipWindow::textColourId))
-        .draw (g, { static_cast<float> (width), static_cast<float> (height) });
+    if (sbTipIsRich (text))
+    {
+        const auto in = card.reduced ((float) sbTipRichPadX, (float) sbTipRichPadY);
+        sbTipRichLayout (text, &g, in.getWidth(), in.getX(), in.getY());
+    }
+    else
+    {
+        const auto in = card.reduced ((float) sbTipPadX, (float) sbTipPadY);
+        sbTipWrapped (text, Font (sbTipFontSize), findColour (TooltipWindow::textColourId), in.getWidth() + 1.0f).draw (g, in.withWidth (in.getWidth() + 1.0f));
+    }
 }
 
 Font SonoLookAndFeel::getMenuBarFont (MenuBarComponent& menuBar, int /*itemIndex*/, const String& /*itemText*/)
@@ -447,6 +655,10 @@ void SonoLookAndFeel::drawCallOutBoxBackground (CallOutBox& box, Graphics& g,
 
 int SonoLookAndFeel::getTabButtonBestWidth (TabBarButton& button, int depth)
 {
+    // A bar marked "sbFillTabs" shares its whole width evenly between its tabs (the Connect window)
+    auto& bar = button.getTabbedButtonBar();
+    if ((bool) bar.getProperties().getWithDefault ("sbFillTabs", false) && bar.getNumTabs() > 0 && bar.getWidth() > 0)
+        return bar.getWidth() / bar.getNumTabs();
     return 250; // 120;
 }
 

@@ -125,6 +125,8 @@ public:
 
     int32_t disconnect() override;
 
+    int32_t cancel_connect() override;
+
     int32_t group_join(const char *group, const char *pwd, bool is_public) override;
 
     int32_t group_leave(const char *group) override;
@@ -149,6 +151,8 @@ public:
     int try_connect(const std::string& host, int port);
 
     void do_disconnect(command_reason reason = command_reason::none, int error = 0);
+
+    void do_cancel_connect();
 
     void do_login();
 
@@ -224,6 +228,7 @@ private:
     spinlock event_lock_;
     // signal
     std::atomic<bool> quit_{false};
+    std::atomic<bool> cancel_connect_{false};
 #ifdef _WIN32
     HANDLE waitevent_ = 0;
     HANDLE sockevent_ = 0;
@@ -317,6 +322,13 @@ private:
         }
         command_reason reason;
         int error;
+    };
+
+    struct cancel_cmd : icommand
+    {
+        void perform(client &obj) override {
+            obj.do_cancel_connect();
+        }
     };
 
     struct login_cmd : icommand

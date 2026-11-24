@@ -428,6 +428,7 @@ protected:
     int64_t mHubBytesSentLast = -1, mHubBytesRecvLast = -1; uint32 mHubRateStampMs = 0;
     uint32 mHubDropsT[12] = {}; int64_t mHubDropsC[12] = {}; int mHubDropsN = 0;   // Drops-from-hub last-minute window
     uint32 mLinkJoinMs = 0; int64_t mLinkBase = -1;   // Link light: join time, and the drop count when its first 10 s ended
+    bool ownInterfaceDetail(float totalMs, String & sub, String & hint) const;   // The interface figure's parts as one line (buffer, converters); hint = advice for a large host buffer
     bool ownInterfaceMs(float & inMs, float & outMs, bool * exact = nullptr) const;   // Our audio interface, input and output with their buffers (ms); exact = false: buffer only
     // Hub header fields, kept so the line can be fitted again on a resize without new figures
     struct HubHeaderParts {
